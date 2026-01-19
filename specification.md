@@ -1,0 +1,14 @@
+# Background
+
+I want to build an autopilot for a failing yacht that uses a ML model to predict the behavior of the yacht and control it. The yacht is a Pogo1250, with a top speed of arround 20kn and a crusing speed of arround 10kn. It sails in both displacement and plaining mode. It is 12.5m long and 4m wide.
+
+# Goal
+The autopilot should be able to steer the yacht as well as or better than an experience human helms person. It should be able to learn from the human helms person and improve over time. Its should operate in 2 modes. One using the polar perfomance chary which predicts the bot speed for a given true wind angle and true wind speed, optimising for a specific task like steering upwind to aparent wind angle optimising for velocity made good into the wind or downwind to true wind angle optimising for velocity made good downwind. The other mode is to steer to a specific magnetic bearing. 
+
+# Harware
+As mentioned the autompilot should be able to run on a raspbery pi sized computer using the gpu if available. It will drive an HBridge mosfet controller through 2 PWM signals to drive a motor in both directions with a variable speed. It will sense the possition of the rudder using a potentiometer. It will read the output of a 9 dof sensor over a serial connection to a dedicated 9 dof sensor to determine precise heading and orientation at as high a frequency as the serial connection will allow. It will capture all other information required at lower frequency from a Canbus connection (RayMarine NMEA2000). This will include aparent wind angle and speed, speed through the water, heading, GPS possition, course over ground, speed over ground, depth, and other information required to make decisions. It will emit status updates to the Canbus connection using standard NMEA2000 messages, and any suitable proprietary messages. It will respond to commands from the Canbus connection using standard NMEA2000 messages, and any suitable proprietary messages. 
+
+# Software
+The autopilot will use a machine learning model to predict the behavior of the yacht. The model will be trained on data collected from the yacht. The model will be updated as the yacht sails. The model will be used to predict the behavior of the yacht in the future, and drive the rudder to achieve the desired behavior. Code should be written in python, and should be able to run on a raspbery pi sized computer using the gpu if available. 
+
+The model will be a reinforcement learning model. It will be trained to optimise for a specific task like steering upwind to aparent wind angle optimising for velocity made good into the wind or downwind to true wind angle optimising for velocity made good downwind. The model will be trained to optimise for a specific task like steering upwind to aparent wind angle optimising for velocity made good into the wind or downwind to true wind angle optimising for velocity made good downwind. 
