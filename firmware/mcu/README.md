@@ -1,6 +1,6 @@
 # IMU MCU Firmware
 
-ATtiny3226-based IMU processor with ICM-20948 and Madgwick AHRS filter.
+ATtiny3224-based IMU processor with ICM-20948 and Madgwick AHRS filter.
 
 ## Purpose
 
@@ -8,16 +8,20 @@ This firmware reads the ICM-20948 9-DoF IMU at 100Hz, runs a Madgwick sensor fus
 
 ## Hardware
 
-- **MCU**: ATtiny3226 @ 16MHz
+- **MCU**: ATtiny3224 @ 16MHz (14-pin SOIC)
 - **IMU**: ICM-20948 (accelerometer, gyroscope, magnetometer)
 - **Interface**: Serial (115200 baud) to Raspberry Pi
 
+The ATtiny3224 (14-pin) is used instead of ATtiny3226 (20-pin) for a smaller footprint. Both have identical flash (32KB), RAM (3KB), and peripherals.
+
 ### Connections
 
-| ATtiny3226 Pin | Function | Connection |
+| ATtiny3224 Pin | Function | Connection |
 |----------------|----------|------------|
+| PA0 | UPDI | Programming interface |
 | PA1 (SDA) | I2C Data | ICM-20948 SDA |
 | PA2 (SCL) | I2C Clock | ICM-20948 SCL |
+| PA3 | LED | Status indicator |
 | PB2 (TX) | Serial Out | Pi RX |
 | PB3 (RX) | Serial In | Pi TX |
 | VCC | Power | 3.3V |
@@ -97,11 +101,21 @@ Edit `src/config.h` to adjust:
 - Madgwick filter gain (beta)
 - Sensor ranges
 
-## Resource Usage (ATtiny3226)
+## Resource Usage (ATtiny3224)
 
 - Flash: ~20KB of 32KB
 - RAM: ~1.5KB of 3KB
 - CPU: ~50% at 100Hz update rate
+
+## Alternative: ATtiny3226
+
+The firmware also supports the ATtiny3226 (20-pin). Build with:
+
+```bash
+pio run -e attiny3226
+```
+
+Note: On ATtiny3226, the LED can optionally use PA7 instead of PA3.
 
 ## Files
 

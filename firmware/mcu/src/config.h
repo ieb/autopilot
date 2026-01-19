@@ -9,18 +9,29 @@
 #define CONFIG_H
 
 // ============================================================================
-// Pin Definitions for ATtiny3226
+// Pin Definitions for ATtiny3224 (14-pin package)
 // ============================================================================
+//
+// Available pins: PA0-PA3, PB0-PB3
+//
+// PA0 = UPDI (programming)
+// PA1 = SDA (I2C data)
+// PA2 = SCL (I2C clock)
+// PA3 = LED (status)
+// PB0 = Available
+// PB1 = Available
+// PB2 = TX (serial out)
+// PB3 = RX (serial in)
 
-// I2C pins (hardware I2C on ATtiny3226)
-// SDA = PA1 (pin 2)
-// SCL = PA2 (pin 3)
+// I2C pins (hardware I2C on ATtiny3224)
+// SDA = PA1 (pin 4)
+// SCL = PA2 (pin 5)
 
-// Serial TX = PA1 (alternate) or PB2 (default)
-// Using default UART on PB2/PB3
+// Serial TX = PB2 (default UART)
+// Serial RX = PB3 (default UART)
 
-// Optional LED for status indication
-#define LED_PIN PIN_PA7
+// Status LED for indication (PA3 on 14-pin package, PA7 not available)
+#define LED_PIN PIN_PA3
 
 // ============================================================================
 // I2C Addresses

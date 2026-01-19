@@ -283,8 +283,16 @@ public:
   float getQ3() { return q3; }
 
 private:
-  static constexpr float DEG_TO_RAD = 0.0174532925f;
-  static constexpr float RAD_TO_DEG = 57.2957795f;
+  // Use Arduino's DEG_TO_RAD and RAD_TO_DEG macros if available
+  // Otherwise define our own conversion constants
+  #ifndef DEG_TO_RAD
+  static constexpr float _DEG_TO_RAD = 0.0174532925f;
+  #define DEG_TO_RAD _DEG_TO_RAD
+  #endif
+  #ifndef RAD_TO_DEG
+  static constexpr float _RAD_TO_DEG = 57.2957795f;
+  #define RAD_TO_DEG _RAD_TO_DEG
+  #endif
 
   float beta;          // Algorithm gain
   float sampleFreq;    // Sample frequency in Hz

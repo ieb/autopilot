@@ -1,0 +1,41 @@
+[project]
+name = "autopilot"
+version = "0.1.0"
+description = "ML Yacht Autopilot"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.21.0",
+    "python-can>=4.0.0",
+    "pyserial>=3.5",
+    "tensorflow>=2.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+]
+rpi = [
+    # Raspberry Pi specific dependencies
+    "tflite-runtime>=2.10.0",
+    "RPi.GPIO",
+    "adafruit-circuitpython-ads1x15",
+]
+viz = [
+    "matplotlib>=3.5.0",
+]
+
+[project.scripts]
+autopilot = "src.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=src --cov-report=term-missing"
