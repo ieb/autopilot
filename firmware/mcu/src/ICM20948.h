@@ -2,8 +2,10 @@
  * ICM-20948 9-DoF IMU Driver
  * ==========================
  *
- * Lightweight driver for ATtiny3226 with limited resources.
+ * Lightweight driver for ATtiny series MCUs with limited resources.
  * Supports accelerometer, gyroscope, and magnetometer.
+ *
+ * Compatible with ATtiny3224, ATtiny3226, and similar megaAVR devices.
  */
 
 #ifndef ICM20948_H

@@ -1,0 +1,144 @@
+(kicad_sch (version 20230121) (generator eeschema)
+
+  (uuid e63e39d7-6ac0-4ffd-8aa3-1841a4541b55)
+
+  (paper "A4")
+
+  (title_block
+    (title "IMU Sensor Fusion Board")
+    (date "2026-01-20")
+    (rev "1.0")
+    (company "Autopilot Project")
+    (comment 1 "ATtiny3224 + ICM-20948 9-DoF IMU")
+    (comment 2 "100Hz Madgwick AHRS sensor fusion")
+    (comment 3 "Serial output to Raspberry Pi")
+  )
+
+  ;; ============================================================================
+  ;; TEXT ANNOTATIONS - Design Documentation
+  ;; ============================================================================
+
+  (text "IMU SENSOR FUSION BOARD - DESIGN NOTES\n=====================================\n\nThis board provides 9-DoF IMU data with onboard sensor fusion,\noffloading timing-critical processing from the Raspberry Pi.\n\nKey Features:\n- 100Hz attitude updates (heading, pitch, roll)\n- Madgwick AHRS filter for sensor fusion\n- NMEA-style serial output at 115200 baud\n- Magnetometer calibration support\n- Compact 20x20mm form factor"
+    (at 20 30 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; MCU SECTION - ATtiny3224-SU (14-pin SOIC)
+  ;; ============================================================================
+
+  (text "MCU: ATtiny3224-SU (SOIC-14)\n============================\n\nPin Assignment (aligned with firmware config.h):\n\n  Pin 1  (VCC)  - 3.3V Power\n  Pin 2  (PA4)  - N/C (not available on 14-pin)\n  Pin 3  (PA5)  - N/C\n  Pin 4  (PA6)  - N/C\n  Pin 5  (PA7)  - N/C\n  Pin 6  (PB3)  - RX (Serial from Pi TX)\n  Pin 7  (PB2)  - TX (Serial to Pi RX)\n  Pin 8  (PB1)  - N/C (available)\n  Pin 9  (PB0)  - N/C (available)\n  Pin 10 (PA0)  - UPDI Programming\n  Pin 11 (PA1)  - SDA (I2C Data to ICM-20948)\n  Pin 12 (PA2)  - SCL (I2C Clock to ICM-20948)\n  Pin 13 (PA3)  - LED (Status indicator)\n  Pin 14 (GND)  - Ground\n\nNote: ATtiny3224 is 14-pin package - only PA0-PA3, PB0-PB3 available.\n      ATtiny3226 (20-pin) has additional PA4-PA7 if needed."
+    (at 20 80 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  (text "ATtiny3224 Specifications:\n- 32KB Flash, 3KB SRAM, 256B EEPROM\n- 16MHz internal oscillator\n- Hardware I2C (TWI) on PA1/PA2\n- Hardware UART on PB2/PB3\n- 10-bit ADC (not used in this design)\n- Operating voltage: 1.8V - 5.5V"
+    (at 20 140 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; IMU SECTION - ICM-20948
+  ;; ============================================================================
+
+  (text "IMU: ICM-20948 9-DoF Sensor\n===========================\n\nThe ICM-20948 is a 9-axis MotionTracking device:\n- 3-axis accelerometer (±2g/±4g/±8g/±16g)\n- 3-axis gyroscope (±250/±500/±1000/±2000 dps)\n- 3-axis magnetometer (AK09916, ±4900μT)\n\nI2C Interface:\n- Address: 0x68 (AD0=GND) or 0x69 (AD0=VCC)\n- Speed: 400kHz (Fast Mode)\n- Pull-ups: 4.7kΩ to 3.3V\n\nConnection to ATtiny3224:\n- SDA → PA1 (pin 11)\n- SCL → PA2 (pin 12)\n- VCC → 3.3V\n- GND → GND\n\nNote: Using ICM-20948 module (e.g., SparkFun or Adafruit)\nwhich includes required decoupling capacitors."
+    (at 20 175 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  (text "ICM-20948 Module Pinout (typical breakout):\n\n  VCC  ──── 3.3V (from LDO)\n  GND  ──── GND\n  SDA  ──── PA1 (with 4.7k pull-up)\n  SCL  ──── PA2 (with 4.7k pull-up)\n  INT  ──── N/C (interrupt not used)\n  AD0  ──── GND (address = 0x68)\n  FSYNC ─── GND (frame sync not used)"
+    (at 20 235 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; POWER SECTION - AP2112K-3.3 LDO
+  ;; ============================================================================
+
+  (text "POWER SUPPLY: AP2112K-3.3 LDO\n==============================\n\nInput: 5V from Raspberry Pi GPIO header\nOutput: 3.3V @ 600mA max\n\nCircuit:\n\n    5V ──┬── [C1 10μF] ──┬── GND\n         │               │\n         └─── AP2112K ───┴─── 3.3V ──┬── [C2 10μF] ──┬── GND\n              (VIN)  (VOUT)          │               │\n                                     └───────────────┘\n\nAP2112K-3.3TRG1 (SOT-23-5) Pinout:\n  Pin 1: VIN   - Input voltage (5V)\n  Pin 2: GND   - Ground\n  Pin 3: EN    - Enable (tie to VIN)\n  Pin 4: NC    - No connection\n  Pin 5: VOUT  - Output voltage (3.3V)\n\nCapacitor Selection:\n- C1 (input):  10μF ceramic, X5R, 10V min\n- C2 (output): 10μF ceramic, X5R, 6.3V min\n\nPower Budget:\n- ATtiny3224: ~5mA @ 16MHz\n- ICM-20948:  ~3mA (all sensors active)\n- LED:        ~5mA (at 330Ω)\n- Total:      ~15mA typical (well within 600mA limit)"
+    (at 150 30 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; I2C SECTION - Pull-up Resistors
+  ;; ============================================================================
+
+  (text "I2C BUS DESIGN\n==============\n\nPull-up Resistor Calculation:\n\nFor 400kHz I2C (Fast Mode):\n- Rise time max: 300ns\n- Bus capacitance: ~20pF (short traces)\n- Pull-up: Rp = tr / (0.8473 × Cb)\n- Rp = 300ns / (0.8473 × 20pF) ≈ 17.7kΩ max\n\nFor reliable operation, use 4.7kΩ:\n- Adequate rise time for 400kHz\n- Low enough for reliable high levels\n- Common value, readily available\n\nCircuit:\n\n    3.3V ─┬───────┬───────────────────────\n          │       │\n         [R1]    [R2]\n         4.7k    4.7k\n          │       │\n    SDA ──┴───────│──── ATtiny PA1 ──── ICM-20948 SDA\n                  │\n    SCL ──────────┴──── ATtiny PA2 ──── ICM-20948 SCL\n\nLayout Notes:\n- Keep I2C traces short (<50mm)\n- Place pull-ups near MCU\n- Route SDA and SCL as a pair\n- Add ground guard traces if noise is a concern"
+    (at 150 130 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; SERIAL INTERFACE SECTION
+  ;; ============================================================================
+
+  (text "SERIAL INTERFACE TO RASPBERRY PI\n=================================\n\nUART Configuration:\n- Baud rate: 115200\n- Data bits: 8\n- Parity: None\n- Stop bits: 1\n\nConnections (via J1 JST-SH 4-pin):\n\n  ATtiny3224          Raspberry Pi\n  -----------         ------------\n  PB2 (TX)  ───────── RX (GPIO15)\n  PB3 (RX)  ───────── TX (GPIO14)\n  GND       ───────── GND\n  VCC (5V)  ───────── 5V (Pin 2 or 4)\n\nNote: Both MCU and Pi operate at 3.3V logic levels.\nNo level shifting required.\n\nJ1 Connector Pinout (JST-SH 1.0mm pitch):\n  Pin 1: GND\n  Pin 2: VCC (5V input from Pi)\n  Pin 3: TX (MCU to Pi)\n  Pin 4: RX (Pi to MCU)"
+    (at 150 230 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; LED INDICATOR SECTION
+  ;; ============================================================================
+
+  (text "STATUS LED (D1)\n===============\n\nGreen LED on PA3 for status indication:\n\nOperating States:\n- Solid ON:     Normal operation, IMU data streaming\n- Rapid blink:  IMU initialization failed\n- Slow blink:   Calibration in progress (future)\n\nCircuit:\n\n    PA3 ────[R3 330Ω]────┤>├──── GND\n                         LED\n\nLED Current Calculation:\n- Vf (green LED) ≈ 2.0V\n- Vcc = 3.3V\n- I = (3.3V - 2.0V) / 330Ω = 3.9mA\n\nThis provides adequate brightness while\nminimizing power consumption.\n\nComponent Selection:\n- D1: 0603 Green LED (e.g., LTST-C191KGKT)\n- R3: 330Ω 0603 resistor"
+    (at 280 30 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; PROGRAMMING HEADER SECTION
+  ;; ============================================================================
+
+  (text "PROGRAMMING HEADER (J2)\n=======================\n\nUPDI Programming Interface:\n\n3-pin header (2.54mm pitch):\n  Pin 1: UPDI (PA0)\n  Pin 2: VCC (3.3V)\n  Pin 3: GND\n\nProgramming Tools:\n- SerialUPDI (USB-Serial adapter with 4.7k resistor)\n- ATMEL-ICE\n- PICkit4 (with UPDI support)\n- jtag2updi Arduino sketch\n\nSerialUPDI Connection:\n\n    USB-Serial TX ───[4.7k]───┬─── UPDI (PA0)\n                              │\n    USB-Serial RX ────────────┘\n    USB-Serial GND ─────────────── GND\n    USB-Serial 3.3V ────────────── VCC (optional)\n\nNote: The 4.7k resistor enables bidirectional\ncommunication on the single UPDI line.\n\nPlatformIO Upload Command:\n  pio run -e attiny3224 -t upload"
+    (at 280 120 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; CONNECTOR SECTION - IMU MODULE
+  ;; ============================================================================
+
+  (text "IMU MODULE CONNECTOR (J3)\n=========================\n\n4-pin JST-SH connector for ICM-20948 module:\n\n  Pin 1: VCC (3.3V)\n  Pin 2: GND\n  Pin 3: SDA\n  Pin 4: SCL\n\nCompatible Modules:\n- SparkFun ICM-20948 (Qwiic)\n- Adafruit ICM-20948\n- Generic ICM-20948 breakout\n\nAlternative: Direct Solder\n\nFor production, the ICM-20948 can be soldered\ndirectly to the PCB using its QFN-24 package.\nThis requires:\n- Careful reflow soldering\n- Good thermal management\n- Proper via placement under thermal pad\n\nFor prototype/development, the module connector\nprovides easier assembly and replacement."
+    (at 280 220 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; SCHEMATIC - Component Symbols (Simplified Text Representation)
+  ;; ============================================================================
+
+  (text "SCHEMATIC DIAGRAM\n=================\n\n                           +3.3V\n                             │\n      +5V ──┬──[C1]──┐       │\n            │        │       ├──[C3]──┐\n            │       GND      │        │\n            │                │       GND\n         ┌──┴──┐             │\n         │ LDO │             │\n         │AP2112             │\n         └──┬──┘             │\n            │                │\n      3.3V ─┴──[C2]──┐       │\n                     │       │\n                    GND      │\n                             │\n    ┌────────────────────────┼──────────────────┐\n    │                        │                  │\n    │     ATtiny3224         │                  │\n    │    ┌──────────┐        │                  │\n    │    │          │←── VCC─┘                  │\n    │    │  PA0 ────│──── UPDI (J2 pin 1)       │\n    │    │  PA1 ────│──┬─ SDA ──── ICM-20948    │\n    │    │  PA2 ────│──┼─ SCL ──── ICM-20948    │\n    │    │  PA3 ────│──│─[R3]─LED─┐             │\n    │    │          │  │          │             │\n    │    │  PB2 ────│──│──────────│─── TX (J1)  │\n    │    │  PB3 ────│──│──────────│─── RX (J1)  │\n    │    │          │  │          │             │\n    │    │  GND ────│──│──────────┴── GND       │\n    │    └──────────┘  │                        │\n    │                  │   [R1]    [R2]         │\n    │                  │   4.7k    4.7k         │\n    │                  │    │        │          │\n    │                  └────┴────────┴── +3.3V  │\n    │                                           │\n    └───────────────────────────────────────────┘"
+    (at 20 280 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; BILL OF MATERIALS
+  ;; ============================================================================
+
+  (text "BILL OF MATERIALS\n=================\n\n| Ref | Value      | Package   | Description                    | LCSC        |\n|-----|------------|-----------|--------------------------------|-------------|\n| U1  | ATtiny3224 | SOIC-14   | 8-bit MCU, 32KB Flash, 3KB RAM | C2682858    |\n| U2  | AP2112K-3.3| SOT-23-5  | 600mA LDO Regulator            | C51118      |\n| C1  | 10uF       | 0805      | Input capacitor, X5R, 10V      | C15850      |\n| C2  | 10uF       | 0805      | Output capacitor, X5R, 6.3V    | C15850      |\n| C3  | 100nF      | 0603      | MCU decoupling, X7R, 16V       | C14663      |\n| C4  | 100nF      | 0603      | IMU decoupling (on module)     | -           |\n| R1  | 4.7k       | 0603      | I2C SDA pull-up                | C23162      |\n| R2  | 4.7k       | 0603      | I2C SCL pull-up                | C23162      |\n| R3  | 330R       | 0603      | LED current limiter            | C23138      |\n| D1  | Green      | 0603      | Status LED                     | C72043      |\n| J1  | JST-SH 4P  | SMD       | Serial connector to Pi         | C160404     |\n| J2  | Header 1x3 | 2.54mm    | UPDI programming header        | C492405     |\n| J3  | JST-SH 4P  | SMD       | IMU module connector           | C160404     |\n\nNote: ICM-20948 module purchased separately (SparkFun, Adafruit, etc.)"
+    (at 150 310 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; PCB LAYOUT NOTES
+  ;; ============================================================================
+
+  (text "PCB LAYOUT GUIDELINES\n=====================\n\nBoard Dimensions: 20mm x 20mm (compact form factor)\nLayers: 2-layer (Top copper, Bottom copper)\nThickness: 1.6mm standard\nCopper: 1oz (35μm)\nFinish: HASL or ENIG\n\nComponent Placement:\n1. MCU (U1) in center of board\n2. LDO (U2) near power input connector\n3. I2C pull-ups near MCU\n4. Decoupling caps as close as possible to IC pins\n5. LED near board edge for visibility\n\nRouting Priority:\n1. Power (3.3V, GND) - wide traces, ground pour\n2. I2C (SDA, SCL) - short, matched length\n3. UART (TX, RX) - direct routes to connector\n4. UPDI - single trace to header\n\nMounting:\n- 4x M2.5 mounting holes at corners\n- Keep mounting holes clear of traces\n- Add silkscreen for orientation\n\nSilkscreen:\n- Component references\n- Pin 1 markers\n- Connector labels\n- Version number\n- Orientation arrow"
+    (at 20 380 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+  ;; ============================================================================
+  ;; FIRMWARE ALIGNMENT VERIFICATION
+  ;; ============================================================================
+
+  (text "FIRMWARE ALIGNMENT VERIFICATION\n===============================\n\nThis schematic is aligned with:\n  firmware/mcu/src/config.h\n  firmware/mcu/src/main.cpp\n\nPin Mapping Verification:\n\n  Hardware Pin    config.h Define     Function\n  ------------    --------------      --------\n  PA0             (UPDI)              Programming\n  PA1             (I2C SDA)           ICM-20948 SDA\n  PA2             (I2C SCL)           ICM-20948 SCL\n  PA3             LED_PIN (PIN_PA3)   Status LED\n  PB2             (UART TX)           Serial to Pi\n  PB3             (UART RX)           Serial from Pi\n\nI2C Address (ICM20948.h):\n  ICM20948_I2C_ADDR = 0x68 (AD0 to GND)\n\nSerial Configuration:\n  Baud: 115200 (SERIAL_BAUD_RATE in config.h)\n\nIMU Settings (config.h):\n  Accel: ±4g  (DEFAULT_ACCEL_RANGE)\n  Gyro:  ±500dps (DEFAULT_GYRO_RANGE)\n  Rate:  100Hz (IMU_UPDATE_RATE_HZ)"
+    (at 150 380 0)
+    (effects (font (size 1.27 1.27)) (justify left))
+  )
+
+)

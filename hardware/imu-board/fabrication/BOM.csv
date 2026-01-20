@@ -1,0 +1,13 @@
+Designator,Quantity,Value,Footprint,Description,LCSC Part Number
+U1,1,ATtiny3224-SU,SOIC-14_3.9x8.7mm_P1.27mm,8-bit MCU 32KB Flash 3KB RAM,C2682858
+U2,1,AP2112K-3.3TRG1,SOT-23-5,600mA Low Dropout Regulator 3.3V,C51118
+C1,1,10uF,0805,Ceramic Capacitor X5R 10V,C15850
+C2,1,10uF,0805,Ceramic Capacitor X5R 6.3V,C15850
+C3,1,100nF,0603,Ceramic Capacitor X7R 16V,C14663
+R1,1,4.7k,0603,Resistor 1% I2C SDA Pull-up,C23162
+R2,1,4.7k,0603,Resistor 1% I2C SCL Pull-up,C23162
+R3,1,330R,0603,Resistor 1% LED Current Limiter,C23138
+D1,1,Green,0603,LED Green 520-535nm,C72043
+J1,1,SM04B-SRSS-TB,JST-SH_1.0mm_4P,JST-SH 4-pin SMD Connector,C160404
+J2,1,Header_1x03,PinHeader_1x03_P2.54mm,2.54mm Pin Header 1x3,C492405
+J3,1,SM04B-SRSS-TB,JST-SH_1.0mm_4P,JST-SH 4-pin SMD Connector,C160404

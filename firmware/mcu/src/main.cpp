@@ -2,7 +2,7 @@
  * IMU Sensor Fusion MCU Firmware
  * ==============================
  *
- * ATtiny3226 firmware for ICM-20948 9-DoF IMU with Madgwick AHRS filter.
+ * ATtiny3224/3226 firmware for ICM-20948 9-DoF IMU with Madgwick AHRS filter.
  * Outputs fused orientation data over serial at 100Hz.
  *
  * Serial Protocol:
@@ -12,9 +12,9 @@
  * Checksum is XOR of all characters between $ and * (exclusive)
  *
  * Commands (received on serial):
- *   $CAL,START*XX - Start magnetometer calibration
+ *   $CAL,START*XX - Start magnetometer calibration (rotate slowly for 30s)
  *   $CAL,SAVE*XX  - Save calibration to EEPROM
- *   $CFG,RATE,<hz>*XX - Set output rate
+ *   $CAL,STOP*XX  - Stop calibration early
  */
 
 #include <Arduino.h>
@@ -96,6 +96,10 @@ uint8_t computeChecksum(const char *str);
 // ============================================================================
 
 void setup() {
+  // Initialize LED for status indication
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   // Initialize serial
   Serial.begin(115200);
   while (!Serial && millis() < 1000) {
@@ -120,6 +124,9 @@ void setup() {
 
   // Initialize Madgwick filter
   filter.begin(IMU_UPDATE_RATE_HZ);
+
+  // LED on to indicate ready
+  digitalWrite(LED_PIN, HIGH);
 
 #if DEBUG_EN
   Serial.println(F("IMU MCU Ready"));
@@ -195,9 +202,12 @@ void setupIMU() {
 #if DEBUG_EN
     Serial.println(F("ICM-20948 not found!"));
 #endif
-    // Blink LED to indicate error
+    // Blink LED rapidly to indicate error
     while (1) {
-      delay(500);
+      digitalWrite(LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(LED_PIN, LOW);
+      delay(100);
     }
   }
 

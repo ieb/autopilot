@@ -1,0 +1,198 @@
+(kicad_sch
+  (version 20231120)
+  (generator "eeschema")
+  (generator_version "8.0")
+  (uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+  (paper "A4")
+  (title_block
+    (title "Actuator Controller Board")
+    (date "2026-01-20")
+    (rev "1.0")
+    (comment 1 "ATtiny3226 Rudder Controller")
+    (comment 2 "ML Yacht Autopilot Project")
+  )
+
+  (lib_symbols
+  )
+
+  (text "ACTUATOR CONTROLLER SCHEMATIC\n\nThis schematic shows the current sensing circuit in detail.\nConsider using INA219/INA226 I2C module as alternative.\n\nSee notes below for trade-off analysis."
+    (exclude_from_sim no)
+    (at 25 25 0)
+    (effects
+      (font (size 2.54 2.54))
+      (justify left top)
+    )
+  )
+
+  (text "=== CURRENT SENSING OPTIONS ===\n\nOPTION A: Discrete Shunt + Op-Amp (shown)\n  Pros:\n    - Lower cost ($0.50 vs $3-5)\n    - No I2C overhead\n    - Faster sampling (direct ADC)\n  Cons:\n    - Requires careful layout\n    - Temperature drift\n    - Gain calibration needed\n    - Ground offset issues\n\nOPTION B: INA219/INA226 I2C Module\n  Pros:\n    - Integrated calibration\n    - High accuracy (1%)\n    - Temperature compensated\n    - Reports current + voltage + power\n    - No analog layout concerns\n  Cons:\n    - Needs I2C (shares with nothing on ATtiny3226)\n    - Slightly slower (I2C overhead)\n    - Higher cost\n\nRECOMMENDATION: Use INA219 module for v1.\nThe discrete approach requires careful layout and\ncalibration that may cause issues in marine environment."
+    (exclude_from_sim no)
+    (at 180 25 0)
+    (effects
+      (font (size 2 2))
+      (justify left top)
+    )
+  )
+
+  (text "--- MCU: ATtiny3226 ---"
+    (exclude_from_sim no)
+    (at 25 60 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "U1 - ATtiny3226-SU (SOIC-20)\n\nPin Assignment:\n  PA0 - UPDI (programming)\n  PA1 - ADC1 (Rudder potentiometer)\n  PA2 - ADC2 (Current sense) OR I2C SDA\n  PA3 - ADC3 (Voltage sense) OR I2C SCL  \n  PA4 - PWM_PORT (TCA0 WO4)\n  PA5 - PWM_STBD (TCA0 WO5)\n  PA6 - CLUTCH (N-FET gate)\n  PA7 - LED (status)\n  PB2 - TX (to Pi RX)\n  PB3 - RX (from Pi TX)\n  VDD - 3.3V\n  GND - Ground"
+    (exclude_from_sim no)
+    (at 25 70 0)
+    (effects
+      (font (size 1.8 1.8))
+      (justify left top)
+    )
+  )
+
+  (text "--- POWER SUPPLY ---"
+    (exclude_from_sim no)
+    (at 25 120 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "12V Input → AP2112K-3.3 LDO → 3.3V Rail\n\nComponents:\n  U2 - AP2112K-3.3 (SOT-23-5)\n  C1 - 10uF ceramic (input)\n  C2 - 10uF ceramic (output)\n  C3 - 100nF ceramic (MCU decoupling)"
+    (exclude_from_sim no)
+    (at 25 130 0)
+    (effects
+      (font (size 1.8 1.8))
+      (justify left top)
+    )
+  )
+
+  (text "--- CURRENT SENSING (OPTION A: Discrete) ---"
+    (exclude_from_sim no)
+    (at 25 160 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "Low-Side Shunt Configuration:\n\n    Motor-  ────┬──── GND\n                │\n              ┌─┴─┐\n              │R_s│  R_SHUNT = 0.005Ω 1% 3W\n              └─┬─┘\n                │\n    ┌───────────┴───────────┐\n    │         V_shunt       │\n    │   (I × 0.005 = mV)    │\n    └───────────────────────┘\n                │\n         ┌──────┴──────┐\n         │  Diff Amp   │\n         │  Gain = 100 │  U3 - MCP6002 or similar\n         └──────┬──────┘\n                │\n           V_out = I × 0.5V/A\n                │\n           To PA2 (ADC)\n\nAt 15A: V_out = 15 × 0.5 = 7.5V (needs clamping!)\nAt 12A: V_out = 12 × 0.5 = 6.0V (still too high)\n\nPROBLEM: Need lower gain or different shunt value.\n\nRevised: R_SHUNT = 0.002Ω, Gain = 50\nAt 15A: V_out = 15 × 0.002 × 50 = 1.5V ✓\nAt 20A: V_out = 20 × 0.002 × 50 = 2.0V ✓"
+    (exclude_from_sim no)
+    (at 25 170 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "Differential Amplifier Circuit:\n\n                 R3 = 10k\n            ┌────/\\/\\/\\────┐\n            │              │\n    V_shunt+│    ┌─────┐   │\n    ────────┼────┤-    │   │\n            │    │ U3A ├───┴──── V_out (to PA2)\n            │ ┌──┤+    │\n            │ │  └─────┘\n    V_shunt-│ │\n    ────────┼─┤   R1 = 10k      R2 = 500k\n            │ └────/\\/\\/\\────┬────/\\/\\/\\──── GND\n            │                │\n            └────/\\/\\/\\──────┘\n                 R4 = 10k\n\n    Gain = R2/R1 = 500k/10k = 50\n\nComponents:\n  R_SHUNT - 0.002Ω 1% 5W (Vishay WSL2512)\n  U3 - MCP6002-I/SN (dual rail-to-rail op-amp)\n  R1,R3,R4 - 10kΩ 1% 0603\n  R2 - 500kΩ 1% 0603 (sets gain)\n  C4 - 100pF (optional, noise filter)"
+    (exclude_from_sim no)
+    (at 25 255 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "--- CURRENT SENSING (OPTION B: INA219) ---"
+    (exclude_from_sim no)
+    (at 180 100 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "INA219 I2C Current/Voltage Monitor:\n\n    12V ────┬──────────────────┬──── Motor+\n            │                  │\n            │    ┌─────────┐   │\n            └────┤VIN+     ├───┘\n                 │  INA219 │\n            ┌────┤VIN-     │\n            │    │         │\n    Motor-  ┴    │ SDA ────┼──── PA2 (I2C)\n                 │ SCL ────┼──── PA3 (I2C)\n                 │ GND ────┼──── GND\n                 │ VCC ────┼──── 3.3V\n                 │ A0,A1 ──┼──── GND (addr 0x40)\n                 └─────────┘\n\nInternal 0.1Ω shunt (or external for higher current)\n\nFor 15A max, use external 0.01Ω shunt:\n  - INA219 set to 16V, 400mA range\n  - PGA = /8, gives 320mV full scale\n  - Resolution: 0.1mA per bit\n\nBreakout boards available:\n  - Adafruit INA219 ($9.95)\n  - Generic modules ($2-3)\n\nI2C Address: 0x40 (configurable via A0, A1)"
+    (exclude_from_sim no)
+    (at 180 110 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "--- VOLTAGE SENSING ---"
+    (exclude_from_sim no)
+    (at 180 220 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "Resistor Divider for 12V Monitoring:\n\n    12V ────┬──── R5 = 30kΩ ────┬──── PA3 (ADC)\n            │                   │\n            │                  ─┴─ C5 = 100nF\n            │                  ─┬─\n            │                   │\n            └──── R6 = 10kΩ ────┴──── GND\n\n    V_out = 12V × 10k/(30k+10k) = 3.0V ✓\n    V_out = 14V × 10k/(30k+10k) = 3.5V (slightly over 3.3V)\n\nAdd Zener clamp:\n    D1 - 3.3V Zener across C5 for overvoltage protection"
+    (exclude_from_sim no)
+    (at 180 230 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "--- CLUTCH DRIVER ---"
+    (exclude_from_sim no)
+    (at 25 340 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "N-FET Low-Side Switch with Flyback Protection:\n\n    12V ────┬──────────────────────┬──── Clutch+\n            │                      │\n            │    ┌──────────────┐  │\n            │    │   Clutch     │  │\n            │    │   Coil       │──┘\n            │    │   (~1A)      │\n            │    └──────┬───────┘\n            │           │\n        D2 ─┴─ ◄────────┤  D2 = SS34 Schottky\n            │           │      (flyback diode)\n            │           │\n            │       ┌───┴───┐\n            │       │   D   │\n            │       │       │  Q1 = IRLML6344\n    PA6 ────┼── R7 ─┤ G     │  (N-FET, 30V, 5A)\n            │       │       │\n            │       │   S   │\n            │       └───┬───┘\n            │           │\n    GND ────┴───────────┴──────────\n\n    R7 = 100Ω (gate resistor, limits di/dt)"
+    (exclude_from_sim no)
+    (at 25 350 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "--- H-BRIDGE INTERFACE ---"
+    (exclude_from_sim no)
+    (at 180 300 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "Connection to BTS7960 H-Bridge Module:\n\n    J2 - 6-pin connector\n    ┌────────────────────┐\n    │ 1  GND             │\n    │ 2  VCC (5V from HB)│ (optional, for level shift)\n    │ 3  R_EN (enable)   │ ← tie to VCC or use GPIO\n    │ 4  L_EN (enable)   │ ← tie to VCC or use GPIO\n    │ 5  RPWM (stbd)     │ ← PA5 (3.3V logic OK)\n    │ 6  LPWM (port)     │ ← PA4 (3.3V logic OK)\n    └────────────────────┘\n\nBTS7960 accepts 3.3V logic on PWM inputs.\nEnable pins can be tied high or controlled for\nadditional safety (GPIO-controlled disable)."
+    (exclude_from_sim no)
+    (at 180 310 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "--- CONNECTORS ---"
+    (exclude_from_sim no)
+    (at 25 450 0)
+    (effects
+      (font (size 2.54 2.54) bold)
+      (justify left)
+    )
+  )
+
+  (text "J1 - Serial to Pi (JST-SH 4-pin)\n  1. GND\n  2. TX (to Pi RX)\n  3. RX (from Pi TX)\n  4. VCC (5V from Pi, optional)\n\nJ2 - H-Bridge (JST-XH 6-pin)\n  See above\n\nJ3 - Clutch (JST-XH 2-pin)\n  1. Clutch+\n  2. Clutch- (switched to GND)\n\nJ4 - Rudder Pot (JST-XH 3-pin)\n  1. VCC (3.3V)\n  2. Wiper (to PA1)\n  3. GND\n\nJ5 - Power (screw terminal 2-pin)\n  1. 12V\n  2. GND\n\nJ6 - UPDI Programming (1x3 header 2.54mm)\n  1. UPDI (PA0)\n  2. VCC\n  3. GND"
+    (exclude_from_sim no)
+    (at 25 460 0)
+    (effects
+      (font (size 1.6 1.6))
+      (justify left top)
+    )
+  )
+
+  (text "=== BILL OF MATERIALS ===\n\nMCU:\n  U1 - ATtiny3226-SU (SOIC-20)\n\nPower:\n  U2 - AP2112K-3.3 (SOT-23-5)\n  C1,C2 - 10uF 25V X5R 0805\n  C3 - 100nF 16V X7R 0603\n\nCurrent Sensing (Option A):\n  R_SHUNT - 0.002Ω 1% 5W (Vishay WSL2512)\n  U3 - MCP6002-I/SN (SOIC-8)\n  R1,R3,R4 - 10kΩ 1% 0603\n  R2 - 500kΩ 1% 0603\n  C4 - 100pF 0603 (optional)\n\nCurrent Sensing (Option B - Recommended):\n  U3 - INA219BIDCNR (VSSOP-8) or module\n  R_SHUNT - 0.01Ω 1% 2W (if using bare IC)\n\nVoltage Sensing:\n  R5 - 30kΩ 1% 0603\n  R6 - 10kΩ 1% 0603\n  C5 - 100nF 16V 0603\n  D1 - BZT52C3V3 (Zener, SOD-123)\n\nClutch Driver:\n  Q1 - IRLML6344TRPBF (SOT-23)\n  D2 - SS34 (SMA)\n  R7 - 100Ω 0603\n\nStatus LED:\n  D3 - LED Green 0603\n  R8 - 330Ω 0603\n\nConnectors:\n  J1 - JST-SH 4-pin SMD\n  J2 - JST-XH 6-pin THT\n  J3 - JST-XH 2-pin THT\n  J4 - JST-XH 3-pin THT\n  J5 - Screw terminal 5mm 2-pin\n  J6 - Pin header 1x3 2.54mm"
+    (exclude_from_sim no)
+    (at 180 400 0)
+    (effects
+      (font (size 1.5 1.5))
+      (justify left top)
+    )
+  )
+
+)

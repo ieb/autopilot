@@ -2,9 +2,28 @@
 ADC Reader Module
 =================
 
-Reads rudder position potentiometer via ADS1115 ADC over I2C.
-Provides calibrated rudder angle in degrees.
+.. deprecated::
+    This module is deprecated as of the Actuator Controller architecture update.
+    Rudder position is now read by the Actuator Controller MCU (ATtiny3226) and
+    reported via serial to the Pi through ActuatorInterface.
+    
+    See: src/control/actuator_interface.py
+    
+    This module is retained for reference and potential use with other ADC
+    sensors, but is no longer used for rudder position sensing.
+
+Original description:
+    Reads rudder position potentiometer via ADS1115 ADC over I2C.
+    Provides calibrated rudder angle in degrees.
 """
+
+import warnings
+warnings.warn(
+    "adc_reader is deprecated. Rudder position is now read by the Actuator Controller MCU. "
+    "Use actuator_interface.ActuatorInterface.get_status().actual_angle instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import threading
 import time

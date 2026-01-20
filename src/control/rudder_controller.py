@@ -2,9 +2,30 @@
 Rudder Controller Module
 ========================
 
-Inner control loop that drives the rudder actuator to achieve
-the target position commanded by the ML model.
+.. deprecated::
+    This module is deprecated as of the Actuator Controller architecture update.
+    The inner control loop (PWM generation, position control) now runs on the
+    Actuator Controller MCU (ATtiny3226), not on the Raspberry Pi.
+    
+    The Pi now sends target angle commands via serial using ActuatorInterface.
+    The MCU handles closed-loop position control internally.
+    
+    See: src/control/actuator_interface.py
+    
+    This module is retained for reference only.
+
+Original description:
+    Inner control loop that drives the rudder actuator to achieve
+    the target position commanded by the ML model.
 """
+
+import warnings
+warnings.warn(
+    "rudder_controller is deprecated. Position control now runs on the Actuator Controller MCU. "
+    "Use actuator_interface.ActuatorInterface.send_command() to send target angles.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import time
 from dataclasses import dataclass
