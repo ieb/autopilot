@@ -83,7 +83,7 @@ graph LR
 
 ### Hardware Layer
 
-#### [NEW] [hardware_design.md](file:///Users/ieb/timefields/antigravity/autopilot/docs/hardware_design.md)
+#### [NEW] [hardware_design.md](../docs/hardware_design.md)
 Complete hardware specification document including:
 
 | Component | Model | Purpose | Interface |
@@ -132,13 +132,13 @@ sudo ip link set can0 up type can bitrate 250000
 
 ### Sensor Fusion & Feature Engineering
 
-#### [NEW] [imu_fusion.py](file:///Users/ieb/timefields/antigravity/autopilot/src/sensors/imu_fusion.py)
+#### [NEW] [imu_fusion.py](../src/sensors/imu_fusion.py)
 Madgwick AHRS filter implementation for ICM-20948:
 - 100Hz internal fusion rate
 - Outputs: heading, pitch, roll, yaw_rate, pitch_rate, roll_rate
 - Magnetometer calibration routine (hard/soft iron compensation)
 
-#### [NEW] [nmea2000_interface.py](file:///Users/ieb/timefields/antigravity/autopilot/src/sensors/nmea2000_interface.py)
+#### [NEW] [nmea2000_interface.py](../src/sensors/nmea2000_interface.py)
 NMEA2000 bus interface using `python-can` + `nmea2000` library:
 - Uses standard Linux SocketCAN interface (`can0`) with CandleLite adapter
 - Decodes relevant PGNs at their natural rates
@@ -172,14 +172,14 @@ The ML model runs at 10Hz but the NMEA2000 values are held/interpolated between 
 > [!NOTE]
 > This is the **core of your request** - the detailed ML model specification.
 
-#### [NEW] [autopilot_model.py](file:///Users/ieb/timefields/antigravity/autopilot/src/ml/autopilot_model.py)
+#### [NEW] [autopilot_model.py](../src/ml/autopilot_model.py)
 
 **Model Type:** Recurrent Neural Network (LSTM-based)
 
 **Rationale:** 
 - Sailing requires temporal context (wave patterns, wind shifts, boat momentum)
 - LSTM captures these temporal dependencies naturally
-- Proven feasible on Raspberry Pi 4 with TensorFlow Lite quantization
+- Lightweight (~45k params) runs comfortably on Raspberry Pi 4 in float32
 
 ```mermaid
 graph TD
@@ -293,6 +293,51 @@ def build_autopilot_model(sequence_length=20, n_features=25):
 - Output: 1 value (rudder command, -1 = full port, +1 = full starboard)
 - Inference target: <10ms (100Hz capable, running at 10Hz)
 
+##### Deployment Format
+
+**Default: float32 (no quantization)**
+
+For initial deployment, use full float32 precision:
+- Model size: ~180 KB (easily fits in Pi 4's 4GB RAM)
+- Inference speed: <10ms on Pi 4 (sufficient for 10Hz control loop)
+- No precision loss in LSTM internal states
+
+```python
+# Export to TFLite (float32)
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+tflite_model = converter.convert()
+```
+
+**Optional: Quantization for optimization**
+
+Quantization is an *optional* optimization step, not required for Pi 4 deployment. Only consider if:
+- Deploying to more constrained hardware
+- Need to reduce power consumption
+- Validated that accuracy loss is acceptable
+
+| Format | Model Size | Speed | Precision | When to Use |
+|--------|------------|-------|-----------|-------------|
+| float32 | 180 KB | Baseline | Full | Default - development & production |
+| float16 | 90 KB | ~Same | Good | If size matters, precision important |
+| int8 | 45 KB | 2-4x faster | Lower | Constrained hardware only |
+
+> [!WARNING]
+> **Do not assume int8 is needed.** Validate any quantized model against held-out data before deployment. LSTM internal states may accumulate quantization errors over the 20-timestep sequence.
+
+If quantization is needed:
+```python
+# float16 quantization (recommended if size reduction needed)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.target_spec.supported_types = [tf.float16]
+
+# int8 quantization (only if validated on real data)
+def representative_dataset():
+    for sample in validation_data:
+        yield [sample]
+converter.representative_dataset = representative_dataset
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+```
+
 ##### Sequence Window
 
 ```
@@ -317,7 +362,7 @@ Time: ... t-19  t-18  t-17  ...  t-2   t-1   t
 
 ### Training Pipeline
 
-#### [NEW] [train_imitation.py](file:///Users/ieb/timefields/antigravity/autopilot/src/training/train_imitation.py)
+#### [NEW] [train_imitation.py](../src/training/train_imitation.py)
 
 **Phase 1: Imitation Learning (Offline)**
 
@@ -335,7 +380,7 @@ sequenceDiagram
     Prep->>Prep: Generate sequences
     Train->>Train: Supervised learning
     Train->>Train: Minimize MSE(predicted, human_rudder)
-    Train->>Model: Quantize to int8
+    Train->>Model: Export to TFLite (float32)
     Model->>Model: Deploy to Pi 4
 ```
 
@@ -392,7 +437,7 @@ All sensor data is logged at 10Hz for training and post-hoc analysis. This inclu
 
 ---
 
-#### [NEW] [online_learning.py](file:///Users/ieb/timefields/antigravity/autopilot/src/training/online_learning.py)
+#### [NEW] [online_learning.py](../src/training/online_learning.py)
 
 **Phase 2: Online Fine-Tuning (Real-time)**
 
@@ -440,7 +485,7 @@ class OnlineLearner:
 
 ### Actuator Controller Interface
 
-#### [NEW] [actuator_interface.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/actuator_interface.py)
+#### [NEW] [actuator_interface.py](../src/control/actuator_interface.py)
 
 The ML model outputs a **desired rudder position** (normalized -1 to +1).
 The Pi sends this target to the Actuator Controller MCU over a dedicated serial link.
@@ -547,7 +592,7 @@ class ActuatorInterface:
 
 ### Operating Modes
 
-#### [NEW] [mode_manager.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/mode_manager.py)
+#### [NEW] [mode_manager.py](../src/control/mode_manager.py)
 
 | Mode | Target Calculation | Use Case |
 |------|-------------------|----------|
@@ -887,7 +932,7 @@ The two-layer architecture provides redundant protection:
 
 ### NMEA2000 Bus Integration
 
-#### [NEW] [n2k_autopilot.py](file:///Users/ieb/timefields/antigravity/autopilot/src/n2k/n2k_autopilot.py)
+#### [NEW] [n2k_autopilot.py](../src/n2k/n2k_autopilot.py)
 
 **Transmit (status broadcasts):**
 - PGN 127245 Rudder (10Hz): Current rudder angle
@@ -947,8 +992,8 @@ autopilot/
 │       ├── n2k_autopilot.py
 │       └── pgn_definitions.py
 ├── models/
-│   ├── autopilot_v1.h5
-│   └── autopilot_v1.tflite
+│   ├── autopilot_v1.h5              # Keras format (for training/fine-tuning)
+│   └── autopilot_v1.tflite          # TFLite float32 (for Pi deployment)
 ├── data/
 │   └── training/
 ├── tests/

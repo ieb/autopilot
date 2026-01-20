@@ -47,32 +47,32 @@ autopilot/
 
 | Module | Rate | Description |
 |--------|------|-------------|
-| [imu_fusion.py](file:///Users/ieb/timefields/antigravity/autopilot/src/sensors/imu_fusion.py) | 100Hz | Serial interface to ICM-20948 on dedicated MCU |
-| [nmea2000_interface.py](file:///Users/ieb/timefields/antigravity/autopilot/src/sensors/nmea2000_interface.py) | 1Hz | CAN bus via CandleLite + SocketCAN |
-| [adc_reader.py](file:///Users/ieb/timefields/antigravity/autopilot/src/sensors/adc_reader.py) | 50Hz | Rudder potentiometer via ADS1115 |
+| [imu_fusion.py](../src/sensors/imu_fusion.py) | 100Hz | Serial interface to ICM-20948 on dedicated MCU |
+| [nmea2000_interface.py](../src/sensors/nmea2000_interface.py) | 1Hz | CAN bus via CandleLite + SocketCAN |
+| [adc_reader.py](../src/sensors/adc_reader.py) | 50Hz | Rudder potentiometer via ADS1115 |
 
 ### ML Components
 
 | Module | Description |
 |--------|-------------|
-| [polar.py](file:///Users/ieb/timefields/antigravity/autopilot/src/ml/polar.py) | Pogo 1250 polar with VMG optimization |
-| [feature_engineering.py](file:///Users/ieb/timefields/antigravity/autopilot/src/ml/feature_engineering.py) | 25 normalized features with 2-second sliding window |
-| [autopilot_model.py](file:///Users/ieb/timefields/antigravity/autopilot/src/ml/autopilot_model.py) | 2-layer LSTM (~45k params), TFLite inference |
+| [polar.py](../src/ml/polar.py) | Pogo 1250 polar with VMG optimization |
+| [feature_engineering.py](../src/ml/feature_engineering.py) | 25 normalized features with 2-second sliding window |
+| [autopilot_model.py](../src/ml/autopilot_model.py) | 2-layer LSTM (~45k params), TFLite inference |
 
 ### Control System
 
 | Module | Description |
 |--------|-------------|
-| [rudder_controller.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/rudder_controller.py) | PWM H-Bridge driver with rate limiting |
-| [mode_manager.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/mode_manager.py) | STANDBY, COMPASS, WIND_AWA, WIND_TWA, VMG modes |
-| [safety.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/safety.py) | Limits, override detection, emergency stop |
+| [rudder_controller.py](../src/control/rudder_controller.py) | PWM H-Bridge driver with rate limiting |
+| [mode_manager.py](../src/control/mode_manager.py) | STANDBY, COMPASS, WIND_AWA, WIND_TWA, VMG modes |
+| [safety.py](../src/control/safety.py) | Limits, override detection, emergency stop |
 
 ### Training Pipeline
 
 | Module | Description |
 |--------|-------------|
-| [data_loader.py](file:///Users/ieb/timefields/antigravity/autopilot/src/training/data_loader.py) | Parses candump/JSON/CSV logs, extracts PGNs |
-| [train_imitation.py](file:///Users/ieb/timefields/antigravity/autopilot/src/training/train_imitation.py) | Supervised training with early stopping |
+| [data_loader.py](../src/training/data_loader.py) | Parses candump/JSON/CSV logs, extracts PGNs |
+| [train_imitation.py](../src/training/train_imitation.py) | Supervised training with early stopping |
 
 ---
 
@@ -160,7 +160,6 @@ The model needs logged sailing data that includes **rudder position**. The data 
 
 ```bash
 # Once you have training data:
-cd /Users/ieb/timefields/antigravity/autopilot
 pip install -r requirements.txt
 python -m src.training.train_imitation data/training/ --epochs 100
 ```
