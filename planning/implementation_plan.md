@@ -9,36 +9,49 @@ This system replaces traditional PID/gain-based autopilots with a neural network
 ```mermaid
 graph LR
     subgraph Sensors
-        IMU[ICM-20948<br/>9-DoF]
+        IMU[ICM-20948<br/>9-DoF MCU]
         CAN[NMEA2000<br/>Bus]
-        POT[Rudder<br/>Potentiometer]
     end
     
-    subgraph "Raspberry Pi 4"
+    subgraph RaspberryPi [Raspberry Pi 4]
         FUSION[Sensor<br/>Fusion]
         PREPROC[Feature<br/>Engineering]
         MODEL[LSTM<br/>Model]
-        CTRL[Rudder<br/>Controller]
         SAFETY[Safety<br/>Layer]
+        SERIAL[Serial<br/>Interface]
     end
     
-    subgraph Actuator
-        PWM[PWM<br/>Generator]
+    subgraph ActuatorController [Actuator Controller MCU]
+        ACTRL[Position<br/>Controller]
+        ADC_RDR[ADC<br/>Reader]
+        PWM_GEN[PWM<br/>Generator]
+        CLUTCH_CTRL[Clutch<br/>Control]
+    end
+    
+    subgraph Actuator [Actuator Hardware]
+        POT[Rudder<br/>Potentiometer]
         HBRIDGE[H-Bridge<br/>Driver]
         RAM[Jefa LD100<br/>Ram]
+        EMCLUTCH[EM Clutch]
     end
     
     IMU -->|Serial| FUSION
     CAN -->|SocketCAN| PREPROC
-    POT -->|ADC| CTRL
     
     FUSION --> PREPROC
     PREPROC --> MODEL
     MODEL --> SAFETY
-    SAFETY --> CTRL
-    CTRL --> PWM
-    PWM --> HBRIDGE
+    SAFETY --> SERIAL
+    
+    SERIAL <-->|Serial UART| ACTRL
+    
+    POT --> ADC_RDR
+    ADC_RDR --> ACTRL
+    ACTRL --> PWM_GEN
+    ACTRL --> CLUTCH_CTRL
+    PWM_GEN --> HBRIDGE
     HBRIDGE --> RAM
+    CLUTCH_CTRL --> EMCLUTCH
 ```
 
 ---
@@ -77,9 +90,11 @@ Complete hardware specification document including:
 |-----------|-------|---------|----------|
 | Computer | Raspberry Pi 4 (4GB) | Main controller | - |
 | CAN Interface | [CandleLite](https://linux-automation.com/en/products/candlelight.html) | NMEA2000 communication | USB → SocketCAN (`can0`) |
-| 9-DoF IMU | ICM-20948 | Heading, attitude, rates | Serial (115200 baud) |
-| ADC | ADS1115 | Rudder potentiometer | I²C |
-| Motor Driver | BTS7960 H-Bridge | Jefa LD100 actuation | 2× PWM GPIO |
+| 9-DoF IMU | ICM-20948 + ATtiny3224 | Heading, attitude, rates | Serial (115200 baud) |
+| Actuator Controller | ATtiny3226 | Closed-loop rudder control, clutch | Serial (115200 baud) |
+| Motor Driver | BTS7960 H-Bridge | Jefa LD100 actuation | 2× PWM from Actuator MCU |
+| Clutch Driver | N-FET + flyback diode | Electromagnetic clutch | GPIO from Actuator MCU |
+| Current Sense | Shunt resistor + op-amp | Motor load monitoring | ADC on Actuator MCU |
 | Power | 12V → 5V DC-DC | Pi + sensors power | - |
 
 **CAN Bus Setup:**
@@ -105,10 +120,12 @@ sudo ip link set can0 up type can bitrate 250000
 > - Consistent 100Hz output regardless of Pi load
 > - Simple protocol: MCU runs sensor fusion, sends heading/rates over serial
 
-**PWM Control Strategy:**
-- 2 PWM signals: one for port, one for starboard drive
-- 10kHz PWM frequency (silent operation, smooth control)
-- Duty cycle 0-100% proportional to rudder speed demand
+**Actuator Controller Interface:**
+- Dedicated serial link (115200 baud) between Pi and Actuator Controller MCU
+- Pi sends target rudder angle commands; MCU handles closed-loop position control
+- MCU generates 2 PWM signals (10kHz) for H-Bridge: port and starboard drive
+- Electromagnetic clutch engaged only when autopilot is active
+- Watchdog timeout: clutch auto-disengages if no command received within 2s
 - Lock-to-lock: 15s at full speed → ~4°/s rudder rate
 
 ---
@@ -139,14 +156,14 @@ NMEA2000 bus interface using `python-can` + `nmea2000` library:
 
 **Implication for Control Loop:**
 ```
-Data Source        | Rate   | Used For
--------------------|--------|---------------------------
-ICM-20948 (IMU)    | 100Hz  | Heading, rates, attitude → PRIMARY control
-Rudder ADC         | 50Hz   | Position feedback
-NMEA2000 bus       | 1Hz    | Wind, speed, GPS → SECONDARY context
+Data Source           | Rate   | Used For
+----------------------|--------|---------------------------
+ICM-20948 (IMU)       | 100Hz  | Heading, rates, attitude → PRIMARY control
+Actuator Controller   | 20Hz   | Rudder angle, clutch status, V/I → feedback
+NMEA2000 bus          | 1Hz    | Wind, speed, GPS → SECONDARY context
 ```
 
-The ML model runs at 10Hz but the NMEA2000 values are held/interpolated between updates. The IMU provides the high-frequency feedback essential for stable steering.
+The ML model runs at 10Hz but the NMEA2000 values are held/interpolated between updates. The IMU provides the high-frequency feedback essential for stable steering. The Actuator Controller reports rudder position and status back to the Pi for monitoring and ML input features.
 
 ---
 
@@ -213,7 +230,7 @@ graph TD
 | 12 | `stw` | N2K | ÷25kn | Speed through water |
 | 13 | `sog` | N2K | ÷25kn | Speed over ground |
 | 14 | `cog_error` | computed | ÷180° | Course over ground error |
-| 15 | `rudder_position` | ADC | ÷30° | Current rudder angle |
+| 15 | `rudder_position` | Actuator Controller | ÷30° | Current rudder angle |
 | 16 | `rudder_velocity` | computed | ÷10°/s | Rudder movement rate |
 | 17 | `target_angle` | mode-dependent | ÷180° | Target heading/TWA/AWA |
 | 18 | `vmg_upwind` | computed | ÷15kn | Velocity made good upwind |
@@ -224,6 +241,14 @@ graph TD
 | 23 | `mode_wind_awa` | config | binary | 1 if AWA mode |
 | 24 | `mode_wind_twa` | config | binary | 1 if TWA mode |
 | 25 | `wave_period_est` | IMU accel FFT | ÷15s | Estimated wave period |
+
+> [!NOTE]
+> **Motor current is intentionally excluded from v1 features.** While the Actuator Controller reports motor current, it is logged for analysis but not used as an ML input because:
+> - It's a lagging indicator (current rises *after* movement starts)
+> - Likely correlates with existing features (speed, heel, wind pressure)
+> - Risk of model learning to minimize current rather than steer optimally
+>
+> After collecting real sailing data, analyze whether current provides predictive value not captured by other features. If so, add as feature #26 in v2.
 
 ##### Network Architecture
 
@@ -337,6 +362,34 @@ def autopilot_loss(y_true, y_pred):
 - Recommended: 50+ hours across varied conditions
 - Must include rudder position in logs
 
+**Data Logging (for training and analysis):**
+
+All sensor data is logged at 10Hz for training and post-hoc analysis. This includes values not used as ML features.
+
+| Field | Source | Used in ML | Notes |
+|-------|--------|------------|-------|
+| timestamp | system | - | Unix timestamp with ms precision |
+| heading | IMU | Yes | Magnetic heading (°) |
+| pitch, roll | IMU | Yes | Attitude (°) |
+| heading_rate, pitch_rate, roll_rate | IMU | Yes | Angular rates (°/s) |
+| ax, ay, az | IMU | No | Raw accelerations (for wave analysis) |
+| awa, aws | N2K | Yes | Apparent wind |
+| stw, sog, cog | N2K | Yes | Speed and course |
+| rudder_position | Actuator | Yes | Current angle (°) |
+| rudder_target | Actuator | No | Commanded angle (°) |
+| clutch_engaged | Actuator | No | Boolean |
+| motor_voltage | Actuator | No | Supply voltage (V) |
+| **motor_current** | Actuator | **No (v1)** | Motor load (A) - logged for future analysis |
+| fault_code | Actuator | No | MCU fault status |
+| mode | System | Yes | STANDBY, COMPASS, WIND_AWA, etc. |
+| target_heading/twa/awa | System | Yes | Mode-specific target |
+
+> [!TIP]
+> **Future analysis:** After collecting sailing data, use logged `motor_current` to investigate:
+> - Correlation with existing features (speed, heel, wind)
+> - Predictive value for steering resistance
+> - Whether adding as feature #26 improves model performance
+
 ---
 
 #### [NEW] [online_learning.py](file:///Users/ieb/timefields/antigravity/autopilot/src/training/online_learning.py)
@@ -385,46 +438,110 @@ class OnlineLearner:
 
 ---
 
-### Rudder Control Loop
+### Actuator Controller Interface
 
-#### [NEW] [rudder_controller.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/rudder_controller.py)
+#### [NEW] [actuator_interface.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/actuator_interface.py)
 
 The ML model outputs a **desired rudder position** (normalized -1 to +1).
-A simple proportional controller drives the ram to achieve this position.
+The Pi sends this target to the Actuator Controller MCU over a dedicated serial link.
+The MCU handles closed-loop position control internally using a P-controller.
+
+**Serial Protocol:**
+
+Commands (Pi → Actuator Controller):
+```
+$RUD,<target>,<engage>*XX    - Set target angle (-1.0 to +1.0), engage/disengage clutch
+$CFG,TIMEOUT,<ms>*XX         - Set watchdog timeout (default 2000ms)
+$CAL,CENTER*XX               - Calibrate current position as center (0°)
+$CAL,PORT*XX                 - Calibrate current position as port limit
+$CAL,STBD*XX                 - Calibrate current position as starboard limit
+```
+
+Status (Actuator Controller → Pi at 20Hz):
+```
+$STS,<target>,<actual>,<clutch>,<voltage>,<current>,<fault>*XX
+  target:  Commanded angle (-1.0 to +1.0)
+  actual:  Current angle (-1.0 to +1.0)
+  clutch:  0=disengaged, 1=engaged
+  voltage: Supply voltage (V)
+  current: Motor current (A)
+  fault:   Fault code (0=none, 1=overcurrent, 2=stall, 3=position, 4=sensor, 5=watchdog)
+```
+
+**Clutch Behavior:**
+- Engages only when `engage=1` in command
+- Stays engaged while valid commands arrive within watchdog timeout
+- Auto-disengages if no command received within timeout (default 2s)
+- Disengages immediately on `engage=0` command
+- Status always reports current clutch state
+
+**Python Interface:**
 
 ```python
-class RudderController:
+@dataclass
+class ActuatorStatus:
+    """Status received from Actuator Controller."""
+    timestamp: float = 0.0
+    target_angle: float = 0.0      # Commanded angle (normalized -1 to +1)
+    actual_angle: float = 0.0      # Current angle (normalized -1 to +1)
+    clutch_engaged: bool = False
+    voltage: float = 0.0           # Supply voltage (V)
+    current: float = 0.0           # Motor current (A)
+    fault_code: int = 0            # 0=none, see MCU fault codes
+    valid: bool = False
+
+
+class ActuatorInterface:
     """
-    Inner control loop: ML target → PWM output.
-    Runs at 50Hz (faster than ML inference).
+    Serial interface to Actuator Controller MCU.
+    Replaces direct PWM control - sends target angles, receives status.
     """
     
-    def __init__(self, max_rate=4.0):  # deg/s, based on 15s lock-to-lock
-        self.max_rate = max_rate
-        self.kp = 0.8  # Proportional gain
+    def __init__(self, port: str = "/dev/ttyAMA1", baudrate: int = 115200):
+        self.serial = serial.Serial(port, baudrate, timeout=0.1)
+        self.last_status = ActuatorStatus()
+        self._lock = threading.Lock()
         
-    def update(self, target_normalized, current_position_deg, dt):
+    def send_command(self, target_normalized: float, engage: bool = True):
         """
+        Send rudder target command to Actuator Controller.
+        
         Args:
-            target_normalized: ML output [-1, 1] → [-30°, +30°]
-            current_position_deg: From potentiometer
-            dt: Time since last update
-            
-        Returns:
-            (pwm_port, pwm_starboard): Duty cycles 0-1
+            target_normalized: Target angle [-1, 1] where ±1 = ±30°
+            engage: True to engage clutch, False to disengage
         """
-        target_deg = target_normalized * 30.0  # Scale to degrees
-        error = target_deg - current_position_deg
+        target = max(-1.0, min(1.0, target_normalized))
+        cmd = f"RUD,{target:.3f},{1 if engage else 0}"
+        checksum = self._compute_checksum(cmd)
+        self.serial.write(f"${cmd}*{checksum:02X}\r\n".encode())
         
-        # Proportional control with rate limiting
-        rate_demand = np.clip(self.kp * error, -self.max_rate, self.max_rate)
+    def disengage(self):
+        """Immediately disengage clutch (emergency or standby)."""
+        self.send_command(0.0, engage=False)
         
-        # Convert to PWM (one direction per channel)
-        if rate_demand > 0:
-            return (rate_demand / self.max_rate, 0.0)
-        else:
-            return (0.0, -rate_demand / self.max_rate)
+    def read_status(self) -> ActuatorStatus:
+        """
+        Read and parse incoming status messages.
+        Non-blocking - returns last valid status if no new data.
+        """
+        # Parse $STS messages from serial buffer
+        # Returns ActuatorStatus with target, actual, clutch, voltage, current
+        ...
+        
+    def _compute_checksum(self, payload: str) -> int:
+        """XOR checksum of payload characters."""
+        checksum = 0
+        for c in payload:
+            checksum ^= ord(c)
+        return checksum
 ```
+
+**Key Differences from Previous Architecture:**
+- Pi no longer generates PWM directly - MCU handles motor control
+- Pi no longer reads ADC directly - MCU reads potentiometer
+- Closed-loop position control runs on MCU at 50Hz
+- Clutch provides fail-safe: disengages on communication loss
+- Current monitoring enables overload protection
 
 ---
 
@@ -445,49 +562,326 @@ For VMG modes, the model learns to find the optimal TWA from the polar, adjustin
 
 ---
 
-### Safety Systems
+### Actuator Controller Firmware
 
-#### [NEW] [safety.py](file:///Users/ieb/timefields/antigravity/autopilot/src/control/safety.py)
+#### [NEW] firmware/actuator/
 
-```python
-class SafetyLayer:
-    """
-    Hard limits and sanity checks between ML and actuator.
-    """
+Dedicated MCU firmware for closed-loop rudder control with electromagnetic clutch management.
+
+**Hardware: ATtiny3226 Pin Allocation**
+
+| Pin | Function | Notes |
+|-----|----------|-------|
+| PA0 | UPDI | Programming interface |
+| PA1 | ADC_RUDDER | Rudder potentiometer input |
+| PA2 | ADC_CURRENT | Motor current sense (shunt resistor) |
+| PA3 | ADC_VOLTAGE | Supply voltage sense (divider) |
+| PA4 | PWM_PORT | TCA0 WO4 - Port drive to H-Bridge |
+| PA5 | PWM_STBD | TCA0 WO5 - Starboard drive to H-Bridge |
+| PA6 | CLUTCH | N-FET gate for electromagnetic clutch |
+| PA7 | LED | Status indicator |
+| PB2 | TX | Serial to Pi RX |
+| PB3 | RX | Serial from Pi TX |
+
+> [!NOTE]
+> ATtiny3224 (14-pin) can be used as fallback but has fewer available pins.
+> ATtiny3226 (20-pin) provides more headroom for future expansion.
+
+**Firmware Modules:**
+
+| File | Purpose |
+|------|---------|
+| `main.cpp` | Main loop, serial protocol, watchdog timer |
+| `config.h` | Pin definitions, calibration values, timing constants |
+| `position_controller.h` | P-controller for rudder position targeting |
+| `adc_reader.h` | Potentiometer, current, and voltage ADC reading |
+| `clutch.h` | Clutch engage/disengage with soft-start timing |
+
+**Control Loop (50Hz):**
+```cpp
+void loop() {
+    // 1. Read sensors
+    float rudder_angle = adc.readRudderAngle();    // -1.0 to +1.0
+    float motor_current = adc.readMotorCurrent();  // Amps
+    float supply_voltage = adc.readVoltage();      // Volts
     
-    RUDDER_LIMIT_DEG = 28.0  # Software limit (hardware is 30°)
-    MAX_RUDDER_RATE = 5.0    # deg/s
-    MAX_HEADING_ERROR = 45.0 # deg - disengage if exceeded
+    // 2. Check watchdog - disengage clutch if no command received
+    if (millis() - lastCommandTime > watchdogTimeout) {
+        clutch.disengage();
+        target_angle = rudder_angle;  // Hold current position
+    }
     
-    def validate(self, ml_output, state):
-        """
-        Returns (safe_output, alarm_code).
-        """
-        # 1. Clamp rudder position
-        output = np.clip(ml_output, -self.RUDDER_LIMIT_DEG/30, 
-                         self.RUDDER_LIMIT_DEG/30)
+    // 3. Run position controller (only if clutch engaged)
+    if (clutch.isEngaged()) {
+        float error = target_angle - rudder_angle;
+        float pwm = controller.compute(error);
         
-        # 2. Rate limit (smooth the command)
-        rate = (output - self.last_output) / self.dt
-        if abs(rate) > self.MAX_RUDDER_RATE / 30:
-            output = self.last_output + np.sign(rate) * self.MAX_RUDDER_RATE/30 * self.dt
-            
-        # 3. Heading error check
-        if abs(state.heading_error) > self.MAX_HEADING_ERROR:
-            return (0.0, ALARM_HEADING_DEVIATION)
-            
-        # 4. Sensor validity
-        if state.sensor_age > 0.5:  # 500ms without fresh data
-            return (0.0, ALARM_SENSOR_TIMEOUT)
-            
-        self.last_output = output
-        return (output, OK)
+        // Current limiting
+        if (motor_current > CURRENT_LIMIT) {
+            pwm *= 0.5;  // Reduce power on overload
+        }
+        
+        // Output to H-Bridge
+        if (pwm > 0) {
+            analogWrite(PWM_STBD, pwm * 255);
+            analogWrite(PWM_PORT, 0);
+        } else {
+            analogWrite(PWM_PORT, -pwm * 255);
+            analogWrite(PWM_STBD, 0);
+        }
+    }
+    
+    // 4. Send status at 20Hz
+    if (statusTimer.ready()) {
+        sendStatus(target_angle, rudder_angle, clutch.isEngaged(), 
+                   supply_voltage, motor_current);
+    }
+}
 ```
 
-**Manual Override Detection:**
-- Monitor rudder position vs. commanded position
-- If deviation exceeds threshold for >1s, assume human override
-- Disengage and switch to STANDBY
+**Calibration Storage (EEPROM):**
+```cpp
+struct CalibrationData {
+    uint16_t adc_center;        // ADC value at 0°
+    uint16_t adc_port_limit;    // ADC value at -30°
+    uint16_t adc_stbd_limit;    // ADC value at +30°
+    float current_scale;        // A per ADC count
+    float voltage_scale;        // V per ADC count
+    uint16_t watchdog_timeout;  // ms (default 2000)
+    uint16_t magic;             // 0xACDC if valid
+};
+```
+
+**Hardware Safety (enforced in MCU):**
+
+These limits are enforced by the MCU regardless of Pi commands:
+
+| Protection | Soft Limit | Hard Limit | Action |
+|------------|------------|------------|--------|
+| Position | ±28° | ±30° (mechanical) | Stop motor at soft limit |
+| Current | 12A | 15A | Reduce PWM at soft, stop at hard |
+| Stall | - | 10A + <0.5°/s for 500ms | Stop motor, report fault |
+| Watchdog | - | 2000ms no command | Disengage clutch |
+
+```cpp
+// Fault codes reported in $STS message
+#define FAULT_NONE            0
+#define FAULT_OVERCURRENT     1  // Motor current > 15A
+#define FAULT_STALL           2  // High current, no movement
+#define FAULT_POSITION_LIMIT  3  // At software position limit
+#define FAULT_SENSOR          4  // ADC read failure
+#define FAULT_WATCHDOG        5  // Command timeout
+```
+
+**Clutch Behavior:**
+- Soft-start: gradual PWM ramp over 200ms when engaging
+- Immediate disengage on watchdog timeout or fault
+- Clutch state always reported in status message
+
+---
+
+### Safety Architecture (Two-Layer)
+
+Safety is implemented at two levels with distinct responsibilities:
+
+```mermaid
+graph TD
+    subgraph PiLayer [Raspberry Pi - System Safety]
+        ML[ML Model Output]
+        SYS[System Safety Layer]
+        SEND[Send Command]
+    end
+    
+    subgraph MCULayer [Actuator Controller - Hardware Protection]
+        RECV[Receive Command]
+        HW[Hardware Safety]
+        ACT[Actuate]
+    end
+    
+    ML --> SYS
+    SYS -->|"target, engage"| SEND
+    SEND -->|Serial| RECV
+    RECV --> HW
+    HW --> ACT
+    
+    SYS -.->|"Monitors: heading, sensors, mode"| SYS
+    HW -.->|"Enforces: limits, current, watchdog"| HW
+```
+
+---
+
+#### Layer 1: Hardware Protection (Actuator Controller MCU)
+
+**Location:** `firmware/actuator/` - runs on ATtiny3226
+
+The MCU enforces hard limits to protect physical components. These checks run regardless of what the Pi commands.
+
+| Protection | Limit | Action |
+|------------|-------|--------|
+| Position limits | ±28° software (±30° mechanical) | Refuse to drive beyond limit |
+| Current limiting | >15A sustained | Reduce PWM to 50%, stop if persistent |
+| Rate limiting | >5°/s | Clamp commanded rate |
+| Watchdog timeout | No command for 2s | Disengage clutch, hold position |
+| Stall detection | High current + no movement | Stop motor, report fault |
+
+```cpp
+// In Actuator Controller firmware
+void enforceHardwareLimits() {
+    // 1. Position limits - ALWAYS enforced
+    if (rudder_angle >= POSITION_LIMIT_STBD && target_angle > rudder_angle) {
+        pwm_output = 0;  // Don't drive further starboard
+    }
+    if (rudder_angle <= POSITION_LIMIT_PORT && target_angle < rudder_angle) {
+        pwm_output = 0;  // Don't drive further port
+    }
+    
+    // 2. Current limiting - protect motor and H-bridge
+    if (motor_current > CURRENT_LIMIT_HARD) {
+        pwm_output = 0;  // Emergency stop
+        fault_code = FAULT_OVERCURRENT;
+    } else if (motor_current > CURRENT_LIMIT_SOFT) {
+        pwm_output *= 0.5;  // Reduce power
+    }
+    
+    // 3. Stall detection - high current but no movement
+    if (motor_current > STALL_CURRENT_THRESHOLD && 
+        abs(rudder_velocity) < STALL_VELOCITY_THRESHOLD) {
+        stall_timer++;
+        if (stall_timer > STALL_TIMEOUT) {
+            pwm_output = 0;
+            fault_code = FAULT_STALL;
+        }
+    } else {
+        stall_timer = 0;
+    }
+}
+```
+
+**MCU Fault Codes (reported in status):**
+```cpp
+FAULT_NONE = 0
+FAULT_OVERCURRENT = 1      // Motor current exceeded hard limit
+FAULT_STALL = 2            // Motor stalled (current but no movement)
+FAULT_POSITION_LIMIT = 3   // At mechanical limit
+FAULT_SENSOR = 4           // ADC read failure
+FAULT_WATCHDOG = 5         // Command timeout triggered
+```
+
+> [!IMPORTANT]
+> The MCU **always** enforces these limits. Even if the Pi sends a command to drive to +35°, the MCU will stop at +28°. This provides defence-in-depth.
+
+---
+
+#### Layer 2: System Safety (Raspberry Pi)
+
+**Location:** `src/control/safety.py`
+
+The Pi handles autopilot-level decisions that require the full sensor picture. The MCU cannot make these decisions because it only knows rudder position and motor current.
+
+| Check | Condition | Action |
+|-------|-----------|--------|
+| Heading deviation | Error > 45° for > 3s | Disengage, alarm |
+| Sensor timeout | IMU or NMEA stale > 500ms | Disengage, alarm |
+| Actuator timeout | No status from MCU > 200ms | Disengage, alarm |
+| MCU fault | Fault code reported | Disengage, alarm |
+| Manual override | Position ≠ command for > 1s | Disengage, switch to STANDBY |
+
+```python
+class SystemSafety:
+    """
+    Autopilot-level safety decisions.
+    Requires full sensor context - cannot run on MCU.
+    """
+    
+    MAX_HEADING_ERROR = 45.0      # degrees
+    HEADING_ERROR_TIMEOUT = 3.0   # seconds before alarm
+    SENSOR_TIMEOUT = 0.5          # seconds
+    ACTUATOR_TIMEOUT = 0.2        # seconds
+    OVERRIDE_THRESHOLD = 5.0      # degrees difference
+    OVERRIDE_TIMEOUT = 1.0        # seconds
+    
+    def __init__(self, actuator: ActuatorInterface):
+        self.actuator = actuator
+        self.heading_error_start = None
+        self.override_start = None
+    
+    def check(self, state, actuator_status: ActuatorStatus) -> tuple[bool, int]:
+        """
+        Check system-level safety conditions.
+        
+        Returns:
+            (ok, alarm_code) - ok=True if safe to continue
+        """
+        now = time.time()
+        
+        # 1. Check actuator communication
+        if not actuator_status.valid:
+            return (False, ALARM_ACTUATOR_TIMEOUT)
+        if now - actuator_status.timestamp > self.ACTUATOR_TIMEOUT:
+            return (False, ALARM_ACTUATOR_TIMEOUT)
+        
+        # 2. Check for MCU-reported faults
+        if actuator_status.fault_code != 0:
+            return (False, ALARM_MCU_FAULT)
+        
+        # 3. Check sensor validity (IMU, NMEA2000)
+        if state.imu_age > self.SENSOR_TIMEOUT:
+            return (False, ALARM_SENSOR_TIMEOUT)
+        
+        # 4. Heading error monitoring (with timeout before alarm)
+        if abs(state.heading_error) > self.MAX_HEADING_ERROR:
+            if self.heading_error_start is None:
+                self.heading_error_start = now
+            elif now - self.heading_error_start > self.HEADING_ERROR_TIMEOUT:
+                return (False, ALARM_HEADING_DEVIATION)
+        else:
+            self.heading_error_start = None
+        
+        # 5. Manual override detection
+        position_error = abs(actuator_status.actual_angle - actuator_status.target_angle)
+        if position_error > self.OVERRIDE_THRESHOLD / 30:  # normalized
+            if self.override_start is None:
+                self.override_start = now
+            elif now - self.override_start > self.OVERRIDE_TIMEOUT:
+                return (False, ALARM_MANUAL_OVERRIDE)
+        else:
+            self.override_start = None
+        
+        return (True, OK)
+    
+    def disengage(self):
+        """Send disengage command to actuator."""
+        self.actuator.send_command(0.0, engage=False)
+```
+
+**Pi Alarm Codes:**
+```python
+OK = 0
+ALARM_HEADING_DEVIATION = 1    # Off course > 45° for > 3s
+ALARM_SENSOR_TIMEOUT = 2       # IMU/NMEA data stale
+ALARM_ACTUATOR_TIMEOUT = 3     # No status from Actuator Controller
+ALARM_MCU_FAULT = 4            # MCU reported hardware fault
+ALARM_MANUAL_OVERRIDE = 5      # Human grabbed the helm
+ALARM_EMERGENCY_STOP = 6       # Manual emergency stop button
+```
+
+---
+
+#### Defence in Depth
+
+The two-layer architecture provides redundant protection:
+
+| Failure Mode | Layer 1 (MCU) | Layer 2 (Pi) |
+|--------------|---------------|--------------|
+| Pi crashes | Watchdog disengages clutch | - |
+| Serial link fails | Watchdog disengages clutch | Actuator timeout alarm |
+| ML outputs garbage | Position limits enforced | Heading deviation alarm |
+| Motor jams | Stall detection stops motor | MCU fault alarm |
+| Human grabs wheel | - | Override detection → STANDBY |
+| Off course | - | Heading error alarm |
+
+> [!NOTE]
+> The MCU is the "last line of defence" - it will protect the hardware even if the Pi software has bugs. The Pi provides the "intelligence" - it knows if the autopilot is actually doing its job.
 
 ---
 
@@ -514,11 +908,29 @@ autopilot/
 ├── docs/
 │   ├── hardware_design.md
 │   └── wiring_diagram.png
+├── firmware/
+│   ├── mcu/                          # IMU sensor fusion MCU (ATtiny3224)
+│   │   ├── src/
+│   │   │   ├── main.cpp
+│   │   │   ├── config.h
+│   │   │   ├── ICM20948.h
+│   │   │   └── MadgwickAHRS.h
+│   │   └── platformio.ini
+│   └── actuator/                     # Actuator Controller MCU (ATtiny3226)
+│       ├── src/
+│       │   ├── main.cpp              # Main loop, serial protocol, watchdog
+│       │   ├── config.h              # Pin definitions, calibration
+│       │   ├── position_controller.h # P-controller for rudder position
+│       │   ├── adc_reader.h          # Potentiometer, current, voltage ADC
+│       │   └── clutch.h              # Clutch control with soft-start
+│       └── platformio.ini
+├── hardware/
+│   ├── imu-board/                    # IMU MCU PCB (KiCad)
+│   └── actuator-board/               # Actuator Controller PCB (KiCad)
 ├── src/
 │   ├── sensors/
-│   │   ├── imu_fusion.py
-│   │   ├── nmea2000_interface.py
-│   │   └── adc_reader.py
+│   │   ├── imu_fusion.py             # Serial interface to IMU MCU
+│   │   └── nmea2000_interface.py     # NMEA2000 bus via SocketCAN
 │   ├── ml/
 │   │   ├── autopilot_model.py
 │   │   ├── feature_engineering.py
@@ -528,7 +940,7 @@ autopilot/
 │   │   ├── train_imitation.py
 │   │   └── online_learning.py
 │   ├── control/
-│   │   ├── rudder_controller.py
+│   │   ├── actuator_interface.py     # Serial interface to Actuator Controller
 │   │   ├── mode_manager.py
 │   │   └── safety.py
 │   └── n2k/
@@ -542,6 +954,9 @@ autopilot/
 ├── tests/
 └── main.py
 ```
+
+> [!NOTE]
+> The `adc_reader.py` module is no longer needed - rudder position is now read by the Actuator Controller MCU and reported via serial.
 
 ---
 
