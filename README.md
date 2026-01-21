@@ -76,6 +76,46 @@ python -m src.main --simulation
 python -m src.main --simulation --verbose
 ```
 
+## Testing
+
+### Running Unit Tests
+
+```bash
+# Install dev dependencies
+uv pip install -e ".[dev]"
+
+# Run all tests with coverage
+uv run pytest
+
+# Run specific test file
+uv run pytest tests/test_safety.py -v
+
+# Run specific test
+uv run pytest tests/test_feature_engineering.py::TestAngleDiff -v
+
+# Run with verbose output
+uv run pytest -v --tb=short
+```
+
+### Test Coverage
+
+The test suite covers the core modules:
+
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| Feature engineering | 26 | 96% |
+| Safety layer | 32 | 93% |
+| NMEA2000 interface | 30 | 70% |
+| Polar diagram | 28 | 94% |
+| Mode manager | 37 | 85% |
+| Actuator interface | 30 | 69% |
+| IMU fusion | 20 | 71% |
+| Autopilot model | 20 | 46%* |
+
+*Model tests require TensorFlow; mock tests run without it.
+
+See [planning/unit_test_plan.md](planning/unit_test_plan.md) for detailed test documentation.
+
 ## Project Structure
 
 ```
