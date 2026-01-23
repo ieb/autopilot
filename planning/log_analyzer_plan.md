@@ -185,11 +185,40 @@ Main orchestrator that:
 - Generates summary statistics
 - Saves metadata JSON files
 
+## Data Quality Reporting
+
+The analyzer provides detailed reporting on data quality and volume:
+
+### Per-Segment Reporting
+- **Duration**: Time in seconds and hours
+- **Frame count**: Actual number of data frames
+- **Feature coverage**: Percentage of frames with valid data for each feature
+- **Missing features**: List of required features below 50% coverage
+- **Usability flag**: Whether segment is suitable for training
+
+### Overall Summary
+- **Total/usable hours**: Time breakdown by operation mode
+- **Total/usable frames**: Frame counts with training record estimates
+- **Feature coverage table**: Coverage percentage for all required and optional features
+- **Missing feature warnings**: Highlights features that may cause training issues
+
+### CLI Output Example
+```
+--- Feature Coverage ---
+Feature           Coverage       Status
+--------------- ---------- ------------
+heading             100.0%           OK
+yaw_rate            100.0%           OK
+stw                   0.0%      MISSING <--
+```
+
 ## Tests
 
-30 unit tests in [`tests/test_log_analyzer.py`](../tests/test_log_analyzer.py) covering:
+39 unit tests in [`tests/test_log_analyzer.py`](../tests/test_log_analyzer.py) covering:
 - Operation mode detection (anchor, motoring, sailing)
 - Steering target detection (heading, AWA, TWA)
+- Feature coverage calculation and thresholds
+- Segment usability determination
 - Metadata generation and parsing
 - DataLoader integration
 - PGN decoding for new fields

@@ -61,6 +61,58 @@ class AnalysisConfig:
     sample_interval: float = 1.0  # seconds - analysis sample rate
 
 
+# Required input features for training and their source fields
+REQUIRED_FEATURES = {
+    "heading": "heading",
+    "yaw_rate": "yaw_rate",
+    "roll": "roll",
+    "pitch": "pitch",
+    "awa": "awa",
+    "aws": "aws",
+    "stw": "stw",
+    "sog": "sog",
+    "cog": "cog",
+    "rudder_angle": "rudder_angle",
+}
+
+# Optional but useful features
+OPTIONAL_FEATURES = {
+    "engine_rpm": "engine_rpm",
+    "latitude": "latitude",
+    "longitude": "longitude",
+    "pilot_heading": "pilot_heading",
+}
+
+
+@dataclass
+class FeatureCoverage:
+    """Coverage statistics for a feature."""
+    name: str
+    present_count: int = 0
+    total_count: int = 0
+    
+    @property
+    def coverage_pct(self) -> float:
+        """Percentage of frames with valid data."""
+        if self.total_count == 0:
+            return 0.0
+        return 100.0 * self.present_count / self.total_count
+    
+    @property
+    def is_available(self) -> bool:
+        """Feature is considered available if > 50% coverage."""
+        return self.coverage_pct > 50.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "present_count": self.present_count,
+            "total_count": self.total_count,
+            "coverage_pct": round(self.coverage_pct, 1),
+            "available": self.is_available,
+        }
+
+
 @dataclass
 class Segment:
     """A time segment with detected modes."""
@@ -71,21 +123,57 @@ class Segment:
     target_value: float
     confidence: float
     notes: str = ""
+    frame_count: int = 0
+    feature_coverage: Dict[str, FeatureCoverage] = field(default_factory=dict)
     
     def duration(self) -> float:
         """Return segment duration in seconds."""
         return self.end_time - self.start_time
+    
+    def duration_hours(self) -> float:
+        """Return segment duration in hours."""
+        return self.duration() / 3600.0
+    
+    def missing_features(self) -> List[str]:
+        """Return list of required features that are missing or have low coverage."""
+        missing = []
+        for name in REQUIRED_FEATURES:
+            if name in self.feature_coverage:
+                if not self.feature_coverage[name].is_available:
+                    missing.append(name)
+            else:
+                missing.append(name)
+        return missing
+    
+    def is_usable_for_training(self) -> bool:
+        """Segment is usable if operation mode is valid and required features present."""
+        if self.operation_mode in ('anchor', 'unknown'):
+            return False
+        if self.steering_mode == 'none':
+            return False
+        # Need at least heading, wind, and speed
+        critical_features = ['heading', 'awa', 'aws', 'stw']
+        for feat in critical_features:
+            if feat in self.missing_features():
+                return False
+        return True
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "duration_sec": round(self.duration(), 1),
+            "duration_hours": round(self.duration_hours(), 4),
             "operation_mode": self.operation_mode,
             "steering_mode": self.steering_mode,
             "target_value": round(self.target_value, 1),
             "confidence": round(self.confidence, 2),
             "notes": self.notes,
+            "frame_count": self.frame_count,
+            "usable_for_training": self.is_usable_for_training(),
+            "missing_features": self.missing_features(),
+            "feature_coverage": {k: v.to_dict() for k, v in self.feature_coverage.items()},
         }
 
 
@@ -95,8 +183,30 @@ class AnalysisResult:
     source_file: str
     analyzed_at: str
     total_duration_sec: float
+    total_frame_count: int = 0
     segments: List[Segment] = field(default_factory=list)
     summary: Dict[str, Any] = field(default_factory=dict)
+    overall_feature_coverage: Dict[str, FeatureCoverage] = field(default_factory=dict)
+    
+    def total_duration_hours(self) -> float:
+        """Total duration in hours."""
+        return self.total_duration_sec / 3600.0
+    
+    def usable_segments(self) -> List[Segment]:
+        """Return segments usable for training."""
+        return [s for s in self.segments if s.is_usable_for_training()]
+    
+    def usable_duration_sec(self) -> float:
+        """Total usable duration in seconds."""
+        return sum(s.duration() for s in self.usable_segments())
+    
+    def usable_duration_hours(self) -> float:
+        """Total usable duration in hours."""
+        return self.usable_duration_sec() / 3600.0
+    
+    def usable_frame_count(self) -> int:
+        """Total usable frames for training."""
+        return sum(s.frame_count for s in self.usable_segments())
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -104,8 +214,14 @@ class AnalysisResult:
             "source_file": self.source_file,
             "analyzed_at": self.analyzed_at,
             "total_duration_sec": round(self.total_duration_sec, 1),
+            "total_duration_hours": round(self.total_duration_hours(), 4),
+            "total_frame_count": self.total_frame_count,
+            "usable_duration_sec": round(self.usable_duration_sec(), 1),
+            "usable_duration_hours": round(self.usable_duration_hours(), 4),
+            "usable_frame_count": self.usable_frame_count(),
             "segments": [s.to_dict() for s in self.segments],
             "summary": self.summary,
+            "overall_feature_coverage": {k: v.to_dict() for k, v in self.overall_feature_coverage.items()},
         }
 
 
@@ -368,6 +484,7 @@ class LogAnalyzer:
                 source_file=path.name,
                 analyzed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 total_duration_sec=0,
+                total_frame_count=0,
                 segments=[],
                 summary={"usable_for_training": False, "reason": "No frames parsed"}
             )
@@ -377,25 +494,88 @@ class LogAnalyzer:
         end_time = frames[-1].timestamp
         total_duration = end_time - start_time
         
+        # Calculate overall feature coverage
+        overall_coverage = self._compute_feature_coverage(frames)
+        
         # Analyze in windows
         segments = self._analyze_windows(frames)
         
         # Merge adjacent similar segments
         merged_segments = self._merge_segments(segments)
         
+        # Recompute accurate frame counts and coverage for merged segments
+        merged_segments = self._recompute_segment_stats(merged_segments, frames)
+        
         # Calculate summary
-        summary = self._calculate_summary(merged_segments, total_duration)
+        summary = self._calculate_summary(merged_segments, total_duration, overall_coverage)
         
         result = AnalysisResult(
             source_file=path.name,
             analyzed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             total_duration_sec=total_duration,
+            total_frame_count=len(frames),
             segments=merged_segments,
             summary=summary,
+            overall_feature_coverage=overall_coverage,
         )
         
-        logger.info(f"Found {len(merged_segments)} segments in {path.name}")
+        logger.info(f"Found {len(merged_segments)} segments, "
+                   f"{result.usable_duration_hours():.2f}h usable, "
+                   f"{result.usable_frame_count()} frames in {path.name}")
         return result
+    
+    def _compute_feature_coverage(self, frames: List[LoggedFrame]) -> Dict[str, FeatureCoverage]:
+        """Compute feature coverage statistics for a set of frames."""
+        all_features = {**REQUIRED_FEATURES, **OPTIONAL_FEATURES}
+        coverage = {}
+        
+        for feature_name, field_name in all_features.items():
+            fc = FeatureCoverage(name=feature_name, total_count=len(frames))
+            
+            for frame in frames:
+                value = getattr(frame, field_name, 0)
+                # Consider a value "present" if it's non-zero
+                # (for angles, 0 could be valid, but we check for any data presence)
+                if value != 0:
+                    fc.present_count += 1
+                    
+            coverage[feature_name] = fc
+            
+        return coverage
+    
+    def _recompute_segment_stats(self, segments: List[Segment], 
+                                  all_frames: List[LoggedFrame]) -> List[Segment]:
+        """
+        Recompute accurate frame counts and coverage for merged segments.
+        
+        After merging, the frame counts can be inaccurate due to overlapping windows.
+        This method recalculates based on actual frames within each segment's time range.
+        """
+        updated_segments = []
+        
+        for seg in segments:
+            # Get actual frames in this segment's time range
+            seg_frames = [f for f in all_frames 
+                         if seg.start_time <= f.timestamp < seg.end_time]
+            
+            # Recompute coverage
+            coverage = self._compute_feature_coverage(seg_frames)
+            
+            # Create updated segment
+            updated_seg = Segment(
+                start_time=seg.start_time,
+                end_time=seg.end_time,
+                operation_mode=seg.operation_mode,
+                steering_mode=seg.steering_mode,
+                target_value=seg.target_value,
+                confidence=seg.confidence,
+                notes=seg.notes,
+                frame_count=len(seg_frames),
+                feature_coverage=coverage,
+            )
+            updated_segments.append(updated_seg)
+            
+        return updated_segments
         
     def _analyze_windows(self, frames: List[LoggedFrame]) -> List[Segment]:
         """Analyze frames using sliding windows."""
@@ -427,6 +607,9 @@ class LogAnalyzer:
                 # Create notes
                 notes = self._generate_notes(window_frames, op_mode, steering_mode)
                 
+                # Compute feature coverage for this window
+                feature_coverage = self._compute_feature_coverage(window_frames)
+                
                 segment = Segment(
                     start_time=current_time,
                     end_time=window_end,
@@ -435,6 +618,8 @@ class LogAnalyzer:
                     target_value=target_value,
                     confidence=confidence,
                     notes=notes,
+                    frame_count=len(window_frames),
+                    feature_coverage=feature_coverage,
                 )
                 segments.append(segment)
                 
@@ -478,6 +663,7 @@ class LogAnalyzer:
             
         merged = []
         current = segments[0]
+        accumulated_frames = [current]
         
         for next_seg in segments[1:]:
             # Check if modes match
@@ -494,26 +680,56 @@ class LogAnalyzer:
             
             if same_op and same_steering and similar_target:
                 # Extend current segment
-                current = Segment(
-                    start_time=current.start_time,
-                    end_time=next_seg.end_time,
-                    operation_mode=current.operation_mode,
-                    steering_mode=current.steering_mode,
-                    target_value=current.target_value,  # Keep first target
-                    confidence=(current.confidence + next_seg.confidence) / 2,
-                    notes=current.notes,
-                )
+                accumulated_frames.append(next_seg)
+                current = self._merge_two_segments(current, next_seg, accumulated_frames)
             else:
                 # Save current and start new
                 if current.duration() >= self.config.min_segment_duration:
                     merged.append(current)
                 current = next_seg
+                accumulated_frames = [next_seg]
                 
         # Don't forget last segment
         if current.duration() >= self.config.min_segment_duration:
             merged.append(current)
             
         return merged
+    
+    def _merge_two_segments(self, current: Segment, next_seg: Segment, 
+                            all_segments: List[Segment]) -> Segment:
+        """Merge two segments, aggregating frame counts and feature coverage."""
+        # Aggregate frame counts
+        total_frames = sum(s.frame_count for s in all_segments)
+        
+        # Aggregate feature coverage
+        merged_coverage = {}
+        for feature_name in REQUIRED_FEATURES:
+            fc = FeatureCoverage(name=feature_name)
+            for seg in all_segments:
+                if feature_name in seg.feature_coverage:
+                    fc.present_count += seg.feature_coverage[feature_name].present_count
+                    fc.total_count += seg.feature_coverage[feature_name].total_count
+            merged_coverage[feature_name] = fc
+            
+        for feature_name in OPTIONAL_FEATURES:
+            fc = FeatureCoverage(name=feature_name)
+            for seg in all_segments:
+                if feature_name in seg.feature_coverage:
+                    fc.present_count += seg.feature_coverage[feature_name].present_count
+                    fc.total_count += seg.feature_coverage[feature_name].total_count
+            merged_coverage[feature_name] = fc
+        
+        return Segment(
+            start_time=current.start_time,
+            end_time=next_seg.end_time,
+            operation_mode=current.operation_mode,
+            steering_mode=current.steering_mode,
+            target_value=current.target_value,
+            confidence=(current.confidence + next_seg.confidence) / 2,
+            notes=current.notes,
+            frame_count=total_frames,
+            feature_coverage=merged_coverage,
+        )
         
     def _angle_diff(self, a: float, b: float) -> float:
         """Compute signed angle difference."""
@@ -525,7 +741,9 @@ class LogAnalyzer:
         return diff
         
     def _calculate_summary(self, segments: List[Segment], 
-                          total_duration: float) -> Dict[str, Any]:
+                          total_duration: float,
+                          overall_coverage: Dict[str, FeatureCoverage] = None
+                          ) -> Dict[str, Any]:
         """Calculate summary statistics."""
         if total_duration <= 0:
             return {"usable_for_training": False, "reason": "No duration"}
@@ -546,17 +764,52 @@ class LogAnalyzer:
         sailing_pct = round(100 * sailing_time / total_duration, 1)
         unknown_pct = round(100 * unknown_time / total_duration, 1)
         
+        # Count usable segments and frames
+        usable_segments = [s for s in segments if s.is_usable_for_training()]
+        usable_time = sum(s.duration() for s in usable_segments)
+        usable_frames = sum(s.frame_count for s in usable_segments)
+        total_frames = sum(s.frame_count for s in segments)
+        
+        # Check for missing required features
+        missing_required = []
+        if overall_coverage:
+            for name in REQUIRED_FEATURES:
+                if name in overall_coverage:
+                    if not overall_coverage[name].is_available:
+                        missing_required.append(name)
+        
         # Determine if usable for training
-        usable_time = motoring_time + sailing_time
-        usable = usable_time >= 60.0  # At least 1 minute of usable data
+        usable = usable_time >= 60.0 and len(missing_required) <= 2  # Allow some missing
         
         return {
+            # Time breakdown
+            "total_duration_hours": round(total_duration / 3600, 4),
+            "anchor_hours": round(anchor_time / 3600, 4),
+            "motoring_hours": round(motoring_time / 3600, 4),
+            "sailing_hours": round(sailing_time / 3600, 4),
+            "unknown_hours": round(unknown_time / 3600, 4),
+            
+            # Percentages
             "anchor_pct": anchor_pct,
             "motoring_pct": motoring_pct,
             "sailing_pct": sailing_pct,
             "unknown_pct": unknown_pct,
+            
+            # Usable data
             "usable_for_training": usable,
             "usable_duration_sec": round(usable_time, 1),
+            "usable_duration_hours": round(usable_time / 3600, 4),
+            "usable_segment_count": len(usable_segments),
+            "total_segment_count": len(segments),
+            
+            # Frame counts
+            "total_frame_count": total_frames,
+            "usable_frame_count": usable_frames,
+            "training_records_estimate": max(0, usable_frames - 20),  # Subtract sequence length
+            
+            # Feature coverage
+            "missing_required_features": missing_required,
+            "required_features_available": len(missing_required) == 0,
         }
         
     def save_metadata(self, result: AnalysisResult, output_path: Optional[str] = None
@@ -681,12 +934,7 @@ def main() -> None:
             dry_run=args.dry_run
         )
         
-        print(f"\n{'='*60}")
-        print(f"Analyzed {len(results)} files")
-        
-        # Summary
-        total_usable = sum(1 for r in results if r.summary.get('usable_for_training'))
-        print(f"Usable for training: {total_usable}/{len(results)}")
+        _print_directory_summary(results)
         
         if args.dry_run:
             print("\nDry run - no metadata files written")
@@ -697,25 +945,132 @@ def main() -> None:
         return
 
 
+def _print_directory_summary(results: List[AnalysisResult]) -> None:
+    """Print summary for directory analysis."""
+    print(f"\n{'='*70}")
+    print(f"DIRECTORY ANALYSIS SUMMARY")
+    print(f"{'='*70}")
+    print(f"Files analyzed: {len(results)}")
+    
+    # Aggregate statistics
+    total_hours = sum(r.total_duration_hours() for r in results)
+    usable_hours = sum(r.usable_duration_hours() for r in results)
+    total_frames = sum(r.total_frame_count for r in results)
+    usable_frames = sum(r.usable_frame_count() for r in results)
+    usable_files = sum(1 for r in results if r.summary.get('usable_for_training'))
+    
+    print(f"\n--- Data Volume ---")
+    print(f"Total log duration:    {total_hours:.2f} hours")
+    print(f"Usable for training:   {usable_hours:.2f} hours ({100*usable_hours/total_hours:.1f}%)" if total_hours > 0 else "")
+    print(f"Total frames:          {total_frames:,}")
+    print(f"Usable frames:         {usable_frames:,}")
+    print(f"Training records est:  {max(0, usable_frames - 20 * len(results)):,}")
+    
+    print(f"\n--- Files ---")
+    print(f"Usable for training:   {usable_files}/{len(results)} files")
+    
+    # Aggregate by operation mode
+    anchor_hours = sum(r.summary.get('anchor_hours', 0) for r in results)
+    motoring_hours = sum(r.summary.get('motoring_hours', 0) for r in results)
+    sailing_hours = sum(r.summary.get('sailing_hours', 0) for r in results)
+    
+    print(f"\n--- Time by Operation Mode ---")
+    print(f"Anchor:    {anchor_hours:.2f} hours")
+    print(f"Motoring:  {motoring_hours:.2f} hours")
+    print(f"Sailing:   {sailing_hours:.2f} hours")
+    
+    # Feature coverage across all files
+    print(f"\n--- Feature Coverage (across all files) ---")
+    feature_counts = {}
+    for r in results:
+        for name, fc in r.overall_feature_coverage.items():
+            if name not in feature_counts:
+                feature_counts[name] = {'present': 0, 'total': 0}
+            feature_counts[name]['present'] += fc.present_count
+            feature_counts[name]['total'] += fc.total_count
+    
+    print(f"{'Feature':<15} {'Coverage':>10} {'Status':>12}")
+    print(f"{'-'*15} {'-'*10} {'-'*12}")
+    for name in REQUIRED_FEATURES:
+        if name in feature_counts:
+            fc = feature_counts[name]
+            pct = 100 * fc['present'] / fc['total'] if fc['total'] > 0 else 0
+            status = "OK" if pct > 50 else "MISSING"
+            marker = "" if pct > 50 else " <--"
+            print(f"{name:<15} {pct:>9.1f}% {status:>12}{marker}")
+    
+    print(f"\nOptional features:")
+    for name in OPTIONAL_FEATURES:
+        if name in feature_counts:
+            fc = feature_counts[name]
+            pct = 100 * fc['present'] / fc['total'] if fc['total'] > 0 else 0
+            print(f"  {name:<15} {pct:>9.1f}%")
+    
+    print(f"{'='*70}")
+
+
 def _print_result(result: AnalysisResult) -> None:
     """Print analysis result to console."""
-    print(f"\n{'='*60}")
-    print(f"File: {result.source_file}")
-    print(f"Duration: {result.total_duration_sec:.1f} seconds")
-    print(f"Segments: {len(result.segments)}")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print(f"FILE ANALYSIS: {result.source_file}")
+    print(f"{'='*70}")
     
+    # Overview
+    print(f"\n--- Overview ---")
+    print(f"Total duration:  {result.total_duration_hours():.4f} hours ({result.total_duration_sec:.1f} sec)")
+    print(f"Total frames:    {result.total_frame_count:,}")
+    print(f"Segments found:  {len(result.segments)}")
+    
+    # Usable data summary
+    usable_segs = result.usable_segments()
+    print(f"\n--- Usable Data ---")
+    print(f"Usable duration: {result.usable_duration_hours():.4f} hours ({result.usable_duration_sec():.1f} sec)")
+    print(f"Usable frames:   {result.usable_frame_count():,}")
+    print(f"Usable segments: {len(usable_segs)}/{len(result.segments)}")
+    training_records = max(0, result.usable_frame_count() - 20)  # Subtract sequence length
+    print(f"Training records estimate: {training_records:,}")
+    
+    # Feature coverage
+    print(f"\n--- Feature Coverage ---")
+    print(f"{'Feature':<15} {'Coverage':>10} {'Status':>12}")
+    print(f"{'-'*15} {'-'*10} {'-'*12}")
+    for name in REQUIRED_FEATURES:
+        if name in result.overall_feature_coverage:
+            fc = result.overall_feature_coverage[name]
+            status = "OK" if fc.is_available else "MISSING"
+            marker = "" if fc.is_available else " <--"
+            print(f"{name:<15} {fc.coverage_pct:>9.1f}% {status:>12}{marker}")
+    
+    missing = result.summary.get('missing_required_features', [])
+    if missing:
+        print(f"\nWARNING: Missing required features: {', '.join(missing)}")
+    
+    # Segments detail
+    print(f"\n--- Segments ---")
     for i, seg in enumerate(result.segments, 1):
-        duration = seg.duration()
-        print(f"\n[{i}] {seg.operation_mode.upper()} / {seg.steering_mode.upper()}")
-        print(f"    Time: {duration:.1f}s")
-        print(f"    Target: {seg.target_value:.1f}° (confidence: {seg.confidence:.0%})")
-        print(f"    Notes: {seg.notes}")
+        usable_marker = "[USABLE]" if seg.is_usable_for_training() else "[skip]"
+        print(f"\n[{i}] {seg.operation_mode.upper()} / {seg.steering_mode.upper()} {usable_marker}")
+        print(f"    Duration:    {seg.duration_hours():.4f} hours ({seg.duration():.1f} sec)")
+        print(f"    Frames:      {seg.frame_count:,}")
+        print(f"    Target:      {seg.target_value:.1f}° (confidence: {seg.confidence:.0%})")
         
-    print(f"\n{'='*60}")
-    print("Summary:")
-    for key, value in result.summary.items():
-        print(f"  {key}: {value}")
+        # Show missing features for this segment
+        seg_missing = seg.missing_features()
+        if seg_missing:
+            print(f"    Missing:     {', '.join(seg_missing)}")
+        
+        print(f"    Notes:       {seg.notes}")
+        
+    # Summary
+    print(f"\n--- Summary ---")
+    summary = result.summary
+    print(f"Anchor:      {summary.get('anchor_hours', 0):.4f} hours ({summary.get('anchor_pct', 0):.1f}%)")
+    print(f"Motoring:    {summary.get('motoring_hours', 0):.4f} hours ({summary.get('motoring_pct', 0):.1f}%)")
+    print(f"Sailing:     {summary.get('sailing_hours', 0):.4f} hours ({summary.get('sailing_pct', 0):.1f}%)")
+    print(f"Unknown:     {summary.get('unknown_hours', 0):.4f} hours ({summary.get('unknown_pct', 0):.1f}%)")
+    
+    print(f"\nUsable for training: {'YES' if summary.get('usable_for_training') else 'NO'}")
+    print(f"{'='*70}")
 
 
 def _interactive_review(result: AnalysisResult, analyzer: LogAnalyzer,

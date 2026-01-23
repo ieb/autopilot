@@ -16,9 +16,11 @@ import pytest
 from src.training.log_analyzer import (
     AnalysisConfig,
     AnalysisResult,
+    FeatureCoverage,
     LogAnalyzer,
     OperationDetector,
     OperationMode,
+    REQUIRED_FEATURES,
     Segment,
     SteeringMode,
     TargetDetector,
@@ -77,6 +79,40 @@ class TestAnalysisConfig:
         assert config.min_segment_duration > 0
 
 
+class TestFeatureCoverage:
+    """Tests for FeatureCoverage dataclass."""
+    
+    def test_coverage_pct_calculation(self):
+        """Coverage percentage should be calculated correctly."""
+        fc = FeatureCoverage(name="heading", present_count=80, total_count=100)
+        assert fc.coverage_pct == 80.0
+        
+    def test_coverage_pct_empty(self):
+        """Coverage percentage should be 0 for empty data."""
+        fc = FeatureCoverage(name="heading", present_count=0, total_count=0)
+        assert fc.coverage_pct == 0.0
+        
+    def test_is_available_above_threshold(self):
+        """Feature should be available if coverage > 50%."""
+        fc = FeatureCoverage(name="heading", present_count=60, total_count=100)
+        assert fc.is_available is True
+        
+    def test_is_available_below_threshold(self):
+        """Feature should not be available if coverage <= 50%."""
+        fc = FeatureCoverage(name="heading", present_count=50, total_count=100)
+        assert fc.is_available is False
+        
+    def test_to_dict(self):
+        """to_dict should include all fields."""
+        fc = FeatureCoverage(name="heading", present_count=80, total_count=100)
+        d = fc.to_dict()
+        assert d["name"] == "heading"
+        assert d["present_count"] == 80
+        assert d["total_count"] == 100
+        assert d["coverage_pct"] == 80.0
+        assert d["available"] is True
+
+
 class TestSegment:
     """Tests for Segment dataclass."""
     
@@ -93,6 +129,69 @@ class TestSegment:
         
         assert segment.duration() == 100.0
         
+    def test_duration_hours(self):
+        """Duration in hours should be duration / 3600."""
+        segment = Segment(
+            start_time=0.0,
+            end_time=3600.0,  # 1 hour
+            operation_mode="sailing",
+            steering_mode="awa",
+            target_value=45.0,
+            confidence=0.9,
+        )
+        
+        assert segment.duration_hours() == 1.0
+        
+    def test_missing_features(self):
+        """Missing features should be computed from coverage."""
+        coverage = {
+            "heading": FeatureCoverage(name="heading", present_count=100, total_count=100),
+            "awa": FeatureCoverage(name="awa", present_count=100, total_count=100),
+            "stw": FeatureCoverage(name="stw", present_count=10, total_count=100),  # Low coverage
+        }
+        segment = Segment(
+            start_time=0.0,
+            end_time=100.0,
+            operation_mode="sailing",
+            steering_mode="awa",
+            target_value=45.0,
+            confidence=0.9,
+            feature_coverage=coverage,
+        )
+        
+        missing = segment.missing_features()
+        assert "stw" in missing
+        assert "heading" not in missing
+        
+    def test_is_usable_for_training_valid(self):
+        """Usable segment should return True."""
+        coverage = {name: FeatureCoverage(name=name, present_count=100, total_count=100) 
+                   for name in REQUIRED_FEATURES}
+        segment = Segment(
+            start_time=0.0,
+            end_time=100.0,
+            operation_mode="sailing",
+            steering_mode="awa",
+            target_value=45.0,
+            confidence=0.9,
+            feature_coverage=coverage,
+        )
+        
+        assert segment.is_usable_for_training() is True
+        
+    def test_is_usable_for_training_anchor(self):
+        """Anchor segment should not be usable."""
+        segment = Segment(
+            start_time=0.0,
+            end_time=100.0,
+            operation_mode="anchor",
+            steering_mode="none",
+            target_value=0.0,
+            confidence=0.9,
+        )
+        
+        assert segment.is_usable_for_training() is False
+        
     def test_to_dict(self):
         """to_dict should include all fields."""
         segment = Segment(
@@ -103,6 +202,7 @@ class TestSegment:
             target_value=45.0,
             confidence=0.9,
             notes="Test segment",
+            frame_count=500,
         )
         
         d = segment.to_dict()
@@ -113,6 +213,10 @@ class TestSegment:
         assert d["target_value"] == 45.0
         assert d["confidence"] == 0.9
         assert d["notes"] == "Test segment"
+        assert d["frame_count"] == 500
+        assert d["duration_sec"] == 100.0
+        assert "usable_for_training" in d
+        assert "missing_features" in d
 
 
 class TestOperationDetector:

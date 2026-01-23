@@ -56,6 +56,18 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Data Preparation
+
+Before training, log data must be organized and analyzed. See [docs/data_preparation.md](docs/data_preparation.md) for the complete guide.
+
+```bash
+# 1. Organize logs by date
+uv run python -m src.n2k.log_organizer n2klogs/raw/ --execute
+
+# 2. Analyze logs and generate training metadata
+uv run python -m src.training.log_analyzer n2klogs/raw/
+```
+
 ### Training
 
 ```bash
