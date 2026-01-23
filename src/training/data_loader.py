@@ -54,6 +54,19 @@ class LoggedFrame:
     # Mode info
     target_heading: float = 0.0
     mode: str = "unknown"
+    
+    # Engine data (for operation mode detection)
+    engine_rpm: float = 0.0
+    engine_hours: float = 0.0
+    engine_temp: float = 0.0
+    
+    # Position data (for anchor detection)
+    latitude: float = 0.0
+    longitude: float = 0.0
+    
+    # Raymarine autopilot data
+    pilot_heading: float = 0.0
+    pilot_mode: str = "unknown"
 
 
 class CANLogParser:
@@ -71,19 +84,62 @@ class CANLogParser:
         """
         Parse a CAN log file and yield LoggedFrames.
         
-        Override this method for your specific log format.
+        Automatically detects format from file content.
         """
-        # Try to detect format from extension
         path = Path(filepath)
         
-        if path.suffix == '.json':
+        # Detect format from first line of file
+        detected_format = self._detect_format(filepath)
+        
+        if detected_format == 'json':
             yield from self._parse_json(filepath)
-        elif path.suffix == '.csv':
+        elif detected_format == 'csv':
             yield from self._parse_csv(filepath)
-        elif path.suffix == '.log':
+        elif detected_format == 'candump':
             yield from self._parse_candump(filepath)
+        elif detected_format == 'analyzed_csv':
+            yield from self._parse_analyzed_csv(filepath)
         else:
-            logger.warning(f"Unknown log format: {path.suffix}")
+            logger.warning(f"Unknown log format for {path.name}")
+            
+    def _detect_format(self, filepath: str) -> str:
+        """Detect log format from file content."""
+        try:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    # JSON format - starts with {
+                    if line.startswith('{'):
+                        return 'json'
+                        
+                    # Standard candump - starts with (timestamp)
+                    if line.startswith('(') and ')' in line:
+                        return 'candump'
+                        
+                    # Analyzed CSV format: YYYY-MM-DD-HH:MM:SS.mmm,priority,pgn,...
+                    if len(line) > 23 and line[4] == '-' and line[7] == '-' and line[10] == '-':
+                        parts = line.split(',')
+                        if len(parts) >= 7:
+                            return 'analyzed_csv'
+                            
+                    # Break after first non-empty line
+                    break
+        except Exception:
+            pass
+            
+        # Fall back to extension-based detection
+        path = Path(filepath)
+        if path.suffix == '.json':
+            return 'json'
+        elif path.suffix == '.csv':
+            return 'csv'
+        elif path.suffix == '.log':
+            return 'candump'
+            
+        return 'unknown'
             
     def _parse_json(self, filepath: str) -> Iterator[LoggedFrame]:
         """Parse JSON format logs."""
@@ -106,6 +162,160 @@ class CANLogParser:
                 frame = self._dict_to_frame(row)
                 if frame:
                     yield frame
+                    
+    def _parse_analyzed_csv(self, filepath: str) -> Iterator[LoggedFrame]:
+        """
+        Parse analyzed CSV format logs.
+        
+        Format: YYYY-MM-DD-HH:MM:SS.mmm,priority,pgn,source,dest,len,data_bytes...
+        Example: 2018-05-12-14:44:03.893,2,127250,204,255,8,ff,be,07,ff,7f,ff,7f,fd
+        """
+        from datetime import datetime
+        
+        current_data: Dict[str, Any] = {}
+        last_emit_time = 0.0
+        emit_interval = 0.1  # 10Hz
+        base_timestamp = None
+        
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    parts = line.split(',')
+                    if len(parts) < 7:
+                        continue
+                        
+                    # Parse timestamp: YYYY-MM-DD-HH:MM:SS.mmm
+                    timestamp_str = parts[0]
+                    try:
+                        dt = datetime.strptime(timestamp_str[:23], "%Y-%m-%d-%H:%M:%S.%f")
+                        timestamp = dt.timestamp()
+                    except ValueError:
+                        continue
+                        
+                    if base_timestamp is None:
+                        base_timestamp = timestamp
+                        
+                    # Parse PGN directly (already decoded in analyzed format)
+                    pgn = int(parts[2])
+                    
+                    # Parse data bytes
+                    data_bytes = []
+                    for i in range(6, len(parts)):
+                        try:
+                            data_bytes.append(int(parts[i], 16))
+                        except ValueError:
+                            break
+                    data = bytes(data_bytes)
+                    
+                    # Decode PGN data directly (no need to extract from CAN ID)
+                    self._decode_pgn_data(pgn, data, current_data, timestamp)
+                    
+                    # Emit at target rate
+                    if timestamp - last_emit_time >= emit_interval:
+                        frame = self._data_to_frame(current_data, timestamp)
+                        if frame:
+                            yield frame
+                        last_emit_time = timestamp
+                        
+                except (ValueError, IndexError):
+                    continue
+                    
+    def _decode_pgn_data(self, pgn: int, data: bytes, 
+                         current_data: Dict, timestamp: float):
+        """Decode PGN data directly (for analyzed CSV format)."""
+        current_data['timestamp'] = timestamp
+        
+        # Wind
+        if pgn == 130306:
+            if len(data) >= 6:
+                speed_raw = struct.unpack('<H', data[1:3])[0]
+                angle_raw = struct.unpack('<H', data[3:5])[0]
+                reference = data[5] & 0x07
+                
+                if reference == 2:  # Apparent
+                    if speed_raw != 0xFFFF:
+                        current_data['aws'] = speed_raw * 0.01 * 1.94384
+                    if angle_raw != 0xFFFF:
+                        awa = angle_raw * 0.0001 * 180 / 3.14159
+                        if awa > 180:
+                            awa -= 360
+                        current_data['awa'] = awa
+                        
+        # Speed
+        elif pgn == 128259:
+            if len(data) >= 4:
+                stw_raw = struct.unpack('<H', data[1:3])[0]
+                if stw_raw != 0xFFFF:
+                    current_data['stw'] = stw_raw * 0.01 * 1.94384
+                    
+        # COG/SOG
+        elif pgn == 129026:
+            if len(data) >= 6:
+                cog_raw = struct.unpack('<H', data[2:4])[0]
+                sog_raw = struct.unpack('<H', data[4:6])[0]
+                if cog_raw != 0xFFFF:
+                    current_data['cog'] = cog_raw * 0.0001 * 180 / 3.14159
+                if sog_raw != 0xFFFF:
+                    current_data['sog'] = sog_raw * 0.01 * 1.94384
+                    
+        # Heading
+        elif pgn == 127250:
+            if len(data) >= 4:
+                heading_raw = struct.unpack('<H', data[1:3])[0]
+                if heading_raw != 0xFFFF:
+                    current_data['heading'] = heading_raw * 0.0001 * 180 / 3.14159
+                    
+        # Rudder
+        elif pgn == 127245:
+            if len(data) >= 6:
+                position_raw = struct.unpack('<h', data[4:6])[0]
+                if position_raw != 0x7FFF:
+                    current_data['rudder_angle'] = position_raw * 0.0001 * 180 / 3.14159
+                    
+        # Engine RPM
+        elif pgn == 127488:
+            if len(data) >= 4:
+                rpm_raw = struct.unpack('<H', data[1:3])[0]
+                if rpm_raw != 0xFFFF:
+                    current_data['engine_rpm'] = rpm_raw * 0.25
+                    
+        # Position
+        elif pgn == 129025:
+            if len(data) >= 8:
+                lat_raw = struct.unpack('<i', data[0:4])[0]
+                lon_raw = struct.unpack('<i', data[4:8])[0]
+                if lat_raw != 0x7FFFFFFF:
+                    current_data['latitude'] = lat_raw * 1e-7
+                if lon_raw != 0x7FFFFFFF:
+                    current_data['longitude'] = lon_raw * 1e-7
+                    
+        # Rate of Turn
+        elif pgn == 127251:
+            if len(data) >= 5:
+                rot_raw = struct.unpack('<i', data[1:5])[0]
+                if rot_raw != 0x7FFFFFFF:
+                    current_data['yaw_rate'] = rot_raw * 3.125e-8 * 180 / 3.14159
+                    
+        # Attitude
+        elif pgn == 127257:
+            if len(data) >= 7:
+                pitch_raw = struct.unpack('<h', data[3:5])[0]
+                roll_raw = struct.unpack('<h', data[5:7])[0]
+                if pitch_raw != 0x7FFF:
+                    current_data['pitch'] = pitch_raw * 0.0001 * 180 / 3.14159
+                if roll_raw != 0x7FFF:
+                    current_data['roll'] = roll_raw * 0.0001 * 180 / 3.14159
+                    
+        # Seatalk Pilot Heading
+        elif pgn == 65359:
+            if len(data) >= 8:
+                heading_raw = struct.unpack('<H', data[5:7])[0]
+                if heading_raw != 0xFFFF:
+                    current_data['pilot_heading'] = heading_raw * 0.0001 * 180 / 3.14159
                     
     def _parse_candump(self, filepath: str) -> Iterator[LoggedFrame]:
         """
@@ -208,18 +418,89 @@ class CANLogParser:
                 if position_raw != 0x7FFF:
                     current_data['rudder_angle'] = position_raw * 0.0001 * 180 / 3.14159
                     
+        elif pgn == 127488:  # Engine Parameters, Rapid Update
+            if len(data) >= 4:
+                # Byte 0: Engine instance
+                # Bytes 1-2: Engine speed (RPM * 0.25)
+                rpm_raw = struct.unpack('<H', data[1:3])[0]
+                if rpm_raw != 0xFFFF:
+                    current_data['engine_rpm'] = rpm_raw * 0.25
+                    
+        elif pgn == 127489:  # Engine Parameters, Dynamic
+            if len(data) >= 8:
+                # Byte 0: Engine instance
+                # Bytes 3-4: Engine temperature (K * 0.01)
+                # Bytes 5-6: Alternator potential (V * 0.01)
+                # Skip to temperature at offset 3-4
+                temp_raw = struct.unpack('<H', data[3:5])[0]
+                if temp_raw != 0xFFFF:
+                    # Convert from K * 0.01 to Celsius
+                    current_data['engine_temp'] = (temp_raw * 0.01) - 273.15
+                    
+        elif pgn == 129025:  # Position, Rapid Update
+            if len(data) >= 8:
+                # Bytes 0-3: Latitude (degrees * 1e-7)
+                # Bytes 4-7: Longitude (degrees * 1e-7)
+                lat_raw = struct.unpack('<i', data[0:4])[0]
+                lon_raw = struct.unpack('<i', data[4:8])[0]
+                if lat_raw != 0x7FFFFFFF:
+                    current_data['latitude'] = lat_raw * 1e-7
+                if lon_raw != 0x7FFFFFFF:
+                    current_data['longitude'] = lon_raw * 1e-7
+                    
+        elif pgn == 127251:  # Rate of Turn
+            if len(data) >= 5:
+                # Byte 0: SID
+                # Bytes 1-4: Rate of turn (rad/s * 3.125e-8, signed)
+                rot_raw = struct.unpack('<i', data[1:5])[0]
+                if rot_raw != 0x7FFFFFFF:
+                    # Convert to degrees per second
+                    current_data['yaw_rate'] = rot_raw * 3.125e-8 * 180 / 3.14159
+                    
+        elif pgn == 127257:  # Attitude
+            if len(data) >= 7:
+                # Byte 0: SID
+                # Bytes 1-2: Yaw (not used, use heading instead)
+                # Bytes 3-4: Pitch (rad * 0.0001)
+                # Bytes 5-6: Roll (rad * 0.0001)
+                pitch_raw = struct.unpack('<h', data[3:5])[0]
+                roll_raw = struct.unpack('<h', data[5:7])[0]
+                if pitch_raw != 0x7FFF:
+                    current_data['pitch'] = pitch_raw * 0.0001 * 180 / 3.14159
+                if roll_raw != 0x7FFF:
+                    current_data['roll'] = roll_raw * 0.0001 * 180 / 3.14159
+                    
+        elif pgn == 65359:  # Seatalk: Pilot Heading (Raymarine proprietary)
+            if len(data) >= 8:
+                # Bytes 0-1: Manufacturer code (Raymarine = 0x9F3B)
+                # Bytes 5-6: Heading magnetic (rad * 0.0001)
+                heading_raw = struct.unpack('<H', data[5:7])[0]
+                if heading_raw != 0xFFFF:
+                    current_data['pilot_heading'] = heading_raw * 0.0001 * 180 / 3.14159
+                    
     def _data_to_frame(self, data: Dict, timestamp: float) -> Optional[LoggedFrame]:
         """Convert accumulated data dict to LoggedFrame."""
         return LoggedFrame(
             timestamp=timestamp,
             heading=data.get('heading', 0),
+            pitch=data.get('pitch', 0),
+            roll=data.get('roll', 0),
+            yaw_rate=data.get('yaw_rate', 0),
             awa=data.get('awa', 0),
             aws=data.get('aws', 0),
             stw=data.get('stw', 0),
             cog=data.get('cog', 0),
             sog=data.get('sog', 0),
             rudder_angle=data.get('rudder_angle', 0),
-            target_heading=data.get('target_heading', data.get('heading', 0))
+            target_heading=data.get('target_heading', data.get('heading', 0)),
+            mode=data.get('mode', 'unknown'),
+            engine_rpm=data.get('engine_rpm', 0),
+            engine_hours=data.get('engine_hours', 0),
+            engine_temp=data.get('engine_temp', 0),
+            latitude=data.get('latitude', 0),
+            longitude=data.get('longitude', 0),
+            pilot_heading=data.get('pilot_heading', 0),
+            pilot_mode=data.get('pilot_mode', 'unknown'),
         )
         
     def _record_to_frame(self, record: dict) -> Optional[LoggedFrame]:
@@ -238,7 +519,14 @@ class CANLogParser:
                 sog=record.get('sog', 0),
                 rudder_angle=record.get('rudder_angle', 0),
                 target_heading=record.get('target_heading', 0),
-                mode=record.get('mode', 'unknown')
+                mode=record.get('mode', 'unknown'),
+                engine_rpm=record.get('engine_rpm', 0),
+                engine_hours=record.get('engine_hours', 0),
+                engine_temp=record.get('engine_temp', 0),
+                latitude=record.get('latitude', 0),
+                longitude=record.get('longitude', 0),
+                pilot_heading=record.get('pilot_heading', 0),
+                pilot_mode=record.get('pilot_mode', 'unknown'),
             )
         except Exception:
             return None
@@ -248,16 +536,112 @@ class CANLogParser:
         return self._record_to_frame(row)
 
 
+@dataclass
+class MetadataSegment:
+    """A segment from metadata file."""
+    start_time: float
+    end_time: float
+    operation_mode: str
+    steering_mode: str
+    target_value: float
+    confidence: float = 0.0
+    notes: str = ""
+
+
 class TrainingDataLoader:
     """
     Loads and prepares training data from log files.
     
     Creates (state_sequence, rudder_command) pairs for supervised learning.
+    Uses metadata files when available to set mode and target values.
     """
     
     def __init__(self, config: Optional[DataConfig] = None):
         self.config = config or DataConfig()
         self._parser = CANLogParser()
+        
+    def _load_metadata(self, filepath: str) -> Optional[List[MetadataSegment]]:
+        """
+        Load metadata from .meta.json file if it exists.
+        
+        Returns list of segments or None if no metadata file exists.
+        """
+        meta_path = Path(filepath).with_suffix('.meta.json')
+        
+        if not meta_path.exists():
+            return None
+            
+        try:
+            with open(meta_path, 'r') as f:
+                data = json.load(f)
+                
+            segments = []
+            for seg_data in data.get('segments', []):
+                segment = MetadataSegment(
+                    start_time=seg_data['start_time'],
+                    end_time=seg_data['end_time'],
+                    operation_mode=seg_data['operation_mode'],
+                    steering_mode=seg_data['steering_mode'],
+                    target_value=seg_data['target_value'],
+                    confidence=seg_data.get('confidence', 0.0),
+                    notes=seg_data.get('notes', ''),
+                )
+                segments.append(segment)
+                
+            logger.info(f"Loaded {len(segments)} segments from {meta_path.name}")
+            return segments
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to parse metadata {meta_path}: {e}")
+            return None
+            
+    def _apply_metadata(self, frames: List[LoggedFrame], 
+                        segments: List[MetadataSegment]) -> List[LoggedFrame]:
+        """
+        Apply metadata segments to frames, setting mode and target values.
+        
+        Filters out frames that are not usable for training (anchor, unknown).
+        """
+        if not segments:
+            return frames
+            
+        updated_frames = []
+        
+        for frame in frames:
+            # Find matching segment for this frame's timestamp
+            matching_segment = None
+            for seg in segments:
+                if seg.start_time <= frame.timestamp < seg.end_time:
+                    matching_segment = seg
+                    break
+                    
+            if matching_segment:
+                # Skip anchor and unknown operation modes
+                if matching_segment.operation_mode in ('anchor', 'unknown'):
+                    continue
+                    
+                # Map steering mode to training mode
+                if matching_segment.steering_mode == 'heading':
+                    frame.mode = 'compass'
+                    frame.target_heading = matching_segment.target_value
+                elif matching_segment.steering_mode == 'awa':
+                    frame.mode = 'wind_awa'
+                    # For AWA mode, target_heading is computed from current heading + target AWA
+                    # But we store the target AWA in target_heading for feature engineering
+                    frame.target_heading = matching_segment.target_value
+                elif matching_segment.steering_mode == 'twa':
+                    frame.mode = 'wind_twa'
+                    frame.target_heading = matching_segment.target_value
+                else:
+                    # No steering mode - skip
+                    continue
+                    
+                updated_frames.append(frame)
+            else:
+                # No matching segment - include with default mode
+                updated_frames.append(frame)
+                
+        return updated_frames
         
     def load_directory(self, directory: str) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -301,11 +685,22 @@ class TrainingDataLoader:
         """
         Load a single log file.
         
+        If a .meta.json file exists alongside the log file, it will be used
+        to set mode and target values for each frame.
+        
         Returns:
             (X, y): Sequences and labels
         """
         frames = list(self._parser.parse_file(filepath))
         
+        if len(frames) < self.config.sequence_length + 1:
+            return np.array([]), np.array([])
+            
+        # Load and apply metadata if available
+        metadata = self._load_metadata(filepath)
+        if metadata:
+            frames = self._apply_metadata(frames, metadata)
+            
         if len(frames) < self.config.sequence_length + 1:
             return np.array([]), np.array([])
             

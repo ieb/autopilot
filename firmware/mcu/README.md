@@ -103,8 +103,8 @@ Edit `src/config.h` to adjust:
 
 ## Resource Usage (ATtiny3224)
 
-- Flash: ~20KB of 32KB
-- RAM: ~1.5KB of 3KB
+- Flash: ~20KB of 32KB - after build 17K
+- RAM: ~1.5KB of 3KB - after build 409 bytes
 - CPU: ~50% at 100Hz update rate
 
 ## Alternative: ATtiny3226

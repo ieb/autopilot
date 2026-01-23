@@ -46,9 +46,9 @@ The schematic (`imu-board.kicad_sch`) includes detailed design notes and calcula
 | ATtiny3224 Pin | Function | Connection |
 |----------------|----------|------------|
 | PA0 | UPDI | Programming header J2 |
-| PA1 | SDA | ICM-20948 SDA (with 4.7k pull-up) |
-| PA2 | SCL | ICM-20948 SCL (with 4.7k pull-up) |
 | PA3 | LED | Status LED (via 330Ω) |
+| PB0 | SCL | ICM-20948 SCL (with 4.7k pull-up) |
+| PB1 | SDA | ICM-20948 SDA (with 4.7k pull-up) |
 | PB2 | TX | Serial to Pi RX |
 | PB3 | RX | Serial from Pi TX |
 | VCC | Power | 3.3V from LDO |

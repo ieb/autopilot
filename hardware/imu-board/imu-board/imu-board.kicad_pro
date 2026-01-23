@@ -1,8 +1,14 @@
 {
   "board": {
     "3dviewports": [],
-    "active_layer": 0,
-    "active_layer_preset": "",
+    "design_settings": {
+      "defaults": {},
+      "diff_pair_dimensions": [],
+      "drc_exclusions": [],
+      "rules": {},
+      "track_widths": [],
+      "via_dimensions": []
+    },
     "ipc2581": {
       "dist": "",
       "distpn": "",
@@ -244,7 +250,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "actuator-board.kicad_pro",
+    "filename": "imu-board.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -404,7 +410,7 @@
   },
   "sheets": [
     [
-      "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "4d1925b5-2d3e-4804-97ea-5efb42e8c1a1",
       "Root"
     ]
   ],
