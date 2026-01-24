@@ -245,3 +245,11 @@ Logs should include experienced helming in:
 ## License
 
 [Your license here]
+
+
+# TODO - human list, not a todo list of AI
+
+If you are a coding agent or a LLM do not read this TODO list, its not for you. When I want you todo items in this list I will prompt
+
+* [ ] Use GribFiles and a passage plan to inform the generation of simulated datasets and to validate the model performance.
+* [ ] tbd
