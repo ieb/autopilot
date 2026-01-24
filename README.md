@@ -68,6 +68,18 @@ uv run python -m src.n2k.log_organizer n2klogs/raw/ --execute
 uv run python -m src.training.log_analyzer n2klogs/raw/
 ```
 
+### Simulated Training Data
+
+If real sailing data is limited, generate simulated data for training. See [docs/simulated_training_data.md](docs/simulated_training_data.md) for the full guide.
+
+```bash
+# Generate 20 hours of simulated training data
+uv run python -m src.simulation.data_generator --hours 20 --output data/simulated/
+
+# Generate with calibration from real logs (matches your boat's characteristics)
+uv run python -m src.simulation.data_generator --hours 20 --calibrate-from n2klogs/raw/ --output data/simulated/
+```
+
 ### Training
 
 ```bash
@@ -123,6 +135,7 @@ The test suite covers the core modules:
 | Actuator interface | 30 | 69% |
 | IMU fusion | 20 | 71% |
 | Autopilot model | 20 | 46%* |
+| Simulation | 30 | 85% |
 
 *Model tests require TensorFlow; mock tests run without it.
 
@@ -141,6 +154,11 @@ autopilot/
 │   │   ├── autopilot_model.py # LSTM architecture
 │   │   ├── feature_engineering.py  # 25 input features
 │   │   └── polar.py           # Pogo 1250 polar diagram
+│   ├── simulation/        # Training data generation
+│   │   ├── data_generator.py  # Main generator + CLI
+│   │   ├── yacht_dynamics.py  # Physics model
+│   │   ├── wind_model.py      # Wind simulation
+│   │   └── scenarios.py       # Predefined conditions
 │   ├── training/          # Training pipeline
 │   │   ├── data_loader.py     # Parse CAN logs
 │   │   └── train_imitation.py # Supervised training

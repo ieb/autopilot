@@ -505,10 +505,17 @@ class LogAnalyzer:
         
         # Recompute accurate frame counts and coverage for merged segments
         merged_segments = self._recompute_segment_stats(merged_segments, frames)
-        
         # Calculate summary
         summary = self._calculate_summary(merged_segments, total_duration, overall_coverage)
-        
+
+        for seg in merged_segments:
+            missing_features = seg.missing_features()
+            if len(missing_features) > 0:
+                logger.info(f"  Skipping segment, missing features: {missing_features}")
+                merged_segments.remove(seg)
+
+
+
         result = AnalysisResult(
             source_file=path.name,
             analyzed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -518,10 +525,15 @@ class LogAnalyzer:
             summary=summary,
             overall_feature_coverage=overall_coverage,
         )
-        
+        for seg in merged_segments:
+            logger.info(f"Segment: {seg.operation_mode} {seg.steering_mode} {seg.target_value} {seg.confidence}% {seg.duration():.2f}s {seg.notes} {seg.frame_count}")
+            for feature_name, feature_coverage in seg.feature_coverage.items():
+                logger.info(f"  {feature_name}: {feature_coverage.present_count} / {feature_coverage.total_count} ({feature_coverage.coverage_pct:.1f}%)")
+
         logger.info(f"Found {len(merged_segments)} segments, "
-                   f"{result.usable_duration_hours():.2f}h usable, "
-                   f"{result.usable_frame_count()} frames in {path.name}")
+            f"{result.usable_duration_hours():.2f}h usable, "
+            f"{result.usable_frame_count()} frames in {path.name}")
+
         return result
     
     def _compute_feature_coverage(self, frames: List[LoggedFrame]) -> Dict[str, FeatureCoverage]:
