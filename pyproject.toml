@@ -3,13 +3,13 @@ name = "autopilot"
 version = "0.1.0"
 description = "ML Yacht Autopilot"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.21.0",
     "python-can>=4.0.0",
     "pyserial>=3.5",
     "tensorflow==2.16.2",
-    "tensorflow-metal==1.1.0",
+    "tensorflow-metal==1.1.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
