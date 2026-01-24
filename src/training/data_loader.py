@@ -132,7 +132,7 @@ class CANLogParser:
             
         # Fall back to extension-based detection
         path = Path(filepath)
-        if path.suffix == '.json':
+        if path.suffix in ('.json', '.jsonlog'):
             return 'json'
         elif path.suffix == '.csv':
             return 'csv'
@@ -657,7 +657,7 @@ class TrainingDataLoader:
         
         path = Path(directory)
         for log_file in path.glob('**/*'):
-            if log_file.is_file() and log_file.suffix in ['.json', '.csv', '.log']:
+            if log_file.is_file() and log_file.suffix in ['.json', '.jsonlog', '.csv', '.log']:
                 try:
                     X, y = self.load_file(str(log_file))
                     if len(X) > 0:

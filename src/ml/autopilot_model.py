@@ -74,6 +74,10 @@ def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Mod
         tf.keras.layers.Dense(64, activation='relu'),
         name='feature_mixing'
     )(inputs)
+    x = tf.keras.layers.TimeDistributed(
+        tf.keras.layers.BatchNormalization(),
+        name='bn_feature'
+    )(x)
     
     # First LSTM layer - returns sequences for stacking
     x = tf.keras.layers.LSTM(
@@ -91,8 +95,9 @@ def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Mod
     )(x)
     x = tf.keras.layers.Dropout(config.dropout_rate)(x)
     
-    # Output mapping
+    # Output mapping with BatchNormalization for stability
     x = tf.keras.layers.Dense(config.dense_units, activation='relu', name='dense_out')(x)
+    x = tf.keras.layers.BatchNormalization(name='bn_dense')(x)
     
     # Rudder command output with tanh for bounded [-1, 1]
     outputs = tf.keras.layers.Dense(1, activation='tanh', name='rudder_command')(x)
@@ -102,19 +107,23 @@ def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Mod
     return model
 
 
-def compile_model(model: 'tf.keras.Model', learning_rate: float = 0.001):
+def compile_model(model: 'tf.keras.Model', learning_rate: float = 1e-4):
     """Compile model with appropriate loss and optimizer."""
     if not HAS_TF:
         raise ImportError("TensorFlow is required")
         
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=learning_rate,
+            clipnorm=1.0  # Gradient clipping to prevent exploding gradients
+        ),
         loss=autopilot_loss,
         metrics=['mae']
     )
     return model
 
 
+@tf.keras.utils.register_keras_serializable(package="autopilot")
 def autopilot_loss(y_true, y_pred):
     """
     Custom loss for autopilot training.

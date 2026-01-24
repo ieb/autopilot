@@ -508,13 +508,52 @@ print(f"Sequence shape: {X.shape}")  # (N, 20, 25)
 
 2. **Train model**
    ```bash
+   # Full training run
    uv run python -m src.training.train_imitation data/simulated/ --output models/
+
+   # Quick test run (30 seconds max)
+   uv run python -m src.training.train_imitation data/simulated/ --output models/ --max-time 30
+
+   # Custom epochs
+   uv run python -m src.training.train_imitation data/simulated/ --output models/ --epochs 50
+   ```
+
+   The training script shows detailed progress including:
+   - Loss and validation loss with improvement tracking
+   - MAE in degrees (interpretable rudder error)
+   - Learning rate and convergence trend
+   - Time per epoch, elapsed time, and ETA
+
+   Example output:
+   ```
+   ======================================================================
+   TRAINING STARTED
+   ======================================================================
+
+   Epoch 1/100 (2.1s, elapsed: 2s, ETA: 207s)
+     Loss:     0.045123  |  Val Loss: 0.042567  ↓ improved by 0.042567
+     MAE:      0.034521 (1.04°)  |  Val MAE:  0.033245 (1.00°)
+     LR: 1.00e-03  |  Best Val Loss: 0.042567
+
+   Epoch 5/100 (1.9s, elapsed: 10s, ETA: 190s)
+     Loss:     0.028234  |  Val Loss: 0.026789  ↓ improved by 0.003421
+     MAE:      0.021345 (0.64°)  |  Val MAE:  0.020123 (0.60°)
+     LR: 1.00e-03  |  Best Val Loss: 0.026789  trend: ↓0.003142/epoch
    ```
 
 3. **Validate on real data**
    ```bash
    uv run python simulate.py --model models/autopilot.tflite --log n2klogs/raw/2018/05/candump.log
    ```
+
+### Training CLI Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `data_dir` | (required) | Directory containing training logs |
+| `--output, -o` | `models` | Output directory for model files |
+| `--epochs, -e` | 100 | Maximum training epochs |
+| `--max-time, -t` | None | Maximum training time in seconds (for quick testing) |
 
 ## Limitations
 

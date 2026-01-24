@@ -8,6 +8,7 @@ from logged data.
 
 import os
 import json
+import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
@@ -33,6 +34,130 @@ except ImportError:
     HAS_TF = False
 
 
+class WarmupSchedule(tf.keras.callbacks.Callback):
+    """
+    Learning rate warmup schedule.
+    
+    Linearly increases learning rate from a small value to the target
+    over the first few epochs. This helps stabilize early training.
+    """
+    
+    def __init__(self, warmup_epochs: int = 3, target_lr: float = 1e-4):
+        super().__init__()
+        self.warmup_epochs = warmup_epochs
+        self.target_lr = target_lr
+        self.initial_lr = target_lr / 10  # Start at 10% of target
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            lr = self.initial_lr + (self.target_lr - self.initial_lr) * (epoch / self.warmup_epochs)
+            self.model.optimizer.learning_rate.assign(lr)
+            print(f"Warmup: Setting learning rate to {lr:.2e}")
+
+
+class ProgressCallback(tf.keras.callbacks.Callback):
+    """
+    Custom callback for detailed training progress monitoring.
+    
+    Shows convergence information including loss trends, improvement rates,
+    and estimated time remaining.
+    """
+    
+    def __init__(self, max_time_seconds: Optional[float] = None):
+        super().__init__()
+        self.max_time_seconds = max_time_seconds
+        self.start_time = None
+        self.epoch_times = []
+        self.best_val_loss = float('inf')
+        self.epochs_without_improvement = 0
+        self.loss_history = []
+        self.val_loss_history = []
+        
+    def on_train_begin(self, logs=None):
+        self.start_time = time.time()
+        print("\n" + "=" * 70)
+        print("TRAINING STARTED")
+        print("=" * 70)
+        if self.max_time_seconds:
+            print(f"Time limit: {self.max_time_seconds:.0f} seconds")
+        print()
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start_time = time.time()
+        
+    def on_epoch_end(self, epoch, logs=None):
+        epoch_time = time.time() - self.epoch_start_time
+        self.epoch_times.append(epoch_time)
+        elapsed = time.time() - self.start_time
+        
+        # Track losses
+        loss = logs.get('loss', 0)
+        val_loss = logs.get('val_loss', 0)
+        mae = logs.get('mae', 0)
+        val_mae = logs.get('val_mae', 0)
+        lr = float(tf.keras.backend.get_value(self.model.optimizer.learning_rate))
+        
+        self.loss_history.append(loss)
+        self.val_loss_history.append(val_loss)
+        
+        # Check for improvement
+        improved = val_loss < self.best_val_loss
+        if improved:
+            improvement = self.best_val_loss - val_loss
+            self.best_val_loss = val_loss
+            self.epochs_without_improvement = 0
+            improvement_str = f"  ↓ improved by {improvement:.6f}"
+        else:
+            self.epochs_without_improvement += 1
+            improvement_str = f"  (no improvement for {self.epochs_without_improvement} epochs)"
+        
+        # Calculate trend (average loss change over last 5 epochs)
+        trend_str = ""
+        if len(self.val_loss_history) >= 5:
+            recent = self.val_loss_history[-5:]
+            trend = (recent[-1] - recent[0]) / 4  # Average change per epoch
+            if trend < 0:
+                trend_str = f"  trend: ↓{abs(trend):.6f}/epoch"
+            else:
+                trend_str = f"  trend: ↑{trend:.6f}/epoch (may be overfitting)"
+        
+        # Estimate remaining time
+        avg_epoch_time = np.mean(self.epoch_times)
+        total_epochs = self.params.get('epochs', 100)
+        remaining_epochs = total_epochs - epoch - 1
+        eta = avg_epoch_time * remaining_epochs
+        
+        # Convert MAE to degrees for readability
+        mae_deg = mae * 30.0
+        val_mae_deg = val_mae * 30.0
+        
+        # Print progress
+        print(f"\nEpoch {epoch + 1}/{total_epochs} ({epoch_time:.1f}s, elapsed: {elapsed:.0f}s, ETA: {eta:.0f}s)")
+        print(f"  Loss:     {loss:.6f}  |  Val Loss: {val_loss:.6f}{improvement_str}")
+        print(f"  MAE:      {mae:.6f} ({mae_deg:.2f}°)  |  Val MAE:  {val_mae:.6f} ({val_mae_deg:.2f}°)")
+        print(f"  LR: {lr:.2e}  |  Best Val Loss: {self.best_val_loss:.6f}{trend_str}")
+        
+        # Check time limit
+        if self.max_time_seconds and elapsed >= self.max_time_seconds:
+            print(f"\n*** Time limit of {self.max_time_seconds:.0f}s reached. Stopping training. ***")
+            self.model.stop_training = True
+            
+    def on_train_end(self, logs=None):
+        elapsed = time.time() - self.start_time
+        print("\n" + "=" * 70)
+        print("TRAINING COMPLETE")
+        print("=" * 70)
+        print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+        print(f"Final validation loss: {self.val_loss_history[-1]:.6f}")
+        print(f"Best validation loss: {self.best_val_loss:.6f}")
+        
+        if len(self.val_loss_history) > 1:
+            total_improvement = self.val_loss_history[0] - self.best_val_loss
+            print(f"Total improvement: {total_improvement:.6f} ({total_improvement/self.val_loss_history[0]*100:.1f}%)")
+        print()
+
+
 @dataclass
 class TrainingConfig:
     """Training configuration."""
@@ -43,11 +168,17 @@ class TrainingConfig:
     # Training
     epochs: int = 100
     batch_size: int = 64
-    learning_rate: float = 0.001
+    learning_rate: float = 1e-4  # Lower LR for stability
     
     # Early stopping
-    patience: int = 10
+    patience: int = 8  # Reduced from 10 - stop earlier if no improvement
     min_delta: float = 0.0001
+    
+    # Learning rate warmup
+    warmup_epochs: int = 3
+    
+    # Time limit (None = no limit)
+    max_time_seconds: Optional[float] = None
     
     # Output
     model_dir: str = "models"
@@ -56,6 +187,9 @@ class TrainingConfig:
     # Data augmentation
     add_noise: bool = True
     noise_std: float = 0.02
+    
+    # Resume from checkpoint
+    resume_from_checkpoint: bool = True  # Auto-resume if checkpoint exists
 
 
 class ImitationTrainer:
@@ -105,6 +239,67 @@ class ImitationTrainer:
         self._model.summary(print_fn=logger.info)
         
         return self._model
+    
+    def get_checkpoint_path(self) -> str:
+        """Get the path to the best checkpoint file."""
+        return os.path.join(
+            self.training_config.model_dir,
+            f"{self.training_config.model_name}_best.keras"
+        )
+    
+    def try_load_checkpoint(self) -> bool:
+        """
+        Try to load from existing checkpoint.
+        
+        Returns:
+            True if checkpoint was loaded, False otherwise
+        """
+        checkpoint_path = self.get_checkpoint_path()
+        
+        if os.path.exists(checkpoint_path):
+            try:
+                # Import custom loss for loading
+                from ..ml.autopilot_model import autopilot_loss
+                
+                # Load the saved model with custom objects
+                self._model = tf.keras.models.load_model(
+                    checkpoint_path,
+                    custom_objects={'autopilot_loss': autopilot_loss}
+                )
+                # Re-compile with current learning rate settings
+                compile_model(self._model, self.training_config.learning_rate)
+                
+                print(f"\n{'='*70}")
+                print(f"RESUMING FROM CHECKPOINT")
+                print(f"{'='*70}")
+                print(f"Loaded model from: {checkpoint_path}")
+                print(f"Model will continue training with current settings.")
+                print()
+                
+                logger.info(f"Resumed from checkpoint: {checkpoint_path}")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint {checkpoint_path}: {e}")
+                print(f"Warning: Could not load checkpoint, starting fresh. Error: {e}")
+                return False
+        else:
+            logger.info(f"No checkpoint found at {checkpoint_path}, building new model")
+            return False
+    
+    def build_or_load_model(self) -> bool:
+        """
+        Build a new model or load from checkpoint if available.
+        
+        Returns:
+            True if loaded from checkpoint, False if built fresh
+        """
+        if self.training_config.resume_from_checkpoint:
+            if self.try_load_checkpoint():
+                return True
+        
+        self.build_model()
+        return False
         
     def train(self, 
               X_train: np.ndarray, 
@@ -124,7 +319,10 @@ class ImitationTrainer:
             Training history dict
         """
         if self._model is None:
-            self.build_model()
+            resumed = self.build_or_load_model()
+            # Skip warmup if resuming from checkpoint
+            if resumed:
+                self.training_config.warmup_epochs = 0
             
         # Data augmentation
         if self.training_config.add_noise:
@@ -132,6 +330,11 @@ class ImitationTrainer:
             
         # Callbacks
         callbacks = [
+            WarmupSchedule(
+                warmup_epochs=self.training_config.warmup_epochs,
+                target_lr=self.training_config.learning_rate
+            ),
+            ProgressCallback(max_time_seconds=self.training_config.max_time_seconds),
             tf.keras.callbacks.EarlyStopping(
                 monitor='val_loss',
                 patience=self.training_config.patience,
@@ -141,13 +344,14 @@ class ImitationTrainer:
             tf.keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss',
                 factor=0.5,
-                patience=5,
-                min_lr=1e-6
+                patience=3,  # Reduced from 5 - respond faster to plateaus
+                min_lr=1e-6,
+                verbose=1
             ),
             tf.keras.callbacks.ModelCheckpoint(
                 filepath=os.path.join(
                     self.training_config.model_dir,
-                    f"{self.training_config.model_name}_best.h5"
+                    f"{self.training_config.model_name}_best.keras"
                 ),
                 monitor='val_loss',
                 save_best_only=True
@@ -166,7 +370,7 @@ class ImitationTrainer:
             epochs=self.training_config.epochs,
             batch_size=self.training_config.batch_size,
             callbacks=callbacks,
-            verbose=1
+            verbose=0  # Using custom ProgressCallback for output
         )
         
         return self._history.history
@@ -226,11 +430,11 @@ class ImitationTrainer:
         model_dir = self.training_config.model_dir
         model_name = self.training_config.model_name
         
-        # Save Keras model
-        h5_path = os.path.join(model_dir, f"{model_name}.h5")
-        self._model.save(h5_path)
-        paths['keras'] = h5_path
-        logger.info(f"Saved Keras model to {h5_path}")
+        # Save Keras model (native format)
+        keras_path = os.path.join(model_dir, f"{model_name}.keras")
+        self._model.save(keras_path)
+        paths['keras'] = keras_path
+        logger.info(f"Saved Keras model to {keras_path}")
         
         # Save TFLite model
         if include_tflite:
@@ -269,7 +473,9 @@ class ImitationTrainer:
 
 def train_from_logs(data_dir: str, 
                     output_dir: str = "models",
-                    epochs: int = 100) -> Dict[str, str]:
+                    epochs: int = 100,
+                    max_time_seconds: Optional[float] = None,
+                    resume: bool = True) -> Dict[str, str]:
     """
     Convenience function to train model from logged data.
     
@@ -277,22 +483,27 @@ def train_from_logs(data_dir: str,
         data_dir: Directory containing log files
         output_dir: Directory for output models
         epochs: Number of training epochs
+        max_time_seconds: Maximum training time in seconds (None = no limit)
+        resume: Whether to resume from checkpoint if available
         
     Returns:
         Dict with paths to saved model files
     """
     config = TrainingConfig(
         epochs=epochs,
-        model_dir=output_dir
+        model_dir=output_dir,
+        max_time_seconds=max_time_seconds,
+        resume_from_checkpoint=resume
     )
     
     trainer = ImitationTrainer(training_config=config)
     
     # Load and split data
+    print(f"Loading training data from: {data_dir}")
     X_train, y_train, X_val, y_val = trainer.load_data(data_dir)
+    print(f"Loaded {len(X_train)} training samples, {len(X_val)} validation samples")
     
-    # Build and train
-    trainer.build_model()
+    # Train (automatically loads checkpoint if available)
     trainer.train(X_train, y_train, X_val, y_val)
     
     # Evaluate
@@ -309,12 +520,22 @@ if __name__ == "__main__":
     parser.add_argument("data_dir", help="Directory containing training logs")
     parser.add_argument("--output", "-o", default="models", help="Output directory")
     parser.add_argument("--epochs", "-e", type=int, default=100, help="Training epochs")
+    parser.add_argument("--max-time", "-t", type=float, default=None,
+                       help="Maximum training time in seconds (for quick testing)")
+    parser.add_argument("--fresh", "-f", action="store_true",
+                       help="Start fresh, ignoring any existing checkpoint")
     
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
-    paths = train_from_logs(args.data_dir, args.output, args.epochs)
+    paths = train_from_logs(
+        args.data_dir, 
+        args.output, 
+        args.epochs, 
+        args.max_time,
+        resume=not args.fresh
+    )
     
-    print("\nTraining complete! Model files:")
+    print("\nModel files saved:")
     for name, path in paths.items():
         print(f"  {name}: {path}")
