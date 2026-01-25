@@ -198,8 +198,10 @@ def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
     ONNX is preferred over TFLite due to Keras 3 compatibility issues
     with the TFLite converter.
     
-    This function rebuilds the model on CPU to ensure no GPU-specific ops
-    (like CudnnRNNV3) are included in the exported graph.
+    This function uses a subprocess with GPU disabled to ensure no GPU-specific
+    ops (like CudnnRNNV3) are included in the exported graph. The subprocess
+    approach is required because TensorFlow's GPU devices cannot be disabled
+    after initialization.
     
     Args:
         model: Trained Keras model
@@ -207,6 +209,87 @@ def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
         
     Returns:
         Path to saved model
+    """
+    if not HAS_TF:
+        raise ImportError("TensorFlow is required")
+    
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    
+    # Save model to temp file for subprocess to load
+    with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as f:
+        keras_temp_path = f.name
+    model.save(keras_temp_path)
+    
+    # Python script to run in subprocess with GPU disabled
+    conversion_script = f'''
+import os
+# Disable GPU BEFORE importing TensorFlow
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["TF_METAL_DEVICE_SELECTOR"] = ""
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+import tensorflow as tf
+# Force CPU-only mode
+tf.config.set_visible_devices([], "GPU")
+
+import tf2onnx
+import onnx
+import numpy as np
+from src.ml.autopilot_model import autopilot_loss
+
+# Load model
+model = tf.keras.models.load_model(
+    "{keras_temp_path}",
+    custom_objects={{"autopilot_loss": autopilot_loss}}
+)
+
+# Convert to ONNX
+input_shape = model.input_shape
+input_signature = [tf.TensorSpec(input_shape, tf.float32, name="input")]
+onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
+
+# Save
+onnx.save(onnx_model, "{output_path}")
+print(f"Saved ONNX model to {output_path}")
+'''
+    
+    try:
+        # Run conversion in subprocess with clean environment
+        result = subprocess.run(
+            [sys.executable, "-c", conversion_script],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"ONNX conversion failed: {result.stderr}")
+            raise RuntimeError(f"ONNX conversion failed: {result.stderr}")
+        
+        # Log output
+        if result.stdout:
+            for line in result.stdout.strip().split('\n'):
+                logger.info(line)
+        
+        size_kb = os.path.getsize(output_path) / 1024
+        logger.info(f"Model size: {size_kb:.1f} KB")
+        
+    finally:
+        # Clean up temp file
+        if os.path.exists(keras_temp_path):
+            os.unlink(keras_temp_path)
+    
+    return output_path
+
+
+def _convert_to_onnx_inprocess(model: 'tf.keras.Model', output_path: str) -> str:
+    """
+    In-process ONNX conversion (legacy, may include GPU ops).
+    
+    Use convert_to_onnx() instead for reliable CPU-only conversion.
     """
     if not HAS_TF:
         raise ImportError("TensorFlow is required")
