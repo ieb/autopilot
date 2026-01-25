@@ -33,6 +33,15 @@ except ImportError:
     tf = None
     HAS_TF = False
 
+# MLflow imports (optional)
+try:
+    import mlflow
+    import mlflow.tensorflow
+    HAS_MLFLOW = True
+except ImportError:
+    mlflow = None
+    HAS_MLFLOW = False
+
 
 class WarmupSchedule(tf.keras.callbacks.Callback):
     """
@@ -190,6 +199,11 @@ class TrainingConfig:
     
     # Resume from checkpoint
     resume_from_checkpoint: bool = True  # Auto-resume if checkpoint exists
+    
+    # MLflow tracking
+    use_mlflow: bool = False
+    mlflow_experiment_name: str = "autopilot"
+    mlflow_run_name: Optional[str] = None
 
 
 class ImitationTrainer:
@@ -481,7 +495,10 @@ def train_from_logs(data_dir: str,
                     output_dir: str = "models",
                     epochs: int = 100,
                     max_time_seconds: Optional[float] = None,
-                    resume: bool = True) -> Dict[str, str]:
+                    resume: bool = True,
+                    use_mlflow: bool = False,
+                    mlflow_experiment_name: str = "autopilot",
+                    mlflow_run_name: Optional[str] = None) -> Dict[str, str]:
     """
     Convenience function to train model from logged data.
     
@@ -491,6 +508,9 @@ def train_from_logs(data_dir: str,
         epochs: Number of training epochs
         max_time_seconds: Maximum training time in seconds (None = no limit)
         resume: Whether to resume from checkpoint if available
+        use_mlflow: Enable MLflow experiment tracking
+        mlflow_experiment_name: MLflow experiment name
+        mlflow_run_name: Optional name for this MLflow run
         
     Returns:
         Dict with paths to saved model files
@@ -499,7 +519,10 @@ def train_from_logs(data_dir: str,
         epochs=epochs,
         model_dir=output_dir,
         max_time_seconds=max_time_seconds,
-        resume_from_checkpoint=resume
+        resume_from_checkpoint=resume,
+        use_mlflow=use_mlflow,
+        mlflow_experiment_name=mlflow_experiment_name,
+        mlflow_run_name=mlflow_run_name,
     )
     
     trainer = ImitationTrainer(training_config=config)
@@ -509,14 +532,123 @@ def train_from_logs(data_dir: str,
     X_train, y_train, X_val, y_val = trainer.load_data(data_dir)
     print(f"Loaded {len(X_train)} training samples, {len(X_val)} validation samples")
     
-    # Train (automatically loads checkpoint if available)
-    trainer.train(X_train, y_train, X_val, y_val)
+    # Setup MLflow if enabled
+    if use_mlflow:
+        if not HAS_MLFLOW:
+            print("Warning: MLflow requested but not installed. Run: uv pip install mlflow")
+        else:
+            mlflow.set_experiment(mlflow_experiment_name)
+            mlflow.tensorflow.autolog(
+                log_datasets=True,
+                log_model_signatures=True,
+                log_every_epoch=True,
+                checkpoint=True,
+                checkpoint_monitor="val_loss",
+                checkpoint_mode="min",
+                checkpoint_save_best_only=True,
+            )
+            print(f"MLflow tracking enabled. Experiment: {mlflow_experiment_name}")
     
-    # Evaluate
-    trainer.evaluate(X_val, y_val)
+    # Run training with optional MLflow context
+    if use_mlflow and HAS_MLFLOW:
+        with mlflow.start_run(run_name=mlflow_run_name):
+            # Log custom parameters not captured by autolog
+            _log_mlflow_params(config, trainer.model_config, trainer.data_config,
+                             len(X_train), len(X_val))
+            
+            # Train
+            trainer.train(X_train, y_train, X_val, y_val)
+            
+            # Evaluate and log metrics
+            metrics = trainer.evaluate(X_val, y_val)
+            _log_mlflow_metrics(metrics)
+            
+            # Save and log artifacts
+            paths = trainer.save_model()
+            _log_mlflow_artifacts(paths)
+            
+            return paths
+    else:
+        # Train without MLflow
+        trainer.train(X_train, y_train, X_val, y_val)
+        trainer.evaluate(X_val, y_val)
+        return trainer.save_model()
+
+
+def _log_mlflow_params(training_config: TrainingConfig, 
+                       model_config: 'ModelConfig',
+                       data_config: 'DataConfig',
+                       num_train: int,
+                       num_val: int):
+    """Log custom parameters to MLflow."""
+    if not HAS_MLFLOW:
+        return
+        
+    # Training config
+    mlflow.log_params({
+        "learning_rate": training_config.learning_rate,
+        "patience": training_config.patience,
+        "min_delta": training_config.min_delta,
+        "warmup_epochs": training_config.warmup_epochs,
+        "add_noise": training_config.add_noise,
+        "noise_std": training_config.noise_std,
+        "resume_from_checkpoint": training_config.resume_from_checkpoint,
+    })
     
-    # Save
-    return trainer.save_model()
+    # Model config
+    mlflow.log_params({
+        "lstm_units_1": model_config.lstm_units_1,
+        "lstm_units_2": model_config.lstm_units_2,
+        "dense_units": model_config.dense_units,
+        "dropout_rate": model_config.dropout_rate,
+        "sequence_length": model_config.sequence_length,
+        "feature_dim": model_config.feature_dim,
+    })
+    
+    # Data config
+    mlflow.log_params({
+        "sample_rate_hz": data_config.sample_rate_hz,
+        "train_split": data_config.train_split,
+        "normalize": data_config.normalize,
+    })
+    
+    # Dataset stats
+    mlflow.log_params({
+        "num_train_samples": num_train,
+        "num_val_samples": num_val,
+    })
+
+
+def _log_mlflow_metrics(metrics: Dict[str, float]):
+    """Log evaluation metrics to MLflow."""
+    if not HAS_MLFLOW:
+        return
+        
+    # Log metrics converted to degrees (more interpretable)
+    mlflow.log_metrics({
+        "eval_mae_degrees": metrics.get("mae_degrees", 0),
+        "eval_rmse_degrees": metrics.get("rmse_degrees", 0),
+        "eval_max_error_degrees": metrics.get("max_error_degrees", 0),
+        "eval_std_error": metrics.get("std_error", 0),
+    })
+
+
+def _log_mlflow_artifacts(paths: Dict[str, str]):
+    """Log model artifacts to MLflow."""
+    if not HAS_MLFLOW:
+        return
+        
+    # Log ONNX model (Keras is logged automatically by autolog)
+    if "onnx" in paths and os.path.exists(paths["onnx"]):
+        mlflow.log_artifact(paths["onnx"])
+        
+    # Log config
+    if "config" in paths and os.path.exists(paths["config"]):
+        mlflow.log_artifact(paths["config"])
+        
+    # Log training history
+    if "history" in paths and os.path.exists(paths["history"]):
+        mlflow.log_artifact(paths["history"])
 
 
 if __name__ == "__main__":
@@ -531,6 +663,14 @@ if __name__ == "__main__":
     parser.add_argument("--fresh", "-f", action="store_true",
                        help="Start fresh, ignoring any existing checkpoint")
     
+    # MLflow options
+    parser.add_argument("--mlflow", action="store_true",
+                       help="Enable MLflow experiment tracking")
+    parser.add_argument("--experiment-name", default="autopilot",
+                       help="MLflow experiment name (default: autopilot)")
+    parser.add_argument("--run-name", default=None,
+                       help="MLflow run name (optional)")
+    
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
@@ -539,7 +679,10 @@ if __name__ == "__main__":
         args.output, 
         args.epochs, 
         args.max_time,
-        resume=not args.fresh
+        resume=not args.fresh,
+        use_mlflow=args.mlflow,
+        mlflow_experiment_name=args.experiment_name,
+        mlflow_run_name=args.run_name,
     )
     
     print("\nModel files saved:")

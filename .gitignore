@@ -8,3 +8,4 @@ n2klogs
 *-board-backups
 results
 model
+mlruns/
