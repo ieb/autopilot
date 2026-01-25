@@ -11,7 +11,7 @@ dependencies = [
     "tensorflow==2.16.2",
     "tensorflow-metal==1.1.0; sys_platform == 'darwin'",
     "tf2onnx>=1.16.0",
-    "onnx==1.16.0",
+    "onnx==1.17.0",
     "onnxruntime>=1.23.2",
 ]
 
