@@ -28,6 +28,14 @@ try:
 except ImportError:
     HAS_TFLITE_RUNTIME = False
 
+# ONNX Runtime for edge deployment
+try:
+    import onnxruntime as ort
+    HAS_ONNX = True
+except ImportError:
+    ort = None
+    HAS_ONNX = False
+
 
 @dataclass
 class ModelConfig:
@@ -159,6 +167,15 @@ def convert_to_tflite(model: 'tf.keras.Model', output_path: str,
         
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     
+    # Enable SELECT_TF_OPS to handle LSTM + batch normalization patterns
+    # that aren't natively supported in TFLite
+    converter.target_spec.supported_ops = [
+        tf.lite.OpsSet.TFLITE_BUILTINS,
+        tf.lite.OpsSet.SELECT_TF_OPS
+    ]
+    # Disable lowering tensor list ops to avoid MLIR compilation issues
+    converter._experimental_lower_tensor_list_ops = False
+    
     if quantize:
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         # For full int8 quantization, would need representative dataset
@@ -174,11 +191,73 @@ def convert_to_tflite(model: 'tf.keras.Model', output_path: str,
     return output_path
 
 
+def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
+    """
+    Convert Keras model to ONNX format for edge deployment.
+    
+    ONNX is preferred over TFLite due to Keras 3 compatibility issues
+    with the TFLite converter.
+    
+    Args:
+        model: Trained Keras model
+        output_path: Path for .onnx file
+        
+    Returns:
+        Path to saved model
+    """
+    if not HAS_TF:
+        raise ImportError("TensorFlow is required")
+    
+    try:
+        import tf2onnx
+        import onnx
+    except ImportError:
+        raise ImportError("tf2onnx and onnx packages are required. "
+                         "Install with: pip install tf2onnx onnx")
+    
+    # Force CPU to avoid GPU-specific ops (CudnnRNN) in the exported graph
+    import os
+    original_cuda = os.environ.get('CUDA_VISIBLE_DEVICES')
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    
+    try:
+        # Run a forward pass to ensure graph is built with CPU ops
+        import numpy as np
+        dummy = np.random.randn(1, model.input_shape[1], model.input_shape[2]).astype(np.float32)
+        _ = model(dummy, training=False)
+        
+        # Convert to ONNX
+        input_signature = [tf.TensorSpec(model.input_shape, tf.float32, name='input')]
+        onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
+        
+        # Save ONNX model
+        onnx.save(onnx_model, output_path)
+        
+        size_kb = os.path.getsize(output_path) / 1024
+        logger.info(f"Saved ONNX model to {output_path}")
+        logger.info(f"Model size: {size_kb:.1f} KB")
+        
+    finally:
+        # Restore original CUDA setting
+        if original_cuda is not None:
+            os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda
+        elif 'CUDA_VISIBLE_DEVICES' in os.environ:
+            del os.environ['CUDA_VISIBLE_DEVICES']
+    
+    return output_path
+
+
 class AutopilotInference:
     """
     Real-time inference engine for autopilot model.
     
-    Uses TensorFlow Lite for efficient inference on Raspberry Pi.
+    Supports multiple model formats:
+    - ONNX (.onnx) - Preferred for edge deployment (Raspberry Pi)
+    - TensorFlow Lite (.tflite) - Alternative edge format
+    - Keras (.keras, .h5) - For development/debugging
+    
+    ONNX is recommended for Pi deployment due to Keras 3 compatibility
+    issues with TFLite converter.
     """
     
     def __init__(self, model_path: str, config: Optional[ModelConfig] = None):
@@ -186,37 +265,104 @@ class AutopilotInference:
         Initialize inference engine.
         
         Args:
-            model_path: Path to .tflite model file
+            model_path: Path to model file (.onnx, .tflite, .keras, or .h5)
             config: Model configuration
         """
         self.config = config or ModelConfig()
         self._interpreter = None
+        self._keras_model = None
+        self._onnx_session = None
         self._input_details = None
         self._output_details = None
+        self._model_type = None  # 'onnx', 'tflite', or 'keras'
         
         self._load_model(model_path)
         
     def _load_model(self, model_path: str):
-        """Load TFLite model."""
+        """Load model from file (supports .onnx, .tflite, .keras, .h5)."""
+        import os
+        ext = os.path.splitext(model_path)[1].lower()
+        
         try:
-            if HAS_TFLITE_RUNTIME:
-                self._interpreter = tflite.Interpreter(model_path=model_path)
-            elif HAS_TF:
-                self._interpreter = tf.lite.Interpreter(model_path=model_path)
+            if ext == '.onnx':
+                self._load_onnx_model(model_path)
+            elif ext == '.tflite':
+                self._load_tflite_model(model_path)
+            elif ext in ('.keras', '.h5'):
+                self._load_keras_model(model_path)
             else:
-                raise ImportError("No TFLite runtime available")
-                
-            self._interpreter.allocate_tensors()
-            self._input_details = self._interpreter.get_input_details()
-            self._output_details = self._interpreter.get_output_details()
-            
-            logger.info(f"Loaded model from {model_path}")
-            logger.info(f"Input shape: {self._input_details[0]['shape']}")
-            logger.info(f"Output shape: {self._output_details[0]['shape']}")
-            
+                # Try ONNX first, then TFLite, then Keras
+                loaded = False
+                for loader in [self._load_onnx_model, self._load_tflite_model, 
+                              self._load_keras_model]:
+                    try:
+                        loader(model_path)
+                        loaded = True
+                        break
+                    except Exception:
+                        continue
+                if not loaded:
+                    raise ValueError(f"Could not load model from {model_path}")
+                    
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
+    
+    def _load_onnx_model(self, model_path: str):
+        """Load ONNX model for efficient edge inference."""
+        if not HAS_ONNX:
+            raise ImportError("ONNX Runtime not available. "
+                            "Install with: pip install onnxruntime")
+        
+        # Create session with optimizations enabled
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        self._onnx_session = ort.InferenceSession(model_path, sess_options)
+        self._model_type = 'onnx'
+        
+        # Get input/output info
+        inp = self._onnx_session.get_inputs()[0]
+        out = self._onnx_session.get_outputs()[0]
+        self._onnx_input_name = inp.name
+        
+        logger.info(f"Loaded ONNX model from {model_path}")
+        logger.info(f"Input: {inp.name}, shape: {inp.shape}")
+        logger.info(f"Output: {out.name}, shape: {out.shape}")
+    
+    def _load_tflite_model(self, model_path: str):
+        """Load TensorFlow Lite model."""
+        if HAS_TFLITE_RUNTIME:
+            self._interpreter = tflite.Interpreter(model_path=model_path)
+        elif HAS_TF:
+            self._interpreter = tf.lite.Interpreter(model_path=model_path)
+        else:
+            raise ImportError("No TFLite runtime available")
+            
+        self._interpreter.allocate_tensors()
+        self._input_details = self._interpreter.get_input_details()
+        self._output_details = self._interpreter.get_output_details()
+        self._model_type = 'tflite'
+        
+        logger.info(f"Loaded TFLite model from {model_path}")
+        logger.info(f"Input shape: {self._input_details[0]['shape']}")
+        logger.info(f"Output shape: {self._output_details[0]['shape']}")
+    
+    def _load_keras_model(self, model_path: str):
+        """Load Keras model (.keras or .h5)."""
+        if not HAS_TF:
+            raise ImportError("TensorFlow is required to load Keras models")
+        
+        # Load with custom objects for our custom loss
+        self._keras_model = tf.keras.models.load_model(
+            model_path,
+            custom_objects={'autopilot_loss': autopilot_loss}
+        )
+        self._model_type = 'keras'
+        
+        logger.info(f"Loaded Keras model from {model_path}")
+        logger.info(f"Input shape: {self._keras_model.input_shape}")
+        logger.info(f"Output shape: {self._keras_model.output_shape}")
             
     def predict(self, sequence: np.ndarray) -> float:
         """
@@ -228,20 +374,31 @@ class AutopilotInference:
         Returns:
             Rudder command in range [-1, 1]
         """
-        if self._interpreter is None:
-            raise RuntimeError("Model not loaded")
-            
         # Ensure correct shape and type
         if sequence.ndim == 2:
             sequence = sequence[np.newaxis, ...]  # Add batch dimension
             
         sequence = sequence.astype(np.float32)
         
-        # Run inference
-        self._interpreter.set_tensor(self._input_details[0]['index'], sequence)
-        self._interpreter.invoke()
-        
-        output = self._interpreter.get_tensor(self._output_details[0]['index'])
+        if self._model_type == 'onnx':
+            # ONNX Runtime inference (preferred for edge deployment)
+            if self._onnx_session is None:
+                raise RuntimeError("Model not loaded")
+            output = self._onnx_session.run(None, {self._onnx_input_name: sequence})[0]
+        elif self._model_type == 'keras':
+            # Keras model inference
+            if self._keras_model is None:
+                raise RuntimeError("Model not loaded")
+            output = self._keras_model.predict(sequence, verbose=0)
+        elif self._model_type == 'tflite':
+            # TFLite inference
+            if self._interpreter is None:
+                raise RuntimeError("Model not loaded")
+            self._interpreter.set_tensor(self._input_details[0]['index'], sequence)
+            self._interpreter.invoke()
+            output = self._interpreter.get_tensor(self._output_details[0]['index'])
+        else:
+            raise RuntimeError(f"Unknown model type: {self._model_type}")
         
         # Return scalar value, clipped to valid range
         return float(np.clip(output[0, 0], -1.0, 1.0))

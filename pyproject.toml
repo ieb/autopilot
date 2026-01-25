@@ -10,6 +10,9 @@ dependencies = [
     "pyserial>=3.5",
     "tensorflow==2.16.2",
     "tensorflow-metal==1.1.0; sys_platform == 'darwin'",
+    "tf2onnx>=1.16.0",
+    "onnx==1.16.0",
+    "onnxruntime>=1.23.2",
 ]
 
 [project.optional-dependencies]
@@ -18,13 +21,19 @@ dev = [
     "pytest-cov>=3.0.0",
 ]
 rpi = [
-    # Raspberry Pi specific dependencies
-    "tflite-runtime>=2.10.0",
+    # Raspberry Pi specific dependencies (inference only, no TensorFlow)
+    "onnxruntime>=1.17.0",
     "RPi.GPIO",
     "adafruit-circuitpython-ads1x15",
 ]
 viz = [
     "matplotlib>=3.5.0",
+]
+experiment = [
+    # GRIB file reading
+    "cfgrib>=0.9.10",
+    "xarray>=2023.1.0",
+    "eccodes>=1.5.0",
 ]
 
 [project.scripts]
@@ -35,7 +44,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src", "experiments"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

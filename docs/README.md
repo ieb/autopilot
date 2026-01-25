@@ -7,6 +7,11 @@ This folder contains operational documentation for the ML Yacht Autopilot projec
 | Document | Description |
 |----------|-------------|
 | [Data Preparation](data_preparation.md) | Complete guide for preprocessing logs and preparing training data |
+| [Simulated Training Data](simulated_training_data.md) | Guide for generating simulated training data |
+| [Model Architecture](model_architecture.md) | LSTM autopilot model architecture and features |
+| [Model Export (ONNX)](model_export_onnx.md) | ONNX export for Raspberry Pi deployment |
+| [PD Controller](pd_controller.md) | Proportional-Derivative controller explanation |
+| [Planned Passage Experiment](planned_passage_experiment.md) | How to run the passage following experiment |
 
 ## Quick Reference
 

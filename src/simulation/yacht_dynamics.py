@@ -272,8 +272,9 @@ class YachtDynamics:
             return
             
         # Convert SOG from knots to degrees/second
-        # 1 knot = 1 nm/hour = 1/60 degree/hour = 1/3600 degree/second
-        speed_deg_per_sec = self.state.sog / 3600.0
+        # 1 knot = 1 nm/hour, 1 nm ≈ 1' of latitude = 1/60 degree
+        # So: 1 knot = (1/60 degree)/hour = (1/60)/3600 degree/second = 1/216000 deg/s
+        speed_deg_per_sec = self.state.sog / 216000.0
         
         # Distance traveled
         distance_deg = speed_deg_per_sec * dt

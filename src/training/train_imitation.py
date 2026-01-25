@@ -19,7 +19,7 @@ from .data_loader import TrainingDataLoader, DataConfig
 from ..ml.autopilot_model import (
     build_autopilot_model, 
     compile_model, 
-    convert_to_tflite,
+    convert_to_onnx,
     ModelConfig
 )
 
@@ -416,9 +416,12 @@ class ImitationTrainer:
         
         return metrics
         
-    def save_model(self, include_tflite: bool = True) -> Dict[str, str]:
+    def save_model(self, include_onnx: bool = True) -> Dict[str, str]:
         """
         Save trained model.
+        
+        Args:
+            include_onnx: Whether to also export ONNX format for edge deployment
         
         Returns:
             Dict with paths to saved files
@@ -430,17 +433,20 @@ class ImitationTrainer:
         model_dir = self.training_config.model_dir
         model_name = self.training_config.model_name
         
-        # Save Keras model (native format)
+        # Save Keras model (native format for training/evaluation)
         keras_path = os.path.join(model_dir, f"{model_name}.keras")
         self._model.save(keras_path)
         paths['keras'] = keras_path
         logger.info(f"Saved Keras model to {keras_path}")
         
-        # Save TFLite model
-        if include_tflite:
-            tflite_path = os.path.join(model_dir, f"{model_name}.tflite")
-            convert_to_tflite(self._model, tflite_path, quantize=True)
-            paths['tflite'] = tflite_path
+        # Save ONNX model for edge deployment (Raspberry Pi)
+        if include_onnx:
+            onnx_path = os.path.join(model_dir, f"{model_name}.onnx")
+            try:
+                convert_to_onnx(self._model, onnx_path)
+                paths['onnx'] = onnx_path
+            except Exception as e:
+                logger.warning(f"ONNX conversion failed: {e}")
             
         # Save training config
         config_path = os.path.join(model_dir, f"{model_name}_config.json")
