@@ -12,6 +12,7 @@ This folder contains operational documentation for the ML Yacht Autopilot projec
 | [Model Export (ONNX)](model_export_onnx.md) | ONNX export for Raspberry Pi deployment |
 | [PD Controller](pd_controller.md) | Proportional-Derivative controller explanation |
 | [Planned Passage Experiment](planned_passage_experiment.md) | How to run the passage following experiment |
+| [Helm Controller Bug Fix](helm_controller_bug_fix.md) | Critical bug fix in simulation helm controller |
 
 ## Quick Reference
 

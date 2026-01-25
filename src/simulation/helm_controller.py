@@ -142,11 +142,13 @@ class HelmController:
         kd *= self.config.skill_level
         
         # PD control
-        derivative = (error - self.state.last_error) / dt if dt > 0 else 0.0
-        
-        # Also use actual heading rate as derivative feedback
+        # For compass mode, error = target - heading, so d(error)/dt = -heading_rate
+        # The derivative term should oppose the current motion to provide damping
         if self.state.mode == SteeringMode.COMPASS:
-            derivative = heading_rate
+            # Negative sign because error derivative = -heading_rate
+            derivative = -heading_rate
+        else:
+            derivative = (error - self.state.last_error) / dt if dt > 0 else 0.0
         
         command = kp * error + kd * derivative
         
@@ -207,15 +209,22 @@ class HelmController:
         return (entry[1], entry[2], entry[3])
         
     def _compute_error(self, delayed: Tuple[float, float, float]) -> float:
-        """Compute steering error based on mode."""
+        """
+        Compute steering error based on mode.
+        
+        Sign convention: positive error means we need to turn to port (left).
+        This requires NEGATIVE rudder to produce the correct turn direction.
+        Error = target - current, so positive error = target is to port.
+        """
         heading, awa, twa = delayed
         
         if self.state.mode == SteeringMode.COMPASS:
-            return self._angle_diff(heading, self.state.target_heading)
+            # target - heading: positive when target is to port (left)
+            return self._angle_diff(self.state.target_heading, heading)
         elif self.state.mode == SteeringMode.WIND_AWA:
-            return self._angle_diff(awa, self.state.target_awa)
+            return self._angle_diff(self.state.target_awa, awa)
         elif self.state.mode == SteeringMode.WIND_TWA:
-            return self._angle_diff(twa, self.state.target_twa)
+            return self._angle_diff(self.state.target_twa, twa)
         return 0.0
         
     def _get_gains(self) -> Tuple[float, float]:
