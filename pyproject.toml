@@ -3,7 +3,7 @@ name = "autopilot"
 version = "0.1.0"
 description = "ML Yacht Autopilot"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "numpy>=1.21.0",
     "python-can>=4.0.0",

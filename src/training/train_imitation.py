@@ -36,7 +36,7 @@ except ImportError:
 # MLflow imports (optional)
 try:
     import mlflow
-    import mlflow.tensorflow
+    import mlflow.keras
     HAS_MLFLOW = True
 except ImportError:
     mlflow = None
@@ -538,14 +538,11 @@ def train_from_logs(data_dir: str,
             print("Warning: MLflow requested but not installed. Run: uv pip install mlflow")
         else:
             mlflow.set_experiment(mlflow_experiment_name)
-            mlflow.tensorflow.autolog(
-                log_datasets=True,
+            mlflow.keras.autolog(
+                log_models=True,
                 log_model_signatures=True,
-                log_every_epoch=True,
-                checkpoint=True,
-                checkpoint_monitor="val_loss",
-                checkpoint_mode="min",
-                checkpoint_save_best_only=True,
+                log_input_examples=False,
+                save_exported_model=False,  # Use native .keras format
             )
             print(f"MLflow tracking enabled. Experiment: {mlflow_experiment_name}")
     

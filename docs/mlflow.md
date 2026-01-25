@@ -17,7 +17,6 @@ MLflow is integrated into the training pipeline to provide:
 MLflow is included in the dev dependencies:
 
 ```bash
-cd /Users/boston/ieb/autopilot
 uv sync --extra dev
 ```
 
@@ -73,7 +72,6 @@ uv run python -m src.training.train_imitation data/simulated \
 ### Starting the MLflow UI
 
 ```bash
-cd /Users/boston/ieb/autopilot
 uv run mlflow ui --port 5000
 ```
 
@@ -91,12 +89,12 @@ Then open http://localhost:5000 in your browser.
 
 ### Automatic (via autolog)
 
-These are logged automatically by `mlflow.tensorflow.autolog()`:
+These are logged automatically by `mlflow.keras.autolog()`:
 
 - Per-epoch metrics: `loss`, `val_loss`, `mae`, `val_mae`
 - Fit parameters: `epochs`, `batch_size`
 - Model summary and architecture
-- Best checkpoint (monitored on `val_loss`)
+- Trained model (saved in native `.keras` format)
 - Model signature (input/output schema)
 
 ### Manual (custom logging)
@@ -185,6 +183,5 @@ uv run mlflow ui --port 5001
 Make sure you're running the UI from the project root where `mlruns/` is located:
 
 ```bash
-cd /Users/boston/ieb/autopilot
 uv run mlflow ui
 ```
