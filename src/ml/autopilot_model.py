@@ -79,7 +79,7 @@ def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Mod
     
     # Initial feature mixing across time
     x = tf.keras.layers.TimeDistributed(
-        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(128, activation='relu'),
         name='feature_mixing'
     )(inputs)
     x = tf.keras.layers.TimeDistributed(
@@ -104,8 +104,8 @@ def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Mod
     x = tf.keras.layers.Dropout(config.dropout_rate)(x)
     
     # Output mapping with BatchNormalization for stability
-    x = tf.keras.layers.Dense(config.dense_units, activation='relu', name='dense_out')(x)
-    x = tf.keras.layers.BatchNormalization(name='bn_dense')(x)
+    x = tf.keras.layers.Dense(config.dense_units, activation=tf.keras.layers.LeakyReLU(alpha=0.01), name='dense_out')(x)
+    ## On advice, throttling x = tf.keras.layers.BatchNormalization(name='bn_dense')(x)
     
     # Rudder command output with tanh for bounded [-1, 1]
     outputs = tf.keras.layers.Dense(1, activation='tanh', name='rudder_command')(x)
@@ -198,6 +198,9 @@ def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
     ONNX is preferred over TFLite due to Keras 3 compatibility issues
     with the TFLite converter.
     
+    This function rebuilds the model on CPU to ensure no GPU-specific ops
+    (like CudnnRNNV3) are included in the exported graph.
+    
     Args:
         model: Trained Keras model
         output_path: Path for .onnx file
@@ -215,20 +218,47 @@ def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
         raise ImportError("tf2onnx and onnx packages are required. "
                          "Install with: pip install tf2onnx onnx")
     
-    # Force CPU to avoid GPU-specific ops (CudnnRNN) in the exported graph
     import os
+    import tempfile
+    import numpy as np
+    
+    # Save original environment and disable GPU completely
     original_cuda = os.environ.get('CUDA_VISIBLE_DEVICES')
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     
+    # Also disable GPU via TensorFlow config
     try:
-        # Run a forward pass to ensure graph is built with CPU ops
-        import numpy as np
-        dummy = np.random.randn(1, model.input_shape[1], model.input_shape[2]).astype(np.float32)
-        _ = model(dummy, training=False)
+        tf.config.set_visible_devices([], 'GPU')
+    except Exception:
+        pass  # May fail if already initialized
+    
+    try:
+        # Save weights to temp file
+        with tempfile.NamedTemporaryFile(suffix='.weights.h5', delete=False) as f:
+            weights_path = f.name
+        model.save_weights(weights_path)
         
-        # Convert to ONNX
-        input_signature = [tf.TensorSpec(model.input_shape, tf.float32, name='input')]
-        onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
+        # Get model config and rebuild on CPU
+        # This ensures LSTM uses CPU implementation, not CudnnRNN
+        with tf.device('/CPU:0'):
+            # Clone the model architecture
+            model_config = model.get_config()
+            cpu_model = tf.keras.Model.from_config(model_config)
+            
+            # Build the model with the correct input shape
+            input_shape = model.input_shape
+            dummy = np.zeros((1, input_shape[1], input_shape[2]), dtype=np.float32)
+            _ = cpu_model(dummy, training=False)
+            
+            # Load weights into CPU model
+            cpu_model.load_weights(weights_path)
+            
+            # Run forward pass to ensure graph is built
+            _ = cpu_model(dummy, training=False)
+            
+            # Convert CPU model to ONNX
+            input_signature = [tf.TensorSpec(input_shape, tf.float32, name='input')]
+            onnx_model, _ = tf2onnx.convert.from_keras(cpu_model, input_signature, opset=13)
         
         # Save ONNX model
         onnx.save(onnx_model, output_path)
@@ -236,6 +266,9 @@ def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
         size_kb = os.path.getsize(output_path) / 1024
         logger.info(f"Saved ONNX model to {output_path}")
         logger.info(f"Model size: {size_kb:.1f} KB")
+        
+        # Clean up temp file
+        os.unlink(weights_path)
         
     finally:
         # Restore original CUDA setting

@@ -57,7 +57,7 @@ class RudderConfig:
     adc_starboard_limit: int = 26000  # ADC value at max starboard (+30°)
     
     # Physical limits
-    max_angle_deg: float = 30.0  # Max rudder angle each side
+    max_angle_deg: float = 25.0  # Max rudder angle each side
     
     # Filtering
     filter_alpha: float = 0.3    # Low-pass filter coefficient (0-1, lower = more smoothing)

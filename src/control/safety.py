@@ -51,8 +51,8 @@ class AlarmCode(IntEnum):
 class SafetyConfig:
     """Safety layer configuration."""
     # Rudder limits
-    rudder_limit_deg: float = 28.0       # Software limit (hardware is 30°)
-    rudder_warning_deg: float = 25.0     # Warning when approaching limit
+    rudder_limit_deg: float = 24.0       # Software limit (hardware is 25°)
+    rudder_warning_deg: float = 22.0     # Warning when approaching limit
     
     # Rate limits  
     max_rudder_rate: float = 5.0         # deg/s max change rate
@@ -175,7 +175,7 @@ class SafetyLayer:
             # Don't return, just warn
             
         # 3. Clamp rudder position
-        max_normalized = self.config.rudder_limit_deg / 30.0  # Convert to normalized
+        max_normalized = self.config.rudder_limit_deg / 25.0  # Convert to normalized
         if abs(output) > max_normalized:
             output = max(-max_normalized, min(max_normalized, output))
             self._state.output_limited = True
@@ -185,7 +185,7 @@ class SafetyLayer:
                 self._state.alarm_message = "Rudder limit"
                 
         # 4. Rate limit
-        max_rate_normalized = (self.config.max_rudder_rate / 30.0) * dt
+        max_rate_normalized = (self.config.max_rudder_rate / 25.0) * dt
         rate = output - self._last_output
         if abs(rate) > max_rate_normalized:
             output = self._last_output + max_rate_normalized * (1 if rate > 0 else -1)
@@ -369,7 +369,7 @@ class SystemSafety:
         output = ml_output
         
         # Clamp to position limits
-        max_normalized = self.RUDDER_LIMIT_DEG / 30.0
+        max_normalized = self.RUDDER_LIMIT_DEG / 25.0
         if abs(output) > max_normalized:
             output = max(-max_normalized, min(max_normalized, output))
             if self._alarm_code == AlarmCode.OK:
@@ -377,7 +377,7 @@ class SystemSafety:
                 self._alarm_message = "Rudder limit applied"
                 
         # Rate limit
-        max_rate_normalized = (self.MAX_RUDDER_RATE / 30.0) * dt if dt > 0 else 0.1
+        max_rate_normalized = (self.MAX_RUDDER_RATE / 25.0) * dt if dt > 0 else 0.1
         rate = output - self._last_output
         if abs(rate) > max_rate_normalized:
             output = self._last_output + max_rate_normalized * (1 if rate > 0 else -1)

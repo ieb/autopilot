@@ -38,7 +38,7 @@ class FeatureConfig:
     max_wind_angle: float = 180.0
     max_wind_speed: float = 60.0     # knots
     max_boat_speed: float = 25.0     # knots (Pogo can hit 20+)
-    max_rudder: float = 30.0         # degrees
+    max_rudder: float = 25.0         # degrees
     max_rudder_rate: float = 10.0    # deg/s
     max_vmg: float = 15.0            # knots
     max_wave_period: float = 15.0    # seconds

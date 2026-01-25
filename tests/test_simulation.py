@@ -54,7 +54,7 @@ class TestYachtDynamics:
         yacht.state.rudder_angle = 0.0
         
         # Request large instant change
-        yacht.step(rudder_command=30.0, dt=0.1)
+        yacht.step(rudder_command=25.0, dt=0.1)
         
         # Should be rate limited (4 deg/s * 0.1s = 0.4 deg max change)
         assert yacht.state.rudder_angle <= 0.5
@@ -96,6 +96,230 @@ class TestYachtDynamics:
         # AWA should be forward of beam when moving
         # (apparent wind shifts forward due to boat motion)
         
+
+class TestNMEA2000Conventions:
+    """
+    Tests that verify NMEA2000 sign conventions are respected throughout the codebase.
+    
+    NMEA2000 Conventions:
+    ---------------------
+    1. AWA (Apparent Wind Angle):
+       - Negative = wind from port side
+       - Positive = wind from starboard side
+       - Range: -180° to +180°
+    
+    2. TWA (True Wind Angle):
+       - Same convention as AWA
+       - Negative = port, Positive = starboard
+    
+    3. Rudder Angle:
+       - Negative = rudder deflected to port
+       - Positive = rudder deflected to starboard
+    
+    4. Physical Effects:
+       - Negative rudder → boat turns to port → heading decreases → AWA increases
+       - Positive rudder → boat turns to starboard → heading increases → AWA decreases
+    
+    These tests serve as both documentation and regression prevention.
+    """
+    
+    def test_positive_rudder_increases_heading(self):
+        """Positive rudder (starboard) should increase heading (turn clockwise)."""
+        yacht = YachtDynamics()
+        yacht.reset(heading=180.0, twd=270.0, tws=15.0)
+        initial_heading = yacht.state.heading
+        
+        # Apply positive (starboard) rudder
+        for _ in range(50):
+            yacht.step(rudder_command=15.0, dt=0.1)
+        
+        # Heading should increase (turn clockwise/starboard)
+        # Handle wrap-around at 360
+        final_heading = yacht.state.heading
+        if final_heading < 90 and initial_heading > 270:
+            final_heading += 360  # Handle wrap
+        
+        assert final_heading > initial_heading, \
+            f"Positive rudder should increase heading: {initial_heading}° → {final_heading}°"
+    
+    def test_negative_rudder_decreases_heading(self):
+        """Negative rudder (port) should decrease heading (turn counter-clockwise)."""
+        yacht = YachtDynamics()
+        yacht.reset(heading=180.0, twd=90.0, tws=15.0)
+        initial_heading = yacht.state.heading
+        
+        # Apply negative (port) rudder
+        for _ in range(50):
+            yacht.step(rudder_command=-15.0, dt=0.1)
+        
+        # Heading should decrease (turn counter-clockwise/port)
+        final_heading = yacht.state.heading
+        if final_heading > 270 and initial_heading < 90:
+            final_heading -= 360  # Handle wrap
+        
+        assert final_heading < initial_heading, \
+            f"Negative rudder should decrease heading: {initial_heading}° → {final_heading}°"
+    
+    def test_starboard_wind_positive_awa(self):
+        """Wind from starboard side should produce positive AWA."""
+        yacht = YachtDynamics()
+        # Heading north (0°), wind from east (90°) = starboard beam reach
+        yacht.reset(heading=0.0, twd=90.0, tws=15.0)
+        
+        # Let yacht settle
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        assert yacht.state.awa > 0, \
+            f"Starboard wind should give positive AWA, got {yacht.state.awa}°"
+    
+    def test_port_wind_negative_awa(self):
+        """Wind from port side should produce negative AWA."""
+        yacht = YachtDynamics()
+        # Heading north (0°), wind from west (270°) = port beam reach
+        yacht.reset(heading=0.0, twd=270.0, tws=15.0)
+        
+        # Let yacht settle
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        assert yacht.state.awa < 0, \
+            f"Port wind should give negative AWA, got {yacht.state.awa}°"
+    
+    def test_positive_rudder_decreases_awa(self):
+        """Positive rudder (turn starboard) should decrease AWA (wind moves aft)."""
+        yacht = YachtDynamics()
+        # Start with wind from starboard beam (+90° AWA approximately)
+        yacht.reset(heading=0.0, twd=90.0, tws=15.0)
+        
+        # Let settle
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        initial_awa = yacht.state.awa
+        
+        # Apply positive rudder - turn starboard (heading increases)
+        # This should move wind aft, decreasing AWA
+        for _ in range(50):
+            yacht.step(rudder_command=15.0, dt=0.1)
+        
+        final_awa = yacht.state.awa
+        
+        assert final_awa < initial_awa, \
+            f"Positive rudder should decrease AWA: {initial_awa:.1f}° → {final_awa:.1f}°"
+    
+    def test_negative_rudder_increases_awa(self):
+        """Negative rudder (turn port) should increase AWA (wind moves forward)."""
+        yacht = YachtDynamics()
+        # Start with wind from port beam (-90° AWA approximately)
+        yacht.reset(heading=0.0, twd=270.0, tws=15.0)
+        
+        # Let settle
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        initial_awa = yacht.state.awa
+        
+        # Apply negative rudder - turn port (heading decreases)
+        # This should move wind aft, increasing AWA (toward 0 from negative)
+        for _ in range(50):
+            yacht.step(rudder_command=-15.0, dt=0.1)
+        
+        final_awa = yacht.state.awa
+        
+        # AWA should increase (get closer to 0 or positive)
+        assert final_awa > initial_awa, \
+            f"Negative rudder should increase AWA: {initial_awa:.1f}° → {final_awa:.1f}°"
+    
+    def test_helm_controller_awa_mode_positive_error(self):
+        """AWA mode: positive error (AWA > target) should produce positive rudder."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.WIND_AWA, target=45.0)  # Target AWA +45°
+        
+        # Current AWA is +60° (wind further aft than target)
+        # Need to head up (turn toward wind) to decrease AWA
+        # With starboard wind, heading up = turn starboard = positive rudder
+        rudder = helm.compute_rudder(
+            heading=90.0,
+            awa=60.0,  # 15° more than target
+            twa=60.0,
+            heading_rate=0.0,
+            dt=0.1
+        )
+        
+        assert rudder > 0, \
+            f"AWA error +15° (awa > target) should give positive rudder, got {rudder:.2f}°"
+    
+    def test_helm_controller_awa_mode_negative_error(self):
+        """AWA mode: negative error (AWA < target) should produce negative rudder."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.WIND_AWA, target=45.0)  # Target AWA +45°
+        
+        # Current AWA is +30° (wind further forward than target)
+        # Need to bear away (turn away from wind) to increase AWA
+        # With starboard wind, bearing away = turn port = negative rudder
+        rudder = helm.compute_rudder(
+            heading=90.0,
+            awa=30.0,  # 15° less than target
+            twa=30.0,
+            heading_rate=0.0,
+            dt=0.1
+        )
+        
+        assert rudder < 0, \
+            f"AWA error -15° (awa < target) should give negative rudder, got {rudder:.2f}°"
+    
+    def test_helm_controller_twa_mode_positive_error(self):
+        """TWA mode: positive error (TWA > target) should produce positive rudder."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.WIND_TWA, target=120.0)  # Target TWA +120°
+        
+        # Current TWA is +135° (running deeper than target)
+        # Need to head up to decrease TWA
+        rudder = helm.compute_rudder(
+            heading=90.0,
+            awa=120.0,
+            twa=135.0,  # 15° more than target
+            heading_rate=0.0,
+            dt=0.1
+        )
+        
+        assert rudder > 0, \
+            f"TWA error +15° (twa > target) should give positive rudder, got {rudder:.2f}°"
+    
+    def test_twa_sign_matches_awa(self):
+        """TWA sign should match AWA sign (both port or both starboard)."""
+        yacht = YachtDynamics()
+        
+        # Test starboard wind
+        yacht.reset(heading=0.0, twd=90.0, tws=15.0)
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        # Compute TWA from twd - heading
+        twa = yacht.state.twd - yacht.state.heading
+        while twa > 180:
+            twa -= 360
+        while twa < -180:
+            twa += 360
+        
+        assert yacht.state.awa > 0 and twa > 0, \
+            f"Starboard wind: both AWA ({yacht.state.awa:.1f}°) and TWA ({twa:.1f}°) should be positive"
+        
+        # Test port wind
+        yacht.reset(heading=0.0, twd=270.0, tws=15.0)
+        for _ in range(20):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        
+        twa = yacht.state.twd - yacht.state.heading
+        while twa > 180:
+            twa -= 360
+        while twa < -180:
+            twa += 360
+        
+        assert yacht.state.awa < 0 and twa < 0, \
+            f"Port wind: both AWA ({yacht.state.awa:.1f}°) and TWA ({twa:.1f}°) should be negative"
+
 
 class TestWindModel:
     """Tests for wind model."""
@@ -595,7 +819,7 @@ class TestIntegration:
         for record in records:
             assert 0 <= record["heading"] < 360
             assert -90 <= record["roll"] <= 90
-            assert -30 <= record["rudder_angle"] <= 30
+            assert -27 <= record["rudder_angle"] <= 27  # Allow noise margin from sensor simulation
             assert record["aws"] >= 0
             assert record["stw"] >= 0
             

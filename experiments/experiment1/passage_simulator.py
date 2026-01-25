@@ -381,8 +381,8 @@ class PassageSimulator:
             t_elapsed = time.perf_counter() - t_start
             self._inference_times.append(t_elapsed)
             
-            # Convert from [-1, 1] to degrees
-            return rudder_normalized * 30.0
+            # Convert from [-1, 1] to degrees (max 25°)
+            return rudder_normalized * 25.0
             
         else:
             # Fallback - simple proportional control
@@ -439,16 +439,40 @@ class PassageSimulator:
         features = np.zeros(25)
         
         heading = self.yacht.state.heading
-        target_heading = nav_state.target_heading
+        awa = self.yacht.state.awa
         
-        # FEAT_HEADING_ERROR (0): heading - target, not target - heading!
-        # This matches feature_engineering.py line 282: _angle_diff(heading, target)
-        heading_error = heading - target_heading
-        while heading_error > 180:
-            heading_error -= 360
-        while heading_error < -180:
-            heading_error += 360
-        features[0] = np.clip(heading_error / 180.0, -1.0, 1.0)
+        # Compute TWA
+        twa = twd - heading
+        while twa > 180:
+            twa -= 360
+        while twa < -180:
+            twa += 360
+        
+        # FEAT_ERROR (0): Mode-specific error computation
+        # Error sign: positive error → positive rudder → turn starboard
+        # For compass: error = heading - target (positive when boat is right of target)
+        # For AWA: error = awa - target_awa (positive when AWA too high, needs to head up)
+        # For TWA: error = twa - target_twa (same as AWA)
+        if nav_state.steering_mode == SteeringMode.COMPASS:
+            error = heading - nav_state.target_heading
+            target_angle = nav_state.target_heading
+        elif nav_state.steering_mode == SteeringMode.WIND_AWA:
+            error = awa - nav_state.target_awa
+            target_angle = nav_state.target_awa
+        elif nav_state.steering_mode == SteeringMode.WIND_TWA:
+            error = twa - nav_state.target_twa
+            target_angle = nav_state.target_twa
+        else:
+            # Default to compass mode (for MOTORING)
+            error = heading - nav_state.target_heading
+            target_angle = nav_state.target_heading
+            
+        # Normalize error to [-180, 180]
+        while error > 180:
+            error -= 360
+        while error < -180:
+            error += 360
+        features[0] = np.clip(error / 180.0, -1.0, 1.0)
         
         # FEAT_HEADING_ERROR_INTEGRAL (1): Skip for now (would need state tracking)
         features[1] = 0.0
@@ -464,7 +488,7 @@ class PassageSimulator:
         features[5] = 0.0
         
         # FEAT_AWA (6)
-        features[6] = np.clip(self.yacht.state.awa / 180.0, -1.0, 1.0)
+        features[6] = np.clip(awa / 180.0, -1.0, 1.0)
         
         # FEAT_AWA_RATE (7): Skip
         features[7] = 0.0
@@ -473,11 +497,6 @@ class PassageSimulator:
         features[8] = np.clip(self.yacht.state.aws / 60.0, -1.0, 1.0)
         
         # FEAT_TWA (9), FEAT_TWS (10)
-        twa = twd - heading
-        while twa > 180:
-            twa -= 360
-        while twa < -180:
-            twa += 360
         features[9] = np.clip(twa / 180.0, -1.0, 1.0)
         features[10] = np.clip(self.yacht.state.tws / 60.0, 0.0, 1.0)
         
@@ -485,28 +504,21 @@ class PassageSimulator:
         features[11] = np.clip(self.yacht.state.stw / 25.0, 0.0, 1.0)
         features[12] = np.clip(self.yacht.state.sog / 25.0, 0.0, 1.0)
         
-        # FEAT_COG_ERROR (13): cog - target_heading
-        cog_error = self.yacht.state.cog - target_heading
+        # FEAT_COG_ERROR (13): cog - target_heading (compass bearing error)
+        cog_error = self.yacht.state.cog - nav_state.target_heading
         while cog_error > 180:
             cog_error -= 360
         while cog_error < -180:
             cog_error += 360
         features[13] = np.clip(cog_error / 180.0, -1.0, 1.0)
         
-        # FEAT_RUDDER_POSITION (14)
-        features[14] = np.clip(self.yacht.state.rudder_angle / 30.0, -1.0, 1.0)
+        # FEAT_RUDDER_POSITION (14) - normalized to 25° max
+        features[14] = np.clip(self.yacht.state.rudder_angle / 25.0, -1.0, 1.0)
         
         # FEAT_RUDDER_VELOCITY (15): Skip
         features[15] = 0.0
         
-        # FEAT_TARGET_ANGLE (16): Target angle normalized to [-1, 1]
-        # For compass mode, this should be the target heading normalized
-        # But angles can be 0-360, so we need to handle this properly
-        # The training code uses this for wind angles too, so normalize by 180
-        # and use signed representation
-        target_angle = target_heading
-        if target_angle > 180:
-            target_angle -= 360  # Convert 270 -> -90
+        # FEAT_TARGET_ANGLE (16): Mode-specific target angle
         features[16] = np.clip(target_angle / 180.0, -1.0, 1.0)
         
         # FEAT_VMG_UP (17), FEAT_VMG_DOWN (18)

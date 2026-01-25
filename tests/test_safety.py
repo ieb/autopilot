@@ -23,8 +23,8 @@ class TestSafetyConfig:
         """Default rudder limits should match specification."""
         config = SafetyConfig()
         
-        assert config.rudder_limit_deg == 28.0
-        assert config.rudder_warning_deg == 25.0
+        assert config.rudder_limit_deg == 24.0
+        assert config.rudder_warning_deg == 22.0
     
     def test_default_rate_limit(self):
         """Default rate limit should be 5 deg/s."""
@@ -72,8 +72,8 @@ class TestRudderLimits:
                 commanded_position=0
             )
         
-        # Should be clamped to 28/30 = 0.933
-        max_normalized = 28.0 / 30.0
+        # Should be clamped to 24/25 = 0.96
+        max_normalized = 24.0 / 25.0
         assert abs(output) <= max_normalized + 0.01  # Small tolerance for filter
     
     def test_negative_output_clamped(self, safety_layer):
@@ -88,7 +88,7 @@ class TestRudderLimits:
                 commanded_position=0
             )
         
-        max_normalized = 28.0 / 30.0
+        max_normalized = 24.0 / 25.0
         assert abs(output) <= max_normalized + 0.01
 
 

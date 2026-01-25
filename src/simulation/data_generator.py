@@ -279,11 +279,11 @@ class SailingDataGenerator:
         """Create output record with sensor noise."""
         cfg = self.config
         state = self.yacht.state
-        
-        # Get target based on mode
-        target = self.helm.get_target()
         mode_str = self.helm.state.mode.value
         
+        # Always store all target values separately for proper feature computation
+        # target_heading is the compass heading target (used in compass mode)
+        # target_awa/target_twa are the wind angle targets (used in wind modes)
         return {
             "timestamp": self.elapsed_time,
             "heading": state.heading + random.gauss(0, cfg.heading_noise_std),
@@ -296,7 +296,9 @@ class SailingDataGenerator:
             "cog": state.cog + random.gauss(0, 1.0),
             "sog": max(0, state.sog + random.gauss(0, cfg.stw_noise_std)),
             "rudder_angle": state.rudder_angle + random.gauss(0, cfg.rudder_noise_std),
-            "target_heading": target,
+            "target_heading": self.helm.state.target_heading,
+            "target_awa": self.helm.state.target_awa,
+            "target_twa": self.helm.state.target_twa,
             "mode": mode_str,
             "latitude": state.latitude,
             "longitude": state.longitude,

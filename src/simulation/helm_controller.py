@@ -212,19 +212,34 @@ class HelmController:
         """
         Compute steering error based on mode.
         
-        Sign convention: positive error means we need to turn to port (left).
-        This requires NEGATIVE rudder to produce the correct turn direction.
-        Error = target - current, so positive error = target is to port.
+        NMEA2000 Sign Conventions:
+        - Compass: bearings increase clockwise (0°=N, 90°=E, 180°=S, 270°=W)
+        - Rudder: positive = starboard, negative = port
+        - AWA/TWA: positive = starboard, negative = port
+        
+        Compass mode:
+        - error = target - heading
+        - Positive error means target is clockwise from heading (to starboard)
+        - Positive error → positive rudder → turn starboard → heading increases
+        
+        Wind modes (AWA/TWA):
+        - error = current - target (note: reversed from compass)
+        - Positive error means wind angle too high (too far aft)
+        - Positive error → positive rudder → turn starboard → AWA decreases
         """
         heading, awa, twa = delayed
         
         if self.state.mode == SteeringMode.COMPASS:
-            # target - heading: positive when target is to port (left)
+            # target - heading: positive when target is to starboard (clockwise)
+            # Positive error → positive rudder → turn starboard → heading increases
             return self._angle_diff(self.state.target_heading, heading)
         elif self.state.mode == SteeringMode.WIND_AWA:
-            return self._angle_diff(self.state.target_awa, awa)
+            # awa - target: positive when AWA too high (need to head up)
+            # Positive error → positive rudder → turn starboard → AWA decreases
+            return self._angle_diff(awa, self.state.target_awa)
         elif self.state.mode == SteeringMode.WIND_TWA:
-            return self._angle_diff(self.state.target_twa, twa)
+            # Same logic as AWA mode
+            return self._angle_diff(twa, self.state.target_twa)
         return 0.0
         
     def _get_gains(self) -> Tuple[float, float]:

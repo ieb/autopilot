@@ -28,7 +28,7 @@ class YachtConfig:
     # Rudder response
     rudder_effectiveness: float = 2.0      # deg/s heading rate per deg rudder
     heading_damping: float = 0.8           # First-order response damping
-    max_rudder_angle: float = 30.0         # Maximum rudder deflection
+    max_rudder_angle: float = 25.0         # Maximum rudder deflection
     
     # Heel characteristics
     max_heel: float = 30.0                 # Maximum heel angle (degrees)

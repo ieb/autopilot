@@ -61,8 +61,8 @@ class RudderControlConfig:
     pwm_frequency: int = 10000      # 10kHz for silent operation
     
     # Physical limits
-    max_rudder_angle: float = 30.0  # degrees
-    software_limit: float = 28.0    # degrees (inside hardware limit)
+    max_rudder_angle: float = 25.0  # degrees
+    software_limit: float = 24.0    # degrees (inside hardware limit)
     
     # Rate limits (based on 15s lock-to-lock over 60 degrees)
     max_rate: float = 4.0           # deg/s

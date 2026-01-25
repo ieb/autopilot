@@ -28,6 +28,7 @@ class DataConfig:
     train_split: float = 0.8       # Train/validation split
     shuffle: bool = True           # Shuffle training data
     normalize: bool = True         # Apply feature normalization
+    mode_transition_filter_s: float = 15.0  # Seconds to filter after mode changes
 
 
 @dataclass
@@ -53,6 +54,8 @@ class LoggedFrame:
     
     # Mode info
     target_heading: float = 0.0
+    target_awa: float = 0.0
+    target_twa: float = 0.0
     mode: str = "unknown"
     
     # Engine data (for operation mode detection)
@@ -519,6 +522,8 @@ class CANLogParser:
                 sog=record.get('sog', 0),
                 rudder_angle=record.get('rudder_angle', 0),
                 target_heading=record.get('target_heading', 0),
+                target_awa=record.get('target_awa', 0),
+                target_twa=record.get('target_twa', 0),
                 mode=record.get('mode', 'unknown'),
                 engine_rpm=record.get('engine_rpm', 0),
                 engine_hours=record.get('engine_hours', 0),
@@ -703,12 +708,23 @@ class TrainingDataLoader:
             
         if len(frames) < self.config.sequence_length + 1:
             return np.array([]), np.array([])
-            
+        
+        # Mark frames in mode transition periods for filtering
+        # After a mode change, the helm controller needs time to stabilize
+        transition_mask = self._compute_transition_mask(frames)
+        
         # Convert frames to feature sequences
         X_list = []
         y_list = []
         
+        skipped_transitions = 0
         for i in range(len(frames) - self.config.sequence_length):
+            # Check if any frame in the sequence or label is in transition
+            seq_end = i + self.config.sequence_length + 1  # Include label frame
+            if any(transition_mask[i:seq_end]):
+                skipped_transitions += 1
+                continue
+                
             sequence = frames[i:i + self.config.sequence_length]
             label_frame = frames[i + self.config.sequence_length]
             
@@ -718,23 +734,76 @@ class TrainingDataLoader:
             for j, frame in enumerate(sequence):
                 features[j] = self._frame_to_features(frame, sequence[0])
                 
-            # Label is the rudder position (normalized)
-            label = label_frame.rudder_angle / 30.0  # Normalize to [-1, 1]
+            # Label is the rudder position (normalized to 25° max)
+            label = label_frame.rudder_angle / 25.0  # Normalize to [-1, 1]
             label = np.clip(label, -1.0, 1.0)
             
             X_list.append(features)
             y_list.append([label])
+        
+        if skipped_transitions > 0:
+            logger.info(f"Filtered {skipped_transitions} sequences in mode transition periods")
             
         return np.array(X_list), np.array(y_list)
+    
+    def _compute_transition_mask(self, frames: List[LoggedFrame]) -> List[bool]:
+        """
+        Compute mask indicating frames in mode transition periods.
+        
+        After a mode change, the helm controller PD response creates transient
+        behavior where error/rudder relationships are dominated by derivative
+        damping rather than proportional control. We filter these periods to
+        give the ML model cleaner training signal.
+        
+        Returns:
+            List of booleans, True if frame is in transition period
+        """
+        if len(frames) == 0:
+            return []
+            
+        mask = [False] * len(frames)
+        filter_seconds = self.config.mode_transition_filter_s
+        
+        if filter_seconds <= 0:
+            return mask  # No filtering
+            
+        # Find mode changes and mark transition periods
+        current_mode = frames[0].mode
+        last_change_time = frames[0].timestamp - filter_seconds - 1  # Before any data
+        
+        for i, frame in enumerate(frames):
+            if frame.mode != current_mode:
+                # Mode changed - start new transition period
+                current_mode = frame.mode
+                last_change_time = frame.timestamp
+            
+            # Mark if within transition period
+            if frame.timestamp - last_change_time < filter_seconds:
+                mask[i] = True
+                
+        return mask
         
     def _frame_to_features(self, frame: LoggedFrame, 
                            ref_frame: LoggedFrame) -> np.ndarray:
         """Convert a logged frame to normalized features."""
         features = np.zeros(self.config.feature_dim)
         
-        # Heading error (using target_heading if available)
-        heading_error = self._angle_diff(frame.heading, frame.target_heading)
-        features[0] = heading_error / 180.0
+        # Compute error based on steering mode
+        # Error sign: positive error → positive rudder needed → turn starboard → decrease AWA/TWA, increase heading
+        # For compass: error = heading - target (positive when boat is right of target, needs to turn left)
+        # For AWA: error = awa - target_awa (positive when AWA too high, needs to head up = turn toward wind)
+        # For TWA: error = twa - target_twa (same logic as AWA)
+        if frame.mode == "compass":
+            error = self._angle_diff(frame.heading, frame.target_heading)
+        elif frame.mode == "wind_awa":
+            error = self._angle_diff(frame.awa, frame.target_awa)
+        elif frame.mode in ["wind_twa", "vmg"]:
+            twa, _ = self._compute_true_wind(frame.awa, frame.aws, frame.stw)
+            error = self._angle_diff(twa, frame.target_twa)
+        else:
+            # Default to compass mode behavior
+            error = self._angle_diff(frame.heading, frame.target_heading)
+        features[0] = error / 180.0
         
         # Skip integral for now (would need state tracking)
         features[1] = 0.0
@@ -763,16 +832,24 @@ class TrainingDataLoader:
         features[11] = frame.stw / 25.0
         features[12] = frame.sog / 25.0
         
-        # COG error
+        # COG error (relative to compass target heading)
         cog_error = self._angle_diff(frame.cog, frame.target_heading)
         features[13] = cog_error / 180.0
         
-        # Rudder position
-        features[14] = frame.rudder_angle / 30.0
+        # Rudder position (normalized to 25° max)
+        features[14] = frame.rudder_angle / 25.0
         features[15] = 0.0  # Rudder velocity
         
-        # Target angle
-        features[16] = frame.target_heading / 180.0
+        # Target angle (mode-specific target normalized)
+        if frame.mode == "compass":
+            target_angle = frame.target_heading
+        elif frame.mode == "wind_awa":
+            target_angle = frame.target_awa
+        elif frame.mode in ["wind_twa", "vmg"]:
+            target_angle = frame.target_twa
+        else:
+            target_angle = frame.target_heading
+        features[16] = target_angle / 180.0
         
         # VMG (computed)
         vmg_up = frame.stw * np.cos(np.radians(abs(twa))) if frame.stw > 0 else 0
@@ -784,7 +861,7 @@ class TrainingDataLoader:
         features[19] = 0.5  # Placeholder
         features[20] = 0.8  # Placeholder performance
         
-        # Mode flags (assume compass mode for historical data)
+        # Mode flags
         features[21] = 1.0 if frame.mode == "compass" else 0.0
         features[22] = 1.0 if frame.mode == "wind_awa" else 0.0
         features[23] = 1.0 if frame.mode in ["wind_twa", "vmg"] else 0.0
