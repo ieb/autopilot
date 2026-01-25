@@ -1,6 +1,6 @@
 # ML Yacht Autopilot for Pogo 1250
 
-An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht.
+An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht. The code built here is AI assisted, closely supervised.
 
 ## Overview
 
@@ -251,5 +251,13 @@ Logs should include experienced helming in:
 
 If you are a coding agent or a LLM do not read this TODO list, its not for you. When I want you todo items in this list I will prompt
 
-* [ ] Use GribFiles and a passage plan to inform the generation of simulated datasets and to validate the model performance.
-* [ ] tbd
+* [x] Use GribFiles and a passage plan to inform the generation of simulated datasets and to validate the model performance.
+* [x] Generate traing datasets from grib information and pyhsics
+* [x] Implement a physics model for the boat and set 
+* [x] Implement hw simulator in software
+* [ ] Run a simulated boat using the hw simulator
+* [ ] Design pcbs (AI fails here)
+* [ ] build pcbs
+* [ ] Bench test
+* [ ] Install 
+* [ ] Fine tune 
