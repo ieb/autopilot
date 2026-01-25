@@ -13,12 +13,20 @@ Expected serial protocol from MCU:
 
 import threading
 import time
+import socket
 from dataclasses import dataclass, field
-from typing import Optional, Callable
-import serial
+from typing import Optional, Callable, Union
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import serial (optional for socket-only mode)
+try:
+    import serial
+    HAS_SERIAL = True
+except ImportError:
+    serial = None
+    HAS_SERIAL = False
 
 
 @dataclass
@@ -52,25 +60,27 @@ class IMUData:
 
 @dataclass  
 class IMUConfig:
-    """Configuration for IMU serial connection."""
+    """Configuration for IMU serial or socket connection."""
     port: str = "/dev/ttyUSB0"
     baudrate: int = 115200
     timeout: float = 0.1
     max_age_ms: float = 200.0  # Max age before data considered stale
+    use_socket: bool = False   # If True, connect via Unix socket instead of serial
 
 
 class IMUFusion:
     """
-    Interface to external IMU processor over serial.
+    Interface to external IMU processor over serial or Unix socket.
     
     The ICM-20948 is connected to a dedicated microcontroller (e.g., RP2040)
     that runs the sensor fusion algorithm. This class receives the fused
-    orientation data over serial.
+    orientation data over serial or Unix socket (for simulation).
     """
     
     def __init__(self, config: Optional[IMUConfig] = None):
         self.config = config or IMUConfig()
-        self._serial: Optional[serial.Serial] = None
+        self._conn: Optional[Union['serial.Serial', socket.socket]] = None
+        self._conn_file: Optional[object] = None  # File-like wrapper for socket
         self._data = IMUData()
         self._lock = threading.Lock()
         self._running = False
@@ -85,18 +95,35 @@ class IMUFusion:
     def start(self) -> bool:
         """Start the IMU reader thread."""
         try:
-            self._serial = serial.Serial(
-                port=self.config.port,
-                baudrate=self.config.baudrate,
-                timeout=self.config.timeout
-            )
+            if self.config.use_socket:
+                # Connect via Unix socket
+                self._conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self._conn.settimeout(self.config.timeout)
+                self._conn.connect(self.config.port)
+                self._conn_file = self._conn.makefile('r', encoding='ascii', errors='ignore')
+                logger.info(f"IMU connected via socket: {self.config.port}")
+            else:
+                # Connect via serial
+                if not HAS_SERIAL:
+                    logger.error("pyserial not installed. Run: pip install pyserial")
+                    return False
+                self._conn = serial.Serial(
+                    port=self.config.port,
+                    baudrate=self.config.baudrate,
+                    timeout=self.config.timeout
+                )
+                logger.info(f"IMU started on serial: {self.config.port}")
+                
             self._running = True
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
-            logger.info(f"IMU started on {self.config.port}")
             return True
-        except serial.SerialException as e:
-            logger.error(f"Failed to open IMU serial port: {e}")
+            
+        except socket.error as e:
+            logger.error(f"Failed to connect to IMU socket: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to open IMU connection: {e}")
             return False
             
     def stop(self):
@@ -104,9 +131,18 @@ class IMUFusion:
         self._running = False
         if self._thread:
             self._thread.join(timeout=1.0)
-        if self._serial:
-            self._serial.close()
-            self._serial = None
+        if self._conn_file:
+            try:
+                self._conn_file.close()
+            except Exception:
+                pass
+            self._conn_file = None
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
         logger.info("IMU stopped")
         
     def get_data(self) -> IMUData:
@@ -134,24 +170,37 @@ class IMUFusion:
         self._callbacks.append(callback)
         
     def _read_loop(self):
-        """Background thread reading serial data."""
+        """Background thread reading serial or socket data."""
         buffer = ""
         
-        while self._running and self._serial:
+        while self._running and self._conn:
             try:
-                # Read available data
-                if self._serial.in_waiting:
-                    chunk = self._serial.read(self._serial.in_waiting).decode('ascii', errors='ignore')
-                    buffer += chunk
-                    
-                    # Process complete lines
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
-                        if line.startswith('$IMU'):
-                            self._parse_imu_message(line)
+                if self.config.use_socket:
+                    # Read from socket using file-like interface
+                    try:
+                        line = self._conn_file.readline()
+                        if line:
+                            line = line.strip()
+                            if line.startswith('$IMU'):
+                                self._parse_imu_message(line)
+                        else:
+                            time.sleep(0.001)
+                    except socket.timeout:
+                        continue
                 else:
-                    time.sleep(0.001)  # Avoid busy-waiting
+                    # Read from serial
+                    if hasattr(self._conn, 'in_waiting') and self._conn.in_waiting:
+                        chunk = self._conn.read(self._conn.in_waiting).decode('ascii', errors='ignore')
+                        buffer += chunk
+                        
+                        # Process complete lines
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            line = line.strip()
+                            if line.startswith('$IMU'):
+                                self._parse_imu_message(line)
+                    else:
+                        time.sleep(0.001)  # Avoid busy-waiting
                     
             except Exception as e:
                 self._error_count += 1
@@ -207,11 +256,17 @@ class IMUFusion:
     @property
     def stats(self) -> dict:
         """Get statistics about IMU communication."""
+        connected = False
+        if self._conn is not None:
+            if self.config.use_socket:
+                connected = True  # Socket is connected if _conn exists
+            elif hasattr(self._conn, 'is_open'):
+                connected = self._conn.is_open
         return {
             "message_count": self._msg_count,
             "error_count": self._error_count,
             "last_message_age_ms": (time.time() - self._last_msg_time) * 1000 if self._last_msg_time else float('inf'),
-            "connected": self._serial is not None and self._serial.is_open
+            "connected": connected
         }
 
 

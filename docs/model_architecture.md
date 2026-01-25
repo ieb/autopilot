@@ -16,9 +16,9 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 | Property | Value |
 |----------|-------|
 | Name | `autopilot_lstm` |
-| Total Parameters | 47,969 (187.38 KB) |
-| Trainable Parameters | 47,809 (186.75 KB) |
-| Non-trainable Parameters | 160 (640 bytes) |
+| Total Parameters | 66,209 (258.63 KB) |
+| Trainable Parameters | 65,953 (257.63 KB) |
+| Non-trainable Parameters | 256 (1.00 KB) |
 | Input Shape | `(20, 25)` |
 | Output Shape | `(1,)` |
 | Output Range | `[-1.0, 1.0]` (tanh activation) |
@@ -31,11 +31,11 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
 │ sensor_sequence (InputLayer)         │ (None, 20, 25)              │               0 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ feature_mixing (TimeDistributed)     │ (None, 20, 64)              │           1,664 │
+│ feature_mixing (TimeDistributed)     │ (None, 20, 128)             │           3,328 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ bn_feature (TimeDistributed)         │ (None, 20, 64)              │             256 │
+│ bn_feature (TimeDistributed)         │ (None, 20, 128)             │             512 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ lstm_1 (LSTM)                        │ (None, 20, 64)              │          33,024 │
+│ lstm_1 (LSTM)                        │ (None, 20, 64)              │          49,408 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
 │ dropout (Dropout)                    │ (None, 20, 64)              │               0 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
@@ -45,11 +45,11 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
 │ dense_out (Dense)                    │ (None, 16)                  │             528 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ bn_dense (BatchNormalization)        │ (None, 16)                  │              64 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
 │ rudder_command (Dense)               │ (None, 1)                   │              17 │
 └──────────────────────────────────────┴─────────────────────────────┴─────────────────┘
 ```
+
+> **Note**: The `bn_dense` layer after `dense_out` was removed in the current model version to improve training stability.
 
 ### Layer Details
 
@@ -60,20 +60,20 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 
 #### 2. Feature Mixing (`feature_mixing`)
 - **Type**: TimeDistributed Dense
-- **Units**: 64
+- **Units**: 128
 - **Activation**: ReLU
-- **Parameters**: 1,664 (25×64 weights + 64 biases)
+- **Parameters**: 3,328 (25×128 weights + 128 biases)
 - **Purpose**: Learn feature interactions at each timestep independently
 
 #### 3. Feature BatchNorm (`bn_feature`)
 - **Type**: TimeDistributed BatchNormalization
-- **Parameters**: 256 (64×4: gamma, beta, moving_mean, moving_var)
+- **Parameters**: 512 (128×4: gamma, beta, moving_mean, moving_var)
 - **Purpose**: Normalize feature representations for stable training
 
 #### 4. First LSTM (`lstm_1`)
 - **Units**: 64
 - **Return Sequences**: True (outputs sequence for stacking)
-- **Parameters**: 33,024
+- **Parameters**: 49,408 (4 × (128 + 64) × 64 + 4 × 64, with 128 inputs from feature_mixing)
 - **Purpose**: Capture temporal dependencies in the input sequence
 
 #### 5. Dropout

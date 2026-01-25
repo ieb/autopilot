@@ -56,6 +56,45 @@ graph LR
 
 ---
 
+## Current Status (January 2026)
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| **Simulation Framework** | ✅ Complete | Yacht dynamics, wind/wave models, scenario generation |
+| **ML Training Pipeline** | ✅ Complete | Imitation learning with MLflow, ONNX export |
+| **Experiment Validation** | ✅ Complete | Passage simulation matches baseline PD controller |
+| **Sign Convention Fix** | ✅ Complete | Aligned feature engineering with NMEA2000 conventions |
+| **Hardware Simulators** | 🔄 In Progress | IMU, Actuator, CAN simulators for full-stack testing |
+| **Physical Hardware** | ⏳ Pending | PCB fabrication, bench testing, sea trials |
+
+### Completed Milestones
+
+1. **Simulation Framework**
+   - Yacht dynamics model with realistic heading/speed response
+   - Wind model with shifts, gusts, and oscillations
+   - Wave model for pitch/roll motion
+   - PD-based HelmController for training data generation
+   - Scenario-based generation with warm-up periods and error recovery
+
+2. **Training Pipeline**
+   - Imitation learning trainer with MLflow experiment tracking
+   - Data loader with mode transition filtering
+   - ONNX export for embedded deployment (311 KB model)
+   - Model achieves 0.82° MAE on validation data
+
+3. **Passage Simulation Experiment**
+   - 62-leg, 112nm simulated passage
+   - Navigator with route following and mode selection
+   - Metrics: XTE, heading error, polar performance, ETA
+   - ML model matches baseline: 212m mean XTE, 0.5° mean heading error
+
+4. **Sign Convention Alignment**
+   - Fixed feature engineering to use `error = target - current`
+   - Documented in `.cursor/rules/nmea2000-conventions.mdc`
+   - See `docs/feature_engineering_sign_convention.md`
+
+---
+
 ## User Review Required
 
 > [!IMPORTANT]

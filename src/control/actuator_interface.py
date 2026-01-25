@@ -26,8 +26,9 @@ Serial Protocol:
 import threading
 import time
 import re
+import socket
 from dataclasses import dataclass
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 from enum import IntEnum
 import logging
 
@@ -89,22 +90,27 @@ class ActuatorConfig:
     
     # Command rate limiting
     min_command_interval_s: float = 0.02  # 50Hz max command rate
+    
+    # Socket mode for simulation
+    use_socket: bool = False  # If True, connect via Unix socket instead of serial
 
 
 class ActuatorInterface:
     """
-    Serial interface to Actuator Controller MCU.
+    Serial or socket interface to Actuator Controller MCU.
     
-    Replaces direct PWM control - sends target angles over serial,
+    Replaces direct PWM control - sends target angles over serial/socket,
     receives status updates including rudder position, clutch state,
     and motor current.
     
     The MCU handles closed-loop position control internally.
+    Supports Unix socket connections for hardware simulation.
     """
     
     def __init__(self, config: Optional[ActuatorConfig] = None):
         self.config = config or ActuatorConfig()
-        self._serial: Optional[serial.Serial] = None
+        self._conn: Optional[Union['serial.Serial', socket.socket]] = None
+        self._conn_file: Optional[object] = None  # File-like wrapper for socket
         self._status = ActuatorStatus()
         self._lock = threading.Lock()
         self._running = False
@@ -121,20 +127,30 @@ class ActuatorInterface:
         self._parse_errors = 0
         
     def start(self) -> bool:
-        """Open serial connection and start status reader thread."""
-        if not HAS_SERIAL:
-            logger.error("pyserial not available")
-            return False
-            
+        """Open serial/socket connection and start status reader thread."""
         try:
-            self._serial = serial.Serial(
-                port=self.config.port,
-                baudrate=self.config.baudrate,
-                timeout=self.config.timeout
-            )
-            
-            # Clear any stale data
-            self._serial.reset_input_buffer()
+            if self.config.use_socket:
+                # Connect via Unix socket
+                self._conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self._conn.settimeout(self.config.timeout)
+                self._conn.connect(self.config.port)
+                self._conn_file = self._conn.makefile('r', encoding='ascii', errors='ignore')
+                logger.info(f"Actuator connected via socket: {self.config.port}")
+            else:
+                # Connect via serial
+                if not HAS_SERIAL:
+                    logger.error("pyserial not available")
+                    return False
+                    
+                self._conn = serial.Serial(
+                    port=self.config.port,
+                    baudrate=self.config.baudrate,
+                    timeout=self.config.timeout
+                )
+                
+                # Clear any stale data
+                self._conn.reset_input_buffer()
+                logger.info(f"Actuator interface started on serial: {self.config.port}")
             
             # Start reader thread
             self._running = True
@@ -144,11 +160,13 @@ class ActuatorInterface:
             # Configure watchdog timeout on MCU
             self._send_raw(f"CFG,TIMEOUT,{self.config.watchdog_timeout_ms}")
             
-            logger.info(f"Actuator interface started on {self.config.port}")
             return True
             
+        except socket.error as e:
+            logger.error(f"Failed to connect to actuator socket: {e}")
+            return False
         except Exception as e:
-            logger.error(f"Failed to open serial port: {e}")
+            logger.error(f"Failed to open actuator connection: {e}")
             return False
             
     def stop(self):
@@ -160,9 +178,19 @@ class ActuatorInterface:
         if self._read_thread:
             self._read_thread.join(timeout=1.0)
             
-        if self._serial:
-            self._serial.close()
-            self._serial = None
+        if self._conn_file:
+            try:
+                self._conn_file.close()
+            except Exception:
+                pass
+            self._conn_file = None
+            
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
             
         logger.info("Actuator interface stopped")
         
@@ -243,14 +271,22 @@ class ActuatorInterface:
         
     def _send_raw(self, payload: str):
         """Send raw command with checksum."""
-        if not self._serial or not self._serial.is_open:
+        if not self._conn:
             return
+            
+        # Check if connection is valid
+        if not self.config.use_socket:
+            if not hasattr(self._conn, 'is_open') or not self._conn.is_open:
+                return
             
         checksum = self._compute_checksum(payload)
         message = f"${payload}*{checksum:02X}\r\n"
         
         try:
-            self._serial.write(message.encode('ascii'))
+            if self.config.use_socket:
+                self._conn.sendall(message.encode('ascii'))
+            else:
+                self._conn.write(message.encode('ascii'))
         except Exception as e:
             logger.warning(f"Failed to send command: {e}")
             
@@ -265,20 +301,34 @@ class ActuatorInterface:
         """Background thread reading status messages."""
         buffer = ""
         
-        while self._running:
+        while self._running and self._conn:
             try:
-                if self._serial and self._serial.in_waiting:
-                    data = self._serial.read(self._serial.in_waiting).decode('ascii', errors='ignore')
-                    buffer += data
-                    
-                    # Process complete messages
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
-                        if line.startswith('$STS,'):
-                            self._parse_status(line)
+                if self.config.use_socket:
+                    # Read from socket using file-like interface
+                    try:
+                        line = self._conn_file.readline()
+                        if line:
+                            line = line.strip()
+                            if line.startswith('$STS,'):
+                                self._parse_status(line)
+                        else:
+                            time.sleep(0.01)
+                    except socket.timeout:
+                        continue
                 else:
-                    time.sleep(0.01)
+                    # Read from serial
+                    if hasattr(self._conn, 'in_waiting') and self._conn.in_waiting:
+                        data = self._conn.read(self._conn.in_waiting).decode('ascii', errors='ignore')
+                        buffer += data
+                        
+                        # Process complete messages
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            line = line.strip()
+                            if line.startswith('$STS,'):
+                                self._parse_status(line)
+                    else:
+                        time.sleep(0.01)
                     
             except Exception as e:
                 logger.warning(f"Read error: {e}")
