@@ -96,6 +96,10 @@ print(f'Final error: {85 - yacht.state.heading:.1f}°')
 
 Expected output: heading converges from 95° to approximately 85° within 5 seconds.
 
+## Related Documentation
+
+- [Feature Engineering Sign Convention Fix](feature_engineering_sign_convention.md) - Related sign convention fix in ML feature engineering code
+
 ## Date Fixed
 
 January 24, 2026

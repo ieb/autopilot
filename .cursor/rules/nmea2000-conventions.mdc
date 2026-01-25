@@ -1,0 +1,43 @@
+---
+description: NMEA2000 sign conventions for yacht autopilot - rudder, heading, wind angles
+alwaysApply: true
+---
+
+# NMEA2000 Sign Conventions
+
+This project follows NMEA2000 sign conventions. **Never change these without understanding the full system impact.**
+
+## Core Conventions
+
+| Signal | Sign | Meaning |
+|--------|------|---------|
+| Rudder angle | Positive | Starboard (right) |
+| Rudder angle | Negative | Port (left) |
+| AWA/TWA | Positive | Wind from starboard |
+| AWA/TWA | Negative | Wind from port |
+| Heading | 0-360° | Clockwise from North |
+
+## Physical Effects
+
+- **Positive rudder** → boat turns starboard → heading increases → AWA decreases
+- **Negative rudder** → boat turns port → heading decreases → AWA increases
+
+## Error Convention (HelmController aligned)
+
+```python
+# CORRECT: target - heading (positive error = target to starboard)
+error = target_heading - current_heading
+command = kp * error  # Positive error → positive rudder
+
+# For wind modes (AWA/TWA):
+error = current_awa - target_awa  # Positive = wind too far aft
+command = kp * error  # Positive error → positive rudder (head up)
+```
+
+## Tests
+
+The `TestNMEA2000Conventions` class in `tests/test_simulation.py` validates these conventions. **These tests must pass and should not be modified to make other tests pass.**
+
+## Reference
+
+See `docs/helm_controller_bug_fix.md` for history of sign convention bugs.

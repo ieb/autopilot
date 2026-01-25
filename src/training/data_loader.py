@@ -785,24 +785,47 @@ class TrainingDataLoader:
         
     def _frame_to_features(self, frame: LoggedFrame, 
                            ref_frame: LoggedFrame) -> np.ndarray:
-        """Convert a logged frame to normalized features."""
+        """Convert a logged frame to normalized features.
+        
+        ARCHITECTURE: Feature[0] is ALWAYS heading error (HelmController convention).
+        error = computed_heading - heading (target - current)
+        Positive error = target to starboard → positive rudder.
+        In wind modes, computed_heading is derived from the wind target.
+        """
         features = np.zeros(self.config.feature_dim)
         
-        # Compute error based on steering mode
-        # Error sign: positive error → positive rudder needed → turn starboard → decrease AWA/TWA, increase heading
-        # For compass: error = heading - target (positive when boat is right of target, needs to turn left)
-        # For AWA: error = awa - target_awa (positive when AWA too high, needs to head up = turn toward wind)
-        # For TWA: error = twa - target_twa (same logic as AWA)
+        # Compute TWA for use in wind modes
+        twa, _ = self._compute_true_wind(frame.awa, frame.aws, frame.stw)
+        
+        # ARCHITECTURE: Compute target heading from mode-specific target
+        # Wind targets are converted to heading targets so feature[0] is always heading error.
+        # This matches passage_simulator._compute_features() and ModeManager.update()
         if frame.mode == "compass":
-            error = self._angle_diff(frame.heading, frame.target_heading)
+            # Direct heading target
+            computed_heading = frame.target_heading
         elif frame.mode == "wind_awa":
-            error = self._angle_diff(frame.awa, frame.target_awa)
+            # Compute heading that would achieve target AWA
+            # If awa > target_awa: need to head up → increase heading → computed > heading
+            awa_delta = frame.awa - frame.target_awa
+            computed_heading = frame.heading + awa_delta
         elif frame.mode in ["wind_twa", "vmg"]:
-            twa, _ = self._compute_true_wind(frame.awa, frame.aws, frame.stw)
-            error = self._angle_diff(twa, frame.target_twa)
+            # Compute heading that would achieve target TWA
+            twa_delta = twa - frame.target_twa
+            computed_heading = frame.heading + twa_delta
         else:
             # Default to compass mode behavior
-            error = self._angle_diff(frame.heading, frame.target_heading)
+            computed_heading = frame.target_heading
+            
+        # Normalize computed_heading to [0, 360)
+        while computed_heading < 0:
+            computed_heading += 360
+        while computed_heading >= 360:
+            computed_heading -= 360
+        
+        # FEAT_ERROR (0): ALWAYS heading error (HelmController convention)
+        # error = computed_heading - heading (target - current)
+        # Positive error = target to starboard → positive rudder
+        error = self._angle_diff(computed_heading, frame.heading)
         features[0] = error / 180.0
         
         # Skip integral for now (would need state tracking)
@@ -840,16 +863,8 @@ class TrainingDataLoader:
         features[14] = frame.rudder_angle / 25.0
         features[15] = 0.0  # Rudder velocity
         
-        # Target angle (mode-specific target normalized)
-        if frame.mode == "compass":
-            target_angle = frame.target_heading
-        elif frame.mode == "wind_awa":
-            target_angle = frame.target_awa
-        elif frame.mode in ["wind_twa", "vmg"]:
-            target_angle = frame.target_twa
-        else:
-            target_angle = frame.target_heading
-        features[16] = target_angle / 180.0
+        # Target angle (16): The computed target heading (always heading-based)
+        features[16] = computed_heading / 180.0
         
         # VMG (computed)
         vmg_up = frame.stw * np.cos(np.radians(abs(twa))) if frame.stw > 0 else 0

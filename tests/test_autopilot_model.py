@@ -180,17 +180,22 @@ class TestMockAutopilotInference:
         assert -1.0 <= output <= 1.0
     
     def test_mock_inference_proportional_response(self):
-        """Mock inference should produce proportional response to heading error."""
+        """Mock inference should produce proportional response to heading error.
+        
+        HelmController convention: error = target - heading
+        Positive error = target to starboard → positive rudder
+        """
         mock = MockAutopilotInference()
         
         # Create input with positive heading error (feature 0)
+        # Positive error means target is to starboard (clockwise from heading)
         input_seq = np.zeros((20, 25), dtype=np.float32)
-        input_seq[-1, 0] = 0.5  # Positive heading error
+        input_seq[-1, 0] = 0.5  # Positive heading error (target to starboard)
         
         output = mock.predict(input_seq)
         
-        # Should respond with negative output (steer to correct)
-        assert output < 0
+        # Should respond with positive output (turn starboard toward target)
+        assert output > 0
     
     def test_mock_inference_zero_error_zero_output(self):
         """Mock inference should produce ~0 output for zero error."""

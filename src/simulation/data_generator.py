@@ -33,6 +33,11 @@ class SimConfig:
     duration_hours: float = 4.0
     sample_rate_hz: float = 10.0
     
+    # Warm-up period: skip initial transient before recording
+    # This prevents training on startup data where errors are large but
+    # rudder is still ramping up due to rate limiting
+    warmup_seconds: float = 90.0  # 60-120 seconds recommended
+    
     # Domain randomization
     enable_randomization: bool = True
     yacht_variation: float = 0.2       # ±20% on yacht parameters
@@ -163,6 +168,34 @@ class SailingDataGenerator:
         # Set initial conditions
         self._set_initial_conditions()
         
+    def _step_simulation(self, dt: float):
+        """
+        Execute one simulation step without recording data.
+        
+        Used during warm-up period to let the system reach steady state.
+        """
+        # Step wind model
+        wind_state = self.wind.step(dt)
+        self.yacht.set_wind(wind_state.twd, wind_state.tws)
+        
+        # Step wave model
+        self.waves.step(dt, tws=wind_state.tws, heading=self.yacht.state.heading)
+        
+        # Compute TWA for helm controller
+        twa = self._compute_twa()
+        
+        # Compute rudder command (normal helm control, no maneuvers during warmup)
+        rudder_command = self.helm.compute_rudder(
+            heading=self.yacht.state.heading,
+            awa=self.yacht.state.awa,
+            twa=twa,
+            heading_rate=self.yacht.state.heading_rate,
+            dt=dt,
+        )
+        
+        # Step yacht dynamics
+        self.yacht.step(rudder_command, dt)
+        
     def _set_initial_conditions(self):
         """Set initial yacht and wind conditions."""
         if self.scenario:
@@ -182,6 +215,13 @@ class SailingDataGenerator:
             else:
                 heading = self.scenario.initial_heading
                 self.helm.set_mode(SteeringMode.COMPASS, heading)
+            
+            # Apply initial error for error recovery scenarios
+            # This intentionally starts the boat off-target so the helm
+            # controller demonstrates recovery behavior
+            if self.scenario.initial_error_deg != 0:
+                heading = (heading + self.scenario.initial_error_deg) % 360
+                logger.debug(f"Applied initial error: {self.scenario.initial_error_deg:.0f}°")
         else:
             # Random initial conditions
             twd = random.uniform(0, 360)
@@ -196,11 +236,30 @@ class SailingDataGenerator:
         """
         Generate simulation data.
         
+        Includes a warm-up period where the simulation runs but data is not
+        recorded. This allows the system to reach steady state before training
+        data is captured, avoiding artifacts from:
+        - Rudder rate limiting during initial error correction
+        - Large errors with small rudder commands (bad training signal)
+        
         Yields:
             Dictionary records compatible with CANLogParser JSON format
         """
         dt = 1.0 / self.config.sample_rate_hz
         total_samples = int(self.config.duration_hours * 3600 * self.config.sample_rate_hz)
+        
+        # Determine warmup: skip if scenario says so (e.g., error_recovery)
+        skip_warmup = self.scenario and getattr(self.scenario, 'skip_warmup', False)
+        warmup_samples = 0 if skip_warmup else int(self.config.warmup_seconds * self.config.sample_rate_hz)
+        
+        # Run warm-up period (no data recorded)
+        if warmup_samples > 0:
+            logger.debug(f"Running {self.config.warmup_seconds:.0f}s warm-up period...")
+            for i in range(warmup_samples):
+                self._step_simulation(dt)
+            logger.debug("Warm-up complete, starting data recording")
+        elif skip_warmup:
+            logger.debug("Skipping warm-up for error recovery scenario")
         
         for i in range(total_samples):
             self.elapsed_time = i * dt
@@ -329,6 +388,7 @@ def generate_training_data(
     randomize: bool = True,
     calibrate_from: Optional[str] = None,
     seed: int = 42,
+    warmup_seconds: float = 90.0,
 ) -> List[str]:
     """
     Generate training data files.
@@ -341,6 +401,7 @@ def generate_training_data(
         randomize: Enable domain randomization
         calibrate_from: Path to real logs for calibration
         seed: Base random seed
+        warmup_seconds: Seconds to run simulation before recording (skip transient)
         
     Returns:
         List of generated file paths
@@ -354,9 +415,9 @@ def generate_training_data(
         calibrated_config = calibrate_from_logs(calibrate_from)
         logger.info("Using calibrated parameters from real data")
         
-    # Default scenarios
+    # Default scenarios - includes error_recovery for large error training
     if scenarios is None:
-        scenarios = ["medium_upwind", "downwind_vmg", "mixed_coastal", "light_air_reaching"]
+        scenarios = ["medium_upwind", "downwind_vmg", "mixed_coastal", "light_air_reaching", "error_recovery"]
         
     generated_files = []
     
@@ -400,6 +461,7 @@ def generate_training_data(
                 config = SimConfig(
                     duration_hours=hours_per_scenario,
                     enable_randomization=randomize,
+                    warmup_seconds=warmup_seconds,
                     seed=run_seed + scenario_idx,
                 )
                 
@@ -540,6 +602,12 @@ def main():
         help="Random seed for reproducibility"
     )
     parser.add_argument(
+        "--warmup",
+        type=float,
+        default=90.0,
+        help="Warm-up period in seconds (skip initial transient, default 90s)"
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Verbose output"
@@ -568,6 +636,7 @@ def main():
         randomize=randomize,
         calibrate_from=args.calibrate_from,
         seed=args.seed,
+        warmup_seconds=args.warmup,
     )
 
 

@@ -47,6 +47,7 @@ class SimulationConfig:
     
     # Controller
     use_baseline: bool = False         # Use helm controller instead of ML model
+    use_mock: bool = False             # Use mock autopilot (simple P control) for testing
     model_path: Optional[str] = None   # Path to trained model
     
     # Options
@@ -122,6 +123,8 @@ class PassageSimulator:
         if self.config.use_baseline:
             self.helm_controller = HelmController.expert()
             logger.info("Using baseline helm controller")
+        elif self.config.use_mock:
+            self._load_mock_autopilot()
         else:
             self._load_autopilot_model()
         
@@ -155,6 +158,12 @@ class PassageSimulator:
             # No model specified - use mock or baseline
             logger.info("No model specified, using baseline controller")
             self.helm_controller = HelmController.expert()
+    
+    def _load_mock_autopilot(self):
+        """Load mock autopilot for hypothesis testing."""
+        from src.ml.autopilot_model import MockAutopilotInference
+        self.autopilot = MockAutopilotInference()
+        logger.info("Using MOCK autopilot (simple P control: rudder = +error * 0.5)")
             
     def run(self) -> Dict[str, Any]:
         """
@@ -409,16 +418,20 @@ class PassageSimulator:
         """
         Compute feature vector for ML model.
         
-        Must match feature_engineering.py structure exactly:
-        - FEAT_HEADING_ERROR = 0: (heading - target) / 180
+        ARCHITECTURE: The model always steers to a computed heading.
+        In wind modes, the target heading is computed from the target wind angle.
+        This matches ModeManager.update() behavior and simplifies the model task.
+        
+        Feature indices:
+        - FEAT_HEADING_ERROR = 0: (heading - computed_heading) / 180 (ALWAYS heading-based)
         - FEAT_HEADING_ERROR_INTEGRAL = 1
         - FEAT_HEADING_RATE = 2
         - FEAT_ROLL = 3
         - FEAT_PITCH = 4
         - FEAT_ROLL_RATE = 5
-        - FEAT_AWA = 6
+        - FEAT_AWA = 6 (context: affects boat dynamics)
         - FEAT_AWA_RATE = 7
-        - FEAT_AWS = 8
+        - FEAT_AWS = 8 (context: affects boat dynamics)
         - FEAT_TWA = 9
         - FEAT_TWS = 10
         - FEAT_STW = 11
@@ -426,7 +439,7 @@ class PassageSimulator:
         - FEAT_COG_ERROR = 13
         - FEAT_RUDDER_POSITION = 14
         - FEAT_RUDDER_VELOCITY = 15
-        - FEAT_TARGET_ANGLE = 16
+        - FEAT_TARGET_ANGLE = 16: The computed target heading (always heading)
         - FEAT_VMG_UP = 17
         - FEAT_VMG_DOWN = 18
         - FEAT_POLAR_TARGET = 19
@@ -448,25 +461,45 @@ class PassageSimulator:
         while twa < -180:
             twa += 360
         
-        # FEAT_ERROR (0): Mode-specific error computation
-        # Error sign: positive error → positive rudder → turn starboard
-        # For compass: error = heading - target (positive when boat is right of target)
-        # For AWA: error = awa - target_awa (positive when AWA too high, needs to head up)
-        # For TWA: error = twa - target_twa (same as AWA)
+        # ARCHITECTURE: Compute target heading from mode-specific target
+        # Wind targets are converted to heading targets so the model always steers to heading.
+        # 
+        # Sign convention (HelmController aligned):
+        # - error = computed_heading - heading (positive = target to starboard)
+        # - Positive error → positive rudder → turn starboard
+        # 
+        # For AWA mode: If AWA > target_awa (wind too far aft, need to head up):
+        # - computed_heading = heading + (awa - target_awa) > heading
+        # - error = computed_heading - heading > 0 (positive)
+        # - Positive rudder → turn starboard → heading increases → AWA decreases ✓
+        
         if nav_state.steering_mode == SteeringMode.COMPASS:
-            error = heading - nav_state.target_heading
-            target_angle = nav_state.target_heading
+            # Direct heading target
+            computed_heading = nav_state.target_heading
         elif nav_state.steering_mode == SteeringMode.WIND_AWA:
-            error = awa - nav_state.target_awa
-            target_angle = nav_state.target_awa
+            # Compute heading that would achieve target AWA
+            # If awa > target_awa: need to head up → increase heading → computed > heading
+            awa_delta = awa - nav_state.target_awa
+            computed_heading = heading + awa_delta
         elif nav_state.steering_mode == SteeringMode.WIND_TWA:
-            error = twa - nav_state.target_twa
-            target_angle = nav_state.target_twa
+            # Compute heading that would achieve target TWA
+            twa_delta = twa - nav_state.target_twa
+            computed_heading = heading + twa_delta
         else:
             # Default to compass mode (for MOTORING)
-            error = heading - nav_state.target_heading
-            target_angle = nav_state.target_heading
+            computed_heading = nav_state.target_heading
+        
+        # Normalize computed_heading to [0, 360)
+        while computed_heading < 0:
+            computed_heading += 360
+        while computed_heading >= 360:
+            computed_heading -= 360
             
+        # FEAT_ERROR (0): ALWAYS heading error (HelmController convention)
+        # error = computed_heading - heading (target - current)
+        # Positive error = target to starboard → positive rudder → turn starboard
+        error = computed_heading - heading
+        
         # Normalize error to [-180, 180]
         while error > 180:
             error -= 360
@@ -518,8 +551,8 @@ class PassageSimulator:
         # FEAT_RUDDER_VELOCITY (15): Skip
         features[15] = 0.0
         
-        # FEAT_TARGET_ANGLE (16): Mode-specific target angle
-        features[16] = np.clip(target_angle / 180.0, -1.0, 1.0)
+        # FEAT_TARGET_ANGLE (16): The computed target heading (always heading-based)
+        features[16] = np.clip(computed_heading / 180.0, -1.0, 1.0)
         
         # FEAT_VMG_UP (17), FEAT_VMG_DOWN (18)
         stw = self.yacht.state.stw

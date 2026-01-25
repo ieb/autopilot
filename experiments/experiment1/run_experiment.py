@@ -93,6 +93,12 @@ Examples:
     )
     
     parser.add_argument(
+        '--mock',
+        action='store_true',
+        help='Use mock autopilot (simple P control) for hypothesis testing'
+    )
+    
+    parser.add_argument(
         '--max-hours',
         type=float,
         default=24.0,
@@ -141,6 +147,7 @@ Examples:
         dt=args.dt,
         max_duration_hours=args.max_hours,
         use_baseline=args.baseline,
+        use_mock=args.mock,
         model_path=args.model,
         verbose=args.verbose,
     )
@@ -151,7 +158,13 @@ Examples:
     logger.info("=" * 60)
     logger.info(f"Route: {args.route}")
     logger.info(f"GRIB data: {args.gribs or 'None (using route predictions)'}")
-    logger.info(f"Controller: {'Baseline helm' if args.baseline else f'ML model ({args.model})'}")
+    if args.baseline:
+        controller_str = "Baseline helm controller"
+    elif args.mock:
+        controller_str = "Mock autopilot (P control)"
+    else:
+        controller_str = f"ML model ({args.model})"
+    logger.info(f"Controller: {controller_str}")
     logger.info(f"Output: {args.output}")
     logger.info(f"Max duration: {args.max_hours} hours")
     logger.info("=" * 60)

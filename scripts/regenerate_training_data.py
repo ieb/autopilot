@@ -90,6 +90,13 @@ Examples:
         help='Disable domain randomization'
     )
     
+    parser.add_argument(
+        '--warmup',
+        type=float,
+        default=90.0,
+        help='Warm-up seconds before recording (skip transient, default: 90)'
+    )
+    
     args = parser.parse_args()
     
     # Verify the helm controller fix is in place
@@ -129,7 +136,9 @@ Examples:
     if args.scenarios:
         logger.info(f"Scenarios: {args.scenarios}")
     else:
-        logger.info("Scenarios: all standard (medium_upwind, downwind_vmg, mixed_coastal, light_air_reaching)")
+        logger.info("Scenarios: all standard (medium_upwind, downwind_vmg, mixed_coastal, light_air_reaching, error_recovery)")
+    
+    logger.info(f"Warm-up period: {args.warmup}s (skip initial transient)")
     
     try:
         files = generate_training_data(
@@ -139,6 +148,7 @@ Examples:
             num_runs=args.runs,
             randomize=not args.no_randomize,
             seed=args.seed,
+            warmup_seconds=args.warmup,
         )
         
         logger.info(f"Generated {len(files)} data files:")

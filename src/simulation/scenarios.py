@@ -31,6 +31,7 @@ class ScenarioType(Enum):
     RACE_UPWIND = "race_upwind"
     RACE_DOWNWIND = "race_downwind"
     DELIVERY = "delivery"
+    ERROR_RECOVERY = "error_recovery"
     CUSTOM = "custom"
 
 
@@ -74,6 +75,13 @@ class Scenario:
     
     # Duration
     duration_hours: float = 1.0
+    
+    # Initial error for error recovery scenarios (degrees)
+    # If non-zero, yacht starts this many degrees off target
+    initial_error_deg: float = 0.0
+    
+    # Skip warmup for this scenario (e.g., error_recovery needs transient)
+    skip_warmup: bool = False
     
     # Metadata for training labels
     operation_mode: str = "sailing"  # sailing, motoring
@@ -122,6 +130,8 @@ def get_scenario(scenario_type: ScenarioType) -> Scenario:
         return _race_downwind()
     elif scenario_type == ScenarioType.DELIVERY:
         return _delivery()
+    elif scenario_type == ScenarioType.ERROR_RECOVERY:
+        return _error_recovery()
     else:
         return _mixed_coastal()
 
@@ -138,6 +148,7 @@ def get_all_scenarios() -> List[Scenario]:
         _race_upwind(),
         _race_downwind(),
         _delivery(),
+        _error_recovery(),
     ]
 
 
@@ -475,6 +486,82 @@ def _delivery() -> Scenario:
         target_angle=0.0,
         enable_maneuvers=False,
         duration_hours=4.0,
+        operation_mode="sailing",
+    )
+
+
+def _error_recovery() -> Scenario:
+    """
+    Error recovery training scenario.
+    
+    This scenario trains the model to recover from large heading errors.
+    The initial conditions intentionally place the boat far from target,
+    simulating disturbances like:
+    - Wave knockdowns
+    - Sudden wind shifts
+    - Crew distractions
+    - Autopilot mode changes
+    
+    The helm controller demonstrates proper recovery: large sustained rudder
+    input until the error is corrected, then smooth settling to target.
+    
+    NOTE: This scenario should NOT use warmup period (set warmup_seconds=0)
+    because we specifically want to capture the error recovery behavior.
+    """
+    wind_config = WindConfig(
+        base_tws_min=12.0,
+        base_tws_max=20.0,
+        shift_rate=0.5,
+        gust_probability=0.03,
+        gust_intensity_min=1.2,
+        gust_intensity_max=1.5,
+    )
+    
+    wave_config = WaveConfig(
+        swell_amplitude_min=3.0,
+        swell_amplitude_max=7.0,
+        chop_enabled=True,
+    )
+    
+    # Expert helm for clean recovery demonstration
+    helm_config = HelmConfig(
+        skill_level=1.0,
+        noise_std=0.15,
+        reaction_delay=0.1,
+        max_rudder_rate=4.0,  # Standard rate limiting
+    )
+    
+    # Randomly choose a steering mode
+    mode = random.choice([
+        SteeringMode.COMPASS,
+        SteeringMode.WIND_AWA,
+        SteeringMode.WIND_TWA,
+    ])
+    
+    # Set target based on mode
+    if mode == SteeringMode.COMPASS:
+        target = random.uniform(0, 360)
+    elif mode == SteeringMode.WIND_AWA:
+        target = random.choice([-1, 1]) * random.uniform(40, 90)
+    else:  # TWA
+        target = random.choice([-1, 1]) * random.uniform(120, 160)
+    
+    # Random initial error between 30-90 degrees (either direction)
+    initial_error = random.choice([-1, 1]) * random.uniform(30, 90)
+    
+    return Scenario(
+        name="error_recovery",
+        description="Error recovery training with large initial disturbances",
+        wind_config=wind_config,
+        wave_config=wave_config,
+        helm_config=helm_config,
+        steering_mode=mode,
+        initial_tws=16.0,
+        target_angle=target,
+        initial_error_deg=initial_error,  # Start 30-90 degrees off target
+        skip_warmup=True,  # Capture the recovery transient
+        enable_maneuvers=False,  # Focus on recovery, not maneuvers
+        duration_hours=0.5,  # Shorter runs, more variety
         operation_mode="sailing",
     )
 

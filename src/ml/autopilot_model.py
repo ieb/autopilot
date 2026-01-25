@@ -574,14 +574,24 @@ class MockAutopilotInference(AutopilotInference):
         """
         Simple proportional response based on heading error.
         
-        This mimics what a basic autopilot would do,
-        useful for testing the control loop.
+        ARCHITECTURE: Feature[0] is ALWAYS heading error (HelmController convention).
+        error = computed_heading - heading (target - current)
+        All steering modes use the same sign convention:
+        - Positive error = target to starboard
+        - Positive rudder turns boat starboard
+        - So: rudder = +error * gain
+        
+        This works for all modes because wind targets are converted to heading
+        targets before computing the error.
         """
         if sequence.ndim == 2:
-            # Get most recent heading error (feature 0)
-            heading_error = sequence[-1, 0]  # Already normalized
+            # Get most recent heading error (feature 0) - already normalized
+            heading_error = sequence[-1, 0]
             
-            # Simple P response
-            return float(np.clip(-heading_error * 0.5, -1.0, 1.0))
+            # Simple P control: positive error → positive rudder
+            # (turn toward target heading, which is to starboard)
+            command = heading_error * 0.5
+            
+            return float(np.clip(command, -1.0, 1.0))
             
         return 0.0
