@@ -45,6 +45,24 @@ class PGN(IntEnum):
     # Autopilot
     RUDDER = 127245
     HEADING_TRACK_CONTROL = 127237
+    
+    # Engine
+    ENGINE_RAPID = 127488
+    ENGINE_DYNAMIC = 127489
+    
+    # Raymarine Seatalk proprietary
+    SEATALK_PILOT_HEADING = 65359
+    SEATALK_PILOT_WIND_ANGLE = 65360
+    SEATALK_PILOT_MODE = 65379
+
+
+class PilotMode(IntEnum):
+    """Raymarine autopilot modes from PGN 65379."""
+    STANDBY = 0x00      # Human helm
+    AUTO = 0x01         # Compass/heading hold
+    WIND = 0x02         # Wind steering
+    TRACK = 0x03        # Route/track following
+    NO_DRIFT = 0x04     # No drift mode
 
 
 @dataclass
@@ -82,6 +100,25 @@ class N2KData:
     # Rudder (from PGN 127245) - for logging/comparison
     rudder_angle_n2k: float = 0.0  # From bus (degrees, +ve starboard)
     rudder_timestamp: float = 0.0
+    
+    # Engine (from PGN 127488/127489)
+    engine_rpm: float = 0.0
+    engine_timestamp: float = 0.0
+    
+    # Raymarine Pilot (from proprietary PGNs)
+    pilot_heading: float = 0.0       # Locked heading (degrees) from PGN 65359
+    pilot_heading_timestamp: float = 0.0
+    pilot_wind_angle: float = 0.0    # Locked wind angle (degrees) from PGN 65360
+    pilot_wind_timestamp: float = 0.0
+    pilot_mode: int = 0              # Pilot mode from PGN 65379 (see PilotMode enum)
+    pilot_submode: int = 0           # Sub mode
+    pilot_mode_timestamp: float = 0.0
+    
+    # Heading/Track control (from PGN 127237)
+    steering_mode: int = 0           # 0=main steerer, 1=non-follow-up, etc.
+    turn_mode: int = 0
+    heading_to_steer: float = 0.0    # Commanded heading
+    track_control_timestamp: float = 0.0
     
     def get_age_ms(self, field_timestamp: float) -> float:
         """Get age of a specific field in milliseconds."""
@@ -173,7 +210,20 @@ class NMEA2000Interface:
                 longitude=self._data.longitude,
                 position_timestamp=self._data.position_timestamp,
                 rudder_angle_n2k=self._data.rudder_angle_n2k,
-                rudder_timestamp=self._data.rudder_timestamp
+                rudder_timestamp=self._data.rudder_timestamp,
+                engine_rpm=self._data.engine_rpm,
+                engine_timestamp=self._data.engine_timestamp,
+                pilot_heading=self._data.pilot_heading,
+                pilot_heading_timestamp=self._data.pilot_heading_timestamp,
+                pilot_wind_angle=self._data.pilot_wind_angle,
+                pilot_wind_timestamp=self._data.pilot_wind_timestamp,
+                pilot_mode=self._data.pilot_mode,
+                pilot_submode=self._data.pilot_submode,
+                pilot_mode_timestamp=self._data.pilot_mode_timestamp,
+                steering_mode=self._data.steering_mode,
+                turn_mode=self._data.turn_mode,
+                heading_to_steer=self._data.heading_to_steer,
+                track_control_timestamp=self._data.track_control_timestamp,
             )
             
     def add_callback(self, pgn: PGN, callback: Callable[[int, bytes], None]):
@@ -309,6 +359,71 @@ class NMEA2000Interface:
                     if position_raw != 0x7FFF:
                         self._data.rudder_angle_n2k = position_raw * 0.0001 * 180 / 3.14159
                         self._data.rudder_timestamp = now
+                        
+            elif pgn == PGN.ENGINE_RAPID:
+                # PGN 127488: Engine Parameters, Rapid Update
+                # Byte 0: Engine instance
+                # Bytes 1-2: Engine speed (0.25 RPM)
+                if len(data) >= 3:
+                    rpm_raw = struct.unpack('<H', data[1:3])[0]
+                    if rpm_raw != 0xFFFF:
+                        self._data.engine_rpm = rpm_raw * 0.25
+                        self._data.engine_timestamp = now
+                        
+            elif pgn == PGN.HEADING_TRACK_CONTROL:
+                # PGN 127237: Heading/Track Control
+                # Byte 0: Rudder limit exceeded | Override | Steering mode (bits)
+                # Byte 1: Turn mode | Heading reference
+                # Bytes 2-3: Commanded rudder direction/angle (0.0001 rad)
+                # Bytes 4-5: Heading-to-steer (0.0001 rad)
+                if len(data) >= 6:
+                    self._data.steering_mode = data[0] & 0x07
+                    self._data.turn_mode = (data[1] >> 4) & 0x0F
+                    heading_raw = struct.unpack('<H', data[4:6])[0]
+                    if heading_raw != 0xFFFF:
+                        self._data.heading_to_steer = heading_raw * 0.0001 * 180 / 3.14159
+                    self._data.track_control_timestamp = now
+                    
+            elif pgn == PGN.SEATALK_PILOT_HEADING:
+                # PGN 65359: Seatalk Pilot Heading (Raymarine proprietary)
+                # Bytes 0-1: Manufacturer code (Raymarine = 0x9F3B / 1851)
+                # Byte 2: Reserved/Industry code
+                # Bytes 3-4: SID
+                # Bytes 5-6: Heading magnetic (0.0001 rad)
+                if len(data) >= 7:
+                    mfr_code = struct.unpack('<H', data[0:2])[0] & 0x07FF
+                    if mfr_code == 1851:  # Raymarine
+                        heading_raw = struct.unpack('<H', data[5:7])[0]
+                        if heading_raw != 0xFFFF:
+                            self._data.pilot_heading = heading_raw * 0.0001 * 180 / 3.14159
+                            self._data.pilot_heading_timestamp = now
+                            
+            elif pgn == PGN.SEATALK_PILOT_WIND_ANGLE:
+                # PGN 65360: Seatalk Pilot Wind Angle (Raymarine proprietary)
+                # Bytes 0-1: Manufacturer code (Raymarine = 0x9F3B / 1851)
+                # Byte 2: Reserved/Industry code
+                # Bytes 3-4: Wind angle (0.0001 rad, signed)
+                if len(data) >= 5:
+                    mfr_code = struct.unpack('<H', data[0:2])[0] & 0x07FF
+                    if mfr_code == 1851:  # Raymarine
+                        angle_raw = struct.unpack('<h', data[3:5])[0]  # Signed
+                        if angle_raw != 0x7FFF:
+                            self._data.pilot_wind_angle = angle_raw * 0.0001 * 180 / 3.14159
+                            self._data.pilot_wind_timestamp = now
+                            
+            elif pgn == PGN.SEATALK_PILOT_MODE:
+                # PGN 65379: Seatalk Pilot Mode (Raymarine proprietary)
+                # Bytes 0-1: Manufacturer code (Raymarine = 0x9F3B / 1851)
+                # Byte 2: Reserved/Industry code
+                # Byte 3: Pilot mode (0=standby, 1=auto, 2=wind, 3=track, 4=noDrift)
+                # Byte 4: Sub mode
+                # Byte 5: Pilot mode data
+                if len(data) >= 5:
+                    mfr_code = struct.unpack('<H', data[0:2])[0] & 0x07FF
+                    if mfr_code == 1851:  # Raymarine
+                        self._data.pilot_mode = data[3]
+                        self._data.pilot_submode = data[4] if len(data) > 4 else 0
+                        self._data.pilot_mode_timestamp = now
                         
     @property
     def stats(self) -> dict:
