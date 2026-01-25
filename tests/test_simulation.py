@@ -258,6 +258,143 @@ class TestHelmController:
         assert expert.config.noise_std < novice.config.noise_std
 
 
+class TestHelmControllerBugFixes:
+    """
+    Tests for helm controller bug fixes.
+    
+    These tests verify the fixes for:
+    1. Error sign inversion (heading - target vs target - heading)
+    2. Derivative sign for compass mode (-heading_rate vs +heading_rate)
+    
+    See docs/helm_controller_bug_fix.md for details.
+    """
+    
+    def test_compass_mode_error_sign(self):
+        """Test error sign: positive error when target is to port."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.COMPASS, target=85.0)
+        
+        # Heading > target means boat is pointing RIGHT of target
+        # Target is to the LEFT (port), so we need to turn LEFT
+        # Turning LEFT requires NEGATIVE rudder
+        rudder = helm.compute_rudder(
+            heading=95.0,  # 10° right of target
+            awa=90.0,
+            twa=90.0,
+            heading_rate=0.0,
+            dt=0.1
+        )
+        
+        # Rudder should be negative to turn left toward target
+        assert rudder < 0, f"Expected negative rudder, got {rudder}"
+    
+    def test_compass_mode_negative_error(self):
+        """Test negative error when target is to starboard."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.COMPASS, target=95.0)
+        
+        # Heading < target means boat is pointing LEFT of target
+        # Target is to the RIGHT (starboard), so we need to turn RIGHT
+        # Turning RIGHT requires POSITIVE rudder
+        rudder = helm.compute_rudder(
+            heading=85.0,  # 10° left of target
+            awa=90.0,
+            twa=90.0,
+            heading_rate=0.0,
+            dt=0.1
+        )
+        
+        # Rudder should be positive to turn right toward target
+        assert rudder > 0, f"Expected positive rudder, got {rudder}"
+    
+    def test_compass_derivative_damping(self):
+        """Test derivative term damps oscillation."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0, compass_kd=1.0))
+        helm.set_mode(SteeringMode.COMPASS, target=85.0)
+        
+        # On target but rotating left (negative heading rate)
+        # Should apply positive rudder to slow the rotation
+        rudder = helm.compute_rudder(
+            heading=85.0,  # On target
+            awa=90.0,
+            twa=90.0,
+            heading_rate=-10.0,  # Rotating left at 10°/s
+            dt=0.1
+        )
+        
+        # With heading_rate negative and derivative = -heading_rate,
+        # the derivative term should be positive, producing positive rudder
+        assert rudder > 0, f"Expected positive rudder to damp left rotation, got {rudder}"
+    
+    def test_compass_derivative_positive_rate(self):
+        """Test derivative opposes positive rotation."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0, compass_kd=1.0))
+        helm.set_mode(SteeringMode.COMPASS, target=85.0)
+        
+        # On target but rotating right (positive heading rate)
+        # Should apply negative rudder to slow the rotation
+        rudder = helm.compute_rudder(
+            heading=85.0,  # On target
+            awa=90.0,
+            twa=90.0,
+            heading_rate=10.0,  # Rotating right at 10°/s
+            dt=0.1
+        )
+        
+        # derivative = -heading_rate = -10, so kd * derivative is negative
+        assert rudder < 0, f"Expected negative rudder to damp right rotation, got {rudder}"
+    
+    def test_closed_loop_stability(self):
+        """Test closed-loop system is stable and converges."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0, max_rudder_rate=10.0))
+        helm.set_mode(SteeringMode.COMPASS, target=85.0)
+        
+        yacht = YachtDynamics()
+        yacht.state.heading = 95.0  # 10° off target
+        yacht.state.stw = 6.0
+        
+        # Simulate for 5 seconds
+        for _ in range(50):
+            cmd = helm.compute_rudder(
+                heading=yacht.state.heading,
+                awa=90.0,
+                twa=90.0,
+                heading_rate=yacht.state.heading_rate,
+                dt=0.1
+            )
+            yacht.step(cmd, 0.1)
+        
+        # Should converge to within 5° of target
+        error = abs(85.0 - yacht.state.heading)
+        assert error < 5.0, f"Did not converge: final error = {error}°"
+    
+    def test_no_runaway_spinning(self):
+        """Test system doesn't enter runaway spinning."""
+        helm = HelmController(HelmConfig(reaction_delay=0.0))
+        helm.set_mode(SteeringMode.COMPASS, target=85.0)
+        
+        yacht = YachtDynamics()
+        yacht.state.heading = 95.0
+        yacht.state.stw = 6.0
+        
+        # Simulate for 10 seconds
+        max_heading_rate = 0.0
+        for _ in range(100):
+            cmd = helm.compute_rudder(
+                heading=yacht.state.heading,
+                awa=90.0,
+                twa=90.0,
+                heading_rate=yacht.state.heading_rate,
+                dt=0.1
+            )
+            yacht.step(cmd, 0.1)
+            max_heading_rate = max(max_heading_rate, abs(yacht.state.heading_rate))
+        
+        # Heading rate should never exceed 20°/s in normal operation
+        # (runaway spinning would produce 50+°/s)
+        assert max_heading_rate < 20.0, f"Runaway detected: max rate = {max_heading_rate}°/s"
+
+
 class TestManeuvers:
     """Tests for sailing maneuvers."""
     

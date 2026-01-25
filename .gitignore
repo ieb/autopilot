@@ -2,3 +2,9 @@
 __pycache__
 data
 n2klogs
+.DS_Store
+.coverage
+.DS_Store
+*-board-backups
+results
+model

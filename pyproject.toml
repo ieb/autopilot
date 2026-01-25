@@ -48,4 +48,4 @@ packages = ["src", "experiments"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=src --cov-report=term-missing"
+addopts = "-v --cov=src --cov=experiments --cov-report=term-missing"
