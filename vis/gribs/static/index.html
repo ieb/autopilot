@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GRIB Weather Visualization</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="anonymous"/>
+    
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="map"></div>
+    
+    <!-- Controls panel -->
+    <div id="controls">
+        <h3>GRIB Weather Data</h3>
+        
+        <div class="control-group">
+            <label for="time-slider">Forecast Time:</label>
+            <input type="range" id="time-slider" min="0" max="0" value="0">
+            <div id="time-display">--</div>
+        </div>
+        
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-wind" checked>
+                Show Wind
+            </label>
+        </div>
+        
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-waves" checked>
+                Show Waves
+            </label>
+        </div>
+        
+        <div class="control-group">
+            <label for="arrow-density">Arrow Density:</label>
+            <input type="range" id="arrow-density" min="1" max="5" value="2">
+        </div>
+    </div>
+    
+    <!-- Wind legend -->
+    <div id="wind-legend" class="legend">
+        <h4>Wind Speed (kts)</h4>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #3498db;"></span>
+            <span>0-10</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #2ecc71;"></span>
+            <span>10-20</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #f1c40f;"></span>
+            <span>20-30</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #e67e22;"></span>
+            <span>30-40</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #e74c3c;"></span>
+            <span>40+</span>
+        </div>
+    </div>
+    
+    <!-- Wave legend -->
+    <div id="wave-legend" class="legend">
+        <h4>Wave Height (m)</h4>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(52, 152, 219, 0.5);"></span>
+            <span>0-1</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(46, 204, 113, 0.5);"></span>
+            <span>1-2</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(241, 196, 15, 0.5);"></span>
+            <span>2-3</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(230, 126, 34, 0.5);"></span>
+            <span>3-4</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(231, 76, 60, 0.5);"></span>
+            <span>4+</span>
+        </div>
+    </div>
+    
+    <!-- Hover tooltip -->
+    <div id="tooltip" class="hidden">
+        <div class="tooltip-title">Weather Data</div>
+        <div class="tooltip-content">
+            <div class="tooltip-section" id="tooltip-wind">
+                <div class="tooltip-row">
+                    <strong>Wind:</strong>
+                    <span id="tooltip-wind-speed">--</span> kn from
+                    <span id="tooltip-wind-dir">--</span>°
+                </div>
+            </div>
+            <div class="tooltip-section" id="tooltip-waves">
+                <div class="tooltip-row" id="tooltip-wave-total">
+                    <strong>Waves:</strong>
+                    <span id="tooltip-wave-height">--</span> m
+                    <span id="tooltip-wave-period-wrap">T=<span id="tooltip-wave-period">--</span>s</span>
+                    <span id="tooltip-wave-dir-wrap">@ <span id="tooltip-wave-dir">--</span>°</span>
+                </div>
+                <div class="tooltip-row" id="tooltip-wave-wind">
+                    <strong>Wind waves:</strong>
+                    <span id="tooltip-wind-wave-height">--</span> m
+                    <span id="tooltip-wind-wave-period-wrap">T=<span id="tooltip-wind-wave-period">--</span>s</span>
+                    <span id="tooltip-wind-wave-dir-wrap">@ <span id="tooltip-wind-wave-dir">--</span>°</span>
+                </div>
+                <div class="tooltip-row" id="tooltip-wave-swell">
+                    <strong>Swell:</strong>
+                    <span id="tooltip-swell-height">--</span> m
+                    <span id="tooltip-swell-period-wrap">T=<span id="tooltip-swell-period">--</span>s</span>
+                    <span id="tooltip-swell-dir-wrap">@ <span id="tooltip-swell-dir">--</span>°</span>
+                </div>
+                <div class="tooltip-row" id="tooltip-wave-peak">
+                    <strong>Peak period:</strong>
+                    <span id="tooltip-peak-period">--</span> s
+                </div>
+            </div>
+            <div class="tooltip-coords">
+                <span id="tooltip-lat">--</span>, <span id="tooltip-lon">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading indicator -->
+    <div id="loading" class="hidden">
+        <div class="spinner"></div>
+        <span>Loading...</span>
+    </div>
+    
+    <!-- Error display -->
+    <div id="error" class="hidden"></div>
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin="anonymous"></script>
+    
+    <!-- Application JS -->
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -29,6 +29,7 @@ rpi = [
 ]
 viz = [
     "matplotlib>=3.5.0",
+    "flask>=3.0.0",
 ]
 experiment = [
     # GRIB file reading

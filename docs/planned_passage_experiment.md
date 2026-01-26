@@ -72,8 +72,8 @@ Test the trained autopilot model:
 uv run python -m experiments.experiment1.run_experiment \
   --route data/experiment1/route/wr_route_1_20260125_005338.csv \
   --gribs data/experiment1/gribs/ \
-  --model models/autopilot_best.keras \
-  --output results/experiment1/
+  --model models/autopilot_best.onnx \
+  --output results/experiment/
 ```
 
 ### Command Line Options
