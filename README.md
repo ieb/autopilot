@@ -141,6 +141,60 @@ The test suite covers the core modules:
 
 See [planning/unit_test_plan.md](planning/unit_test_plan.md) for detailed test documentation.
 
+## GRIB Weather Visualization
+
+A web-based visualization tool for GRIB weather files, showing wind and wave data overlaid on OpenSeaMap.
+
+### Features
+
+- Wind arrows (color-coded by speed, pointing in direction of flow)
+- Wave height gradient overlay (semi-transparent)
+- Time slider to scrub through forecast data
+- Hover tooltip showing wind speed/direction and wave parameters (height, period, swell)
+
+### Running the Visualization Server
+
+```bash
+# Install visualization dependencies
+uv pip install -e ".[viz,experiment]"
+
+# Start the server (specify your GRIB file directory)
+cd vis/gribs
+python server.py --grib-dir /path/to/grib/files --port 8080
+```
+
+Then open `http://localhost:8080` in your browser.
+
+### Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--grib-dir`, `-g` | Directory containing GRIB files (required) |
+| `--port`, `-p` | Port to run server on (default: 8080) |
+| `--host` | Host to bind to (default: 127.0.0.1) |
+| `--debug` | Enable Flask debug mode |
+
+### Supported GRIB Parameters
+
+The visualization extracts these parameters from GRIB files:
+
+| Parameter | Description |
+|-----------|-------------|
+| u10, v10 | 10m wind components |
+| swh | Significant wave height |
+| mwp, pp1d | Mean/peak wave period |
+| mwd | Mean wave direction |
+| shww, mpww, mdww | Wind wave components |
+| shts, mpts, mdts | Swell components |
+
+### Debug Endpoint
+
+To inspect what parameters are available in your GRIB files:
+
+```
+http://localhost:8080/api/debug/grib
+```
+
 ## Project Structure
 
 ```
@@ -170,7 +224,9 @@ autopilot/
 ├── models/                # Trained models
 ├── data/training/         # Training log files
 ├── planning/              # Design documents
-└── tests/                 # Unit tests
+├── tests/                 # Unit tests
+└── vis/                   # Visualization tools
+    └── gribs/             # GRIB weather visualization server
 ```
 
 ## ML Model
