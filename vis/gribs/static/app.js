@@ -1,7 +1,8 @@
 /**
  * GRIB Weather Visualization
  * 
- * Displays wind arrows and wave height gradient overlay on OpenSeaMap.
+ * Displays animated wind streamlines and wave height gradient overlay on OpenSeaMap.
+ * Wind visualization inspired by windy.com particle animation.
  */
 
 // Global state
@@ -13,21 +14,42 @@ let waveData = null;
 let metadata = null;
 let currentTimeIndex = 0;
 
-// Color scales
-const WIND_COLORS = [
-    { max: 10, color: '#3498db' },  // Blue - light
-    { max: 20, color: '#2ecc71' },  // Green - moderate
-    { max: 30, color: '#f1c40f' },  // Yellow - fresh
-    { max: 40, color: '#e67e22' },  // Orange - strong
-    { max: Infinity, color: '#e74c3c' }  // Red - gale
-];
+// Particle animation state
+let particles = [];
+let animationId = null;
+let lastFrameTime = 0;
+const PARTICLE_MAX_AGE = 100;  // frames
+const PARTICLE_FADE_START = 0.7;  // start fading at 70% of max age
+const SPEED_SCALE = 0.00015;  // scale wind speed to pixel movement
 
-const WAVE_COLORS = [
-    { max: 1, r: 52, g: 152, b: 219 },   // Blue
-    { max: 2, r: 46, g: 204, b: 113 },   // Green
-    { max: 3, r: 241, g: 196, b: 15 },   // Yellow
-    { max: 4, r: 230, g: 126, b: 34 },   // Orange
-    { max: Infinity, r: 231, g: 76, b: 60 }  // Red
+// Particle count based on density setting
+function getParticleCount() {
+    const density = parseInt(document.getElementById('particle-density')?.value || 3);
+    return [500, 1500, 3000, 5000, 8000][density - 1];
+}
+
+// Get particle line width from slider
+function getParticleSize() {
+    return parseFloat(document.getElementById('particle-size')?.value || 1.5);
+}
+
+// Get tail fade factor from slider (higher = longer tail)
+function getTailFade() {
+    return parseFloat(document.getElementById('tail-length')?.value || 0.92);
+}
+
+// Wave color scale - extended to 9m with gradient interpolation
+const WAVE_COLOR_STOPS = [
+    { height: 0, r: 52, g: 152, b: 219 },    // Blue (calm)
+    { height: 1, r: 46, g: 204, b: 170 },    // Teal
+    { height: 2, r: 46, g: 204, b: 113 },    // Green
+    { height: 3, r: 162, g: 212, b: 53 },    // Yellow-green
+    { height: 4, r: 241, g: 196, b: 15 },    // Yellow
+    { height: 5, r: 230, g: 126, b: 34 },    // Orange
+    { height: 6, r: 231, g: 76, b: 60 },     // Red
+    { height: 7, r: 192, g: 57, b: 112 },    // Magenta/pink
+    { height: 8, r: 142, g: 68, b: 173 },    // Purple
+    { height: 9, r: 255, g: 255, b: 255 },   // White (extreme)
 ];
 
 /**
@@ -191,6 +213,11 @@ async function loadData() {
         
         redraw();
         
+        // Start or restart wind animation
+        if (windData) {
+            startWindAnimation();
+        }
+        
     } catch (error) {
         showError(`Failed to load data: ${error.message}`);
     } finally {
@@ -227,9 +254,10 @@ function redraw() {
         const topLeft = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(windCanvas, topLeft);
         
-        if (document.getElementById('show-wind').checked) {
-            drawWind();
-        } else {
+        // Reset particle animation on map move/zoom
+        resetWindAnimation();
+        
+        if (!document.getElementById('show-wind').checked) {
             const ctx = windCanvas.getContext('2d');
             ctx.clearRect(0, 0, windCanvas.width, windCanvas.height);
         }
@@ -281,130 +309,265 @@ function drawWaves() {
 }
 
 /**
- * Get color for wave height
+ * Get color for wave height with gradient interpolation
  */
 function getWaveColor(height) {
-    for (const scale of WAVE_COLORS) {
-        if (height < scale.max) {
-            return { r: scale.r, g: scale.g, b: scale.b };
+    // Clamp height to scale range
+    const clampedHeight = Math.max(0, Math.min(height, 9));
+    
+    // Find the two color stops to interpolate between
+    let lower = WAVE_COLOR_STOPS[0];
+    let upper = WAVE_COLOR_STOPS[WAVE_COLOR_STOPS.length - 1];
+    
+    for (let i = 0; i < WAVE_COLOR_STOPS.length - 1; i++) {
+        if (clampedHeight >= WAVE_COLOR_STOPS[i].height && 
+            clampedHeight <= WAVE_COLOR_STOPS[i + 1].height) {
+            lower = WAVE_COLOR_STOPS[i];
+            upper = WAVE_COLOR_STOPS[i + 1];
+            break;
         }
     }
-    return WAVE_COLORS[WAVE_COLORS.length - 1];
+    
+    // Calculate interpolation factor
+    const range = upper.height - lower.height;
+    const t = range > 0 ? (clampedHeight - lower.height) / range : 0;
+    
+    // Interpolate RGB values
+    return {
+        r: Math.round(lower.r + (upper.r - lower.r) * t),
+        g: Math.round(lower.g + (upper.g - lower.g) * t),
+        b: Math.round(lower.b + (upper.b - lower.b) * t)
+    };
 }
 
 /**
- * Draw wind arrows
+ * Particle class for wind animation
  */
-function drawWind() {
-    if (!windCanvas || !windData || !windData.points) return;
+class WindParticle {
+    constructor(canvas) {
+        this.reset(canvas, true);
+    }
+    
+    reset(canvas, randomAge = false) {
+        // Random position on canvas
+        this.x = Math.random() * canvas.width;
+        this.y = Math.random() * canvas.height;
+        this.prevX = this.x;
+        this.prevY = this.y;
+        // Random age for initial distribution
+        this.age = randomAge ? Math.floor(Math.random() * PARTICLE_MAX_AGE) : 0;
+        this.maxAge = PARTICLE_MAX_AGE + Math.floor(Math.random() * 20 - 10);
+    }
+}
+
+/**
+ * Initialize particles for wind animation
+ */
+function initParticles() {
+    particles = [];
+    if (!windCanvas) return;
+    
+    const count = getParticleCount();
+    for (let i = 0; i < count; i++) {
+        particles.push(new WindParticle(windCanvas));
+    }
+}
+
+/**
+ * Get wind velocity at a pixel position
+ */
+function getWindAtPixel(x, y) {
+    if (!windData || !windData.points || !windData.bounds || !map) return null;
+    
+    // Convert pixel to lat/lng
+    const latlng = map.containerPointToLatLng([x, y]);
+    const lat = latlng.lat;
+    const lon = latlng.lng;
+    
+    // Check if point is within data bounds (with small margin)
+    const bounds = windData.bounds;
+    const margin = (bounds.lat_max - bounds.lat_min) * 0.1;  // 10% margin
+    if (lat < bounds.lat_min - margin || lat > bounds.lat_max + margin ||
+        lon < bounds.lon_min - margin || lon > bounds.lon_max + margin) {
+        return null;
+    }
+    
+    // Find closest wind point
+    let closest = null;
+    let minDist = Infinity;
+    
+    for (const point of windData.points) {
+        const dist = Math.pow(point.lat - lat, 2) + Math.pow(point.lon - lon, 2);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = point;
+        }
+    }
+    
+    if (!closest) return null;
+    
+    // Also check that closest point is reasonably close
+    // (handles sparse data or gaps in coverage)
+    const gridStep = windData.grid_size ? 
+        Math.max(
+            (bounds.lat_max - bounds.lat_min) / windData.grid_size.rows,
+            (bounds.lon_max - bounds.lon_min) / windData.grid_size.cols
+        ) : 1;
+    const maxDist = gridStep * 2;  // Allow up to 2 grid cells distance
+    if (Math.sqrt(minDist) > maxDist) {
+        return null;
+    }
+    
+    // Convert wind speed and direction to velocity components
+    // direction is meteorological (FROM), we want velocity TO
+    const toDir = (closest.direction + 180) % 360;
+    const rad = toDir * Math.PI / 180;
+    const speed = closest.speed;
+    
+    // Scale speed for pixel movement
+    const zoom = map.getZoom();
+    const scale = SPEED_SCALE * Math.pow(2, zoom);
+    
+    // vx = east component, vy = south component (canvas Y is down)
+    const vx = Math.sin(rad) * speed * scale;
+    const vy = Math.cos(rad) * speed * scale;
+    
+    return { vx, vy, speed };
+}
+
+/**
+ * Animate wind particles
+ */
+function animateWind(timestamp) {
+    if (!windCanvas || !document.getElementById('show-wind').checked) {
+        animationId = requestAnimationFrame(animateWind);
+        return;
+    }
     
     const ctx = windCanvas.getContext('2d');
-    ctx.clearRect(0, 0, windCanvas.width, windCanvas.height);
     
-    const bounds = map.getBounds();
-    const zoom = map.getZoom();
+    // Fade previous frame (creates trail effect)
+    // Higher fade value = longer tail
+    const tailFade = getTailFade();
+    ctx.fillStyle = `rgba(255, 255, 255, ${tailFade})`;
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.fillRect(0, 0, windCanvas.width, windCanvas.height);
+    ctx.globalCompositeOperation = 'source-over';
     
-    // Get density setting (1-5, lower = more arrows)
-    const densitySetting = parseInt(document.getElementById('arrow-density').value);
-    const skip = densitySetting;
-    
-    // Calculate step based on grid
-    if (!windData.bounds || !windData.grid_size) return;
-    
-    const latStep = (windData.bounds.lat_max - windData.bounds.lat_min) / (windData.grid_size.rows - 1);
-    const lonStep = (windData.bounds.lon_max - windData.bounds.lon_min) / (windData.grid_size.cols - 1);
-    
-    // Filter points by skip pattern
-    let rowCount = 0;
-    let lastLat = null;
-    let colCount = 0;
-    
-    // Sort points for consistent skip pattern
-    const sortedPoints = [...windData.points].sort((a, b) => {
-        if (a.lat !== b.lat) return b.lat - a.lat;  // Descending lat
-        return a.lon - b.lon;  // Ascending lon
-    });
-    
-    for (const point of sortedPoints) {
-        // Track row changes
-        if (lastLat === null || Math.abs(point.lat - lastLat) > latStep * 0.5) {
-            rowCount++;
-            colCount = 0;
-            lastLat = point.lat;
+    // Update and draw particles
+    for (const particle of particles) {
+        // Get wind at current position
+        const wind = getWindAtPixel(particle.x, particle.y);
+        
+        if (wind && wind.speed > 0.5) {
+            // Store previous position for line drawing
+            particle.prevX = particle.x;
+            particle.prevY = particle.y;
+            
+            // Move particle
+            particle.x += wind.vx;
+            particle.y += wind.vy;
+            particle.age++;
+            
+            // Calculate opacity based on age
+            let opacity = 1;
+            const fadeStart = particle.maxAge * PARTICLE_FADE_START;
+            if (particle.age > fadeStart) {
+                opacity = 1 - (particle.age - fadeStart) / (particle.maxAge - fadeStart);
+            }
+            // Also fade in at start
+            if (particle.age < 10) {
+                opacity = Math.min(opacity, particle.age / 10);
+            }
+            
+            // Get color based on wind speed
+            const color = getWindColorRGB(wind.speed);
+            
+            // Draw particle trail
+            ctx.strokeStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${opacity * 0.8})`;
+            ctx.lineWidth = getParticleSize();
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(particle.prevX, particle.prevY);
+            ctx.lineTo(particle.x, particle.y);
+            ctx.stroke();
+            
+            // Reset if out of bounds or too old
+            if (particle.age > particle.maxAge ||
+                particle.x < 0 || particle.x > windCanvas.width ||
+                particle.y < 0 || particle.y > windCanvas.height) {
+                particle.reset(windCanvas, false);
+            }
+        } else {
+            // No wind data at this position, reset particle
+            particle.reset(windCanvas, false);
         }
-        colCount++;
-        
-        // Skip based on density
-        if (rowCount % skip !== 0 || colCount % skip !== 0) {
-            continue;
-        }
-        
-        // Check if point is in view
-        if (point.lat < bounds.getSouth() || point.lat > bounds.getNorth() ||
-            point.lon < bounds.getWest() || point.lon > bounds.getEast()) {
-            continue;
-        }
-        
-        // Get pixel position
-        const pos = map.latLngToContainerPoint([point.lat, point.lon]);
-        
-        // Draw arrow
-        drawWindArrow(ctx, pos.x, pos.y, point.speed, point.direction, zoom);
+    }
+    
+    animationId = requestAnimationFrame(animateWind);
+}
+
+/**
+ * Start wind animation
+ */
+function startWindAnimation() {
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+    }
+    initParticles();
+    animationId = requestAnimationFrame(animateWind);
+}
+
+/**
+ * Stop wind animation
+ */
+function stopWindAnimation() {
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
     }
 }
 
 /**
- * Draw a single wind arrow
+ * Clear and restart wind animation (e.g., after map move)
  */
-function drawWindArrow(ctx, x, y, speed, direction, zoom) {
-    // Arrow size scales with zoom and speed
-    const baseSize = Math.min(15 + zoom * 2, 40);
-    const length = baseSize * Math.min(speed / 20, 2);
-    const headSize = length * 0.3;
-    
-    // Get color based on speed
-    const color = getWindColor(speed);
-    
-    // Convert meteorological direction (FROM) to direction wind is blowing TO
-    // Canvas rotation: 0° = down (south), 90° = left (west), 180° = up (north)
-    // To point arrow in compass direction D, canvas needs rotation (D + 180)
-    // Wind goes TO = (direction + 180), so canvas rotation = (direction + 180 + 180) = direction
-    const angle = direction * Math.PI / 180;
-    
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(angle);
-    
-    // Draw arrow shaft
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(0, -length / 2);
-    ctx.lineTo(0, length / 2);
-    ctx.stroke();
-    
-    // Draw arrow head
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(0, length / 2);
-    ctx.lineTo(-headSize / 2, length / 2 - headSize);
-    ctx.lineTo(headSize / 2, length / 2 - headSize);
-    ctx.closePath();
-    ctx.fill();
-    
-    ctx.restore();
+function resetWindAnimation() {
+    if (!windCanvas) return;
+    const ctx = windCanvas.getContext('2d');
+    ctx.clearRect(0, 0, windCanvas.width, windCanvas.height);
+    initParticles();
 }
 
 /**
- * Get color for wind speed
+ * Get wind color as RGB object
+ */
+function getWindColorRGB(speed) {
+    // Windy.com style color scale
+    if (speed < 5) {
+        return { r: 98, g: 182, b: 183 };      // Light teal
+    } else if (speed < 10) {
+        return { r: 76, g: 165, b: 130 };      // Teal-green
+    } else if (speed < 15) {
+        return { r: 102, g: 194, b: 64 };      // Green
+    } else if (speed < 20) {
+        return { r: 162, g: 212, b: 53 };      // Yellow-green
+    } else if (speed < 25) {
+        return { r: 243, g: 225, b: 55 };      // Yellow
+    } else if (speed < 30) {
+        return { r: 248, g: 180, b: 52 };      // Orange
+    } else if (speed < 40) {
+        return { r: 240, g: 96, b: 52 };       // Red-orange
+    } else {
+        return { r: 206, g: 48, b: 103 };      // Magenta/red
+    }
+}
+
+/**
+ * Get color for wind speed (string version)
  */
 function getWindColor(speed) {
-    for (const scale of WIND_COLORS) {
-        if (speed < scale.max) {
-            return scale.color;
-        }
-    }
-    return WIND_COLORS[WIND_COLORS.length - 1].color;
+    const rgb = getWindColorRGB(speed);
+    return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
 }
 
 /**
@@ -636,11 +799,28 @@ function setupEventListeners() {
     });
     
     // Show/hide checkboxes
-    document.getElementById('show-wind').addEventListener('change', redraw);
+    document.getElementById('show-wind').addEventListener('change', () => {
+        redraw();
+        if (document.getElementById('show-wind').checked && windData) {
+            startWindAnimation();
+        }
+    });
     document.getElementById('show-waves').addEventListener('change', redraw);
     
-    // Arrow density
-    document.getElementById('arrow-density').addEventListener('input', redraw);
+    // Particle density - reinitialize particles when changed
+    document.getElementById('particle-density').addEventListener('input', () => {
+        initParticles();
+    });
+    
+    // Particle size slider - update displayed value
+    document.getElementById('particle-size').addEventListener('input', (e) => {
+        document.getElementById('particle-size-value').textContent = e.target.value;
+    });
+    
+    // Tail length slider - update displayed value
+    document.getElementById('tail-length').addEventListener('input', (e) => {
+        document.getElementById('tail-length-value').textContent = e.target.value;
+    });
     
     // Map hover for tooltip
     map.on('mousemove', updateTooltip);

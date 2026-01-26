@@ -41,8 +41,18 @@
         </div>
         
         <div class="control-group">
-            <label for="arrow-density">Arrow Density:</label>
-            <input type="range" id="arrow-density" min="1" max="5" value="2">
+            <label for="particle-density">Particle Density:</label>
+            <input type="range" id="particle-density" min="1" max="5" value="3">
+        </div>
+        
+        <div class="control-group">
+            <label for="particle-size">Particle Size: <span id="particle-size-value">1.5</span>px</label>
+            <input type="range" id="particle-size" min="0.5" max="5" step="0.1" value="1.5">
+        </div>
+        
+        <div class="control-group">
+            <label for="tail-length">Tail Length: <span id="tail-length-value">0.92</span></label>
+            <input type="range" id="tail-length" min="0.8" max="0.99" step="0.01" value="0.92">
         </div>
     </div>
     
@@ -50,23 +60,35 @@
     <div id="wind-legend" class="legend">
         <h4>Wind Speed (kts)</h4>
         <div class="legend-item">
-            <span class="legend-color" style="background: #3498db;"></span>
-            <span>0-10</span>
+            <span class="legend-color" style="background: rgb(98, 182, 183);"></span>
+            <span>0-5</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: #2ecc71;"></span>
-            <span>10-20</span>
+            <span class="legend-color" style="background: rgb(76, 165, 130);"></span>
+            <span>5-10</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: #f1c40f;"></span>
-            <span>20-30</span>
+            <span class="legend-color" style="background: rgb(102, 194, 64);"></span>
+            <span>10-15</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: #e67e22;"></span>
+            <span class="legend-color" style="background: rgb(162, 212, 53);"></span>
+            <span>15-20</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgb(243, 225, 55);"></span>
+            <span>20-25</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgb(248, 180, 52);"></span>
+            <span>25-30</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgb(240, 96, 52);"></span>
             <span>30-40</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: #e74c3c;"></span>
+            <span class="legend-color" style="background: rgb(206, 48, 103);"></span>
             <span>40+</span>
         </div>
     </div>
@@ -74,25 +96,34 @@
     <!-- Wave legend -->
     <div id="wave-legend" class="legend">
         <h4>Wave Height (m)</h4>
-        <div class="legend-item">
-            <span class="legend-color" style="background: rgba(52, 152, 219, 0.5);"></span>
-            <span>0-1</span>
+        <div class="legend-gradient">
+            <div class="gradient-bar"></div>
+            <div class="gradient-labels">
+                <span>0</span>
+                <span>3</span>
+                <span>6</span>
+                <span>9</span>
+            </div>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: rgba(46, 204, 113, 0.5);"></span>
-            <span>1-2</span>
+            <span class="legend-color" style="background: rgba(52, 152, 219, 0.6);"></span>
+            <span>0-1 Calm</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: rgba(241, 196, 15, 0.5);"></span>
-            <span>2-3</span>
+            <span class="legend-color" style="background: rgba(46, 204, 113, 0.6);"></span>
+            <span>2-3 Slight</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: rgba(230, 126, 34, 0.5);"></span>
-            <span>3-4</span>
+            <span class="legend-color" style="background: rgba(241, 196, 15, 0.6);"></span>
+            <span>4-5 Moderate</span>
         </div>
         <div class="legend-item">
-            <span class="legend-color" style="background: rgba(231, 76, 60, 0.5);"></span>
-            <span>4+</span>
+            <span class="legend-color" style="background: rgba(231, 76, 60, 0.6);"></span>
+            <span>6-7 Rough</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: rgba(142, 68, 173, 0.6);"></span>
+            <span>8-9 Very Rough</span>
         </div>
     </div>
     
