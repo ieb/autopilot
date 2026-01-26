@@ -345,14 +345,14 @@ class SailingDataGenerator:
         # target_awa/target_twa are the wind angle targets (used in wind modes)
         return {
             "timestamp": self.elapsed_time,
-            "heading": state.heading + random.gauss(0, cfg.heading_noise_std),
+            "heading": (state.heading + random.gauss(0, cfg.heading_noise_std)) % 360,
             "pitch": total_pitch + random.gauss(0, cfg.pitch_noise_std),
             "roll": total_roll + random.gauss(0, cfg.roll_noise_std),
             "yaw_rate": state.heading_rate + random.gauss(0, 0.1),
             "awa": state.awa + random.gauss(0, cfg.awa_noise_std),
             "aws": max(0, state.aws + random.gauss(0, cfg.aws_noise_std)),
             "stw": max(0, state.stw + random.gauss(0, cfg.stw_noise_std)),
-            "cog": state.cog + random.gauss(0, 1.0),
+            "cog": (state.cog + random.gauss(0, 1.0)) % 360,
             "sog": max(0, state.sog + random.gauss(0, cfg.stw_noise_std)),
             "rudder_angle": state.rudder_angle + random.gauss(0, cfg.rudder_noise_std),
             "target_heading": self.helm.state.target_heading,

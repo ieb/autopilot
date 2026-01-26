@@ -9,6 +9,7 @@ This folder contains operational documentation for the ML Yacht Autopilot projec
 | [Data Preparation](data_preparation.md) | Complete guide for preprocessing logs and preparing training data |
 | [Simulated Training Data](simulated_training_data.md) | Guide for generating simulated training data |
 | [Hardware Simulators](hardware_simulators.md) | IMU, Actuator, and CAN simulators for testing |
+| [Heel Physics Model](heel_physics_model.md) | Physics-based heel/roll model with auto-reefing |
 | [Model Architecture](model_architecture.md) | LSTM autopilot model architecture and features |
 | [Model Evaluation Report](model_evaluation_report.md) | Current model performance and experiment results |
 | [Model Export (ONNX)](model_export_onnx.md) | ONNX export for Raspberry Pi deployment |

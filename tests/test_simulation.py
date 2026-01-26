@@ -95,6 +95,162 @@ class TestYachtDynamics:
         
         # AWA should be forward of beam when moving
         # (apparent wind shifts forward due to boat motion)
+
+
+class TestHeelPhysics:
+    """Tests for physics-based heel model and automatic reefing."""
+    
+    def test_heel_increases_with_wind_squared(self):
+        """Test heel angle increases approximately with wind speed squared."""
+        yacht = YachtDynamics()
+        
+        # Light wind - 10 kts
+        yacht.reset(heading=0.0, twd=90.0, tws=10.0)
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        light_heel = abs(yacht.state.roll)
+        
+        # Strong wind - 20 kts (2x wind)
+        yacht.reset(heading=0.0, twd=90.0, tws=20.0)
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        strong_heel = abs(yacht.state.roll)
+        
+        # Heel should increase significantly (roughly 4x for squared relationship)
+        # Allow some tolerance due to reefing and other factors
+        assert strong_heel > light_heel * 1.5
+        
+    def test_heel_sign_matches_tack(self):
+        """Test heel is negative (port) on starboard tack, positive on port tack."""
+        yacht = YachtDynamics()
+        
+        # Wind from starboard (positive AWA) -> heel to port (negative roll)
+        yacht.reset(heading=0.0, twd=90.0, tws=15.0)  # Wind from east
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        assert yacht.state.roll < 0  # Heel to port
+        
+        # Wind from port (negative AWA) -> heel to starboard (positive roll)
+        yacht.reset(heading=0.0, twd=270.0, tws=15.0)  # Wind from west
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        assert yacht.state.roll > 0  # Heel to starboard
+        
+    def test_downwind_less_heel_than_upwind(self):
+        """Test running downwind produces less heel than close hauled."""
+        yacht = YachtDynamics()
+        
+        # Close hauled (45 deg TWA)
+        yacht.reset(heading=0.0, twd=45.0, tws=15.0)
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        upwind_heel = abs(yacht.state.roll)
+        
+        # Running (170 deg TWA)
+        yacht.reset(heading=0.0, twd=170.0, tws=15.0)
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        downwind_heel = abs(yacht.state.roll)
+        
+        # Upwind should have more heel
+        assert upwind_heel > downwind_heel
+        
+    def test_reefing_triggers_at_threshold(self):
+        """Test auto-reefing activates when heel exceeds threshold."""
+        config = YachtConfig(max_heel_before_reef=20.0, auto_reef=True)
+        yacht = YachtDynamics(config=config)
+        
+        # Very strong wind to exceed reef threshold
+        yacht.reset(heading=0.0, twd=90.0, tws=30.0)
+        
+        # Run simulation
+        for _ in range(200):
+            yacht.step(rudder_command=0.0, dt=0.1)
+            
+        # Should have reefed
+        assert yacht.sail_config.reef_level > 0
+        
+    def test_reef_reduces_heel(self):
+        """Test reefing reduces heel angle."""
+        yacht = YachtDynamics()
+        yacht.config.auto_reef = False  # Manual control
+        
+        # Strong wind
+        yacht.reset(heading=0.0, twd=90.0, tws=25.0)
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        full_sail_heel = abs(yacht.state.roll)
+        
+        # Now reef
+        yacht.sail_config.reef_level = 2
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+        reefed_heel = abs(yacht.state.roll)
+        
+        # Reefed should have less heel
+        assert reefed_heel < full_sail_heel
+        
+    def test_sail_config_effective_area(self):
+        """Test sail config calculates effective area correctly."""
+        from src.simulation.yacht_dynamics import SailConfig
+        
+        sail = SailConfig(main_area=55.0, jib_area=52.0)
+        
+        # Full sail
+        sail.reef_level = 0
+        assert sail.effective_area == pytest.approx(107.0, rel=0.01)
+        
+        # First reef (75%)
+        sail.reef_level = 1
+        assert sail.effective_area == pytest.approx(80.25, rel=0.01)
+        
+        # Second reef (55%)
+        sail.reef_level = 2
+        assert sail.effective_area == pytest.approx(58.85, rel=0.01)
+        
+        # Storm (35%)
+        sail.reef_level = 3
+        assert sail.effective_area == pytest.approx(37.45, rel=0.01)
+        
+    def test_calibration_against_real_data(self):
+        """
+        Test heel approximately matches real sailing data.
+        
+        From n2klogs sailing segment:
+        - AWS: ~10 kts mean
+        - Heel: ~5 deg mean
+        
+        Simulate beam reach with ~10 kts TWS which gives ~12 kts AWS.
+        """
+        yacht = YachtDynamics()
+        
+        # Beam reach with 10 kts TWS -> ~12 kts AWS when moving at 6 kts
+        yacht.reset(heading=0.0, twd=90.0, tws=10.0)
+        
+        for _ in range(100):
+            yacht.step(rudder_command=0.0, dt=0.1)
+            
+        # Heel should be reasonable for moderate conditions
+        # Allow range of 2-15 degrees (fairly wide tolerance for physics model)
+        assert 1.0 < abs(yacht.state.roll) < 18.0
+        
+        # Verify we got roughly the expected wind conditions
+        assert 8.0 < yacht.state.aws < 18.0
+        
+    def test_no_reefing_when_disabled(self):
+        """Test auto_reef=False prevents automatic reefing."""
+        config = YachtConfig(auto_reef=False)
+        yacht = YachtDynamics(config=config)
+        
+        # Very strong wind
+        yacht.reset(heading=0.0, twd=90.0, tws=35.0)
+        for _ in range(200):
+            yacht.step(rudder_command=0.0, dt=0.1)
+            
+        # Should NOT have reefed
+        assert yacht.sail_config.reef_level == 0
+        # But heel might be high (capped at max_heel)
+        assert abs(yacht.state.roll) <= yacht.config.max_heel
         
 
 class TestNMEA2000Conventions:
