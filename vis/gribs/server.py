@@ -49,33 +49,25 @@ def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
     Returns:
         Sanitized Path if valid, None if the path is unsafe
     """
+    import os
+    
     # Reject empty names
     if not name or not name.strip():
         return None
     
-    # Reject names with path separators or traversal patterns
-    if '/' in name or '\\' in name or '..' in name:
+    # Get absolute base path
+    base_path = os.path.abspath(str(base_dir))
+    
+    # Normalize the full path to resolve any .. or . components
+    full_path = os.path.normpath(os.path.join(base_path, name))
+    
+    # Verify the normalized path is still under the base directory
+    # Must start with base_path + separator to prevent prefix attacks
+    # (e.g., /base/dir vs /base/dir_other)
+    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
         return None
     
-    # Reject hidden files (starting with .)
-    if name.startswith('.'):
-        return None
-    
-    # Construct the full path
-    full_path = base_dir / name
-    
-    # Resolve to absolute path and verify it's still under base_dir
-    try:
-        resolved_path = full_path.resolve()
-        base_resolved = base_dir.resolve()
-        
-        # Check that the resolved path is under the base directory
-        if not str(resolved_path).startswith(str(base_resolved) + '/') and resolved_path != base_resolved:
-            return None
-            
-        return resolved_path
-    except (ValueError, OSError):
-        return None
+    return Path(full_path)
 
 
 def clear_cfgrib_cache() -> int:
