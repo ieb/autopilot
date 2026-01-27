@@ -38,9 +38,87 @@ routes_dir: Optional[Path] = None
 results_dir: Optional[Path] = None
 
 
+def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
+    """
+    Sanitize a user-provided filename to prevent path traversal attacks.
+    
+    Args:
+        base_dir: The allowed base directory
+        name: User-provided filename or directory name
+        
+    Returns:
+        Sanitized Path if valid, None if the path is unsafe
+    """
+    # Reject empty names
+    if not name or not name.strip():
+        return None
+    
+    # Reject names with path separators or traversal patterns
+    if '/' in name or '\\' in name or '..' in name:
+        return None
+    
+    # Reject hidden files (starting with .)
+    if name.startswith('.'):
+        return None
+    
+    # Construct the full path
+    full_path = base_dir / name
+    
+    # Resolve to absolute path and verify it's still under base_dir
+    try:
+        resolved_path = full_path.resolve()
+        base_resolved = base_dir.resolve()
+        
+        # Check that the resolved path is under the base directory
+        if not str(resolved_path).startswith(str(base_resolved) + '/') and resolved_path != base_resolved:
+            return None
+            
+        return resolved_path
+    except (ValueError, OSError):
+        return None
+
+
+def clear_cfgrib_cache() -> int:
+    """
+    Clear cfgrib index cache files from temp directory.
+    
+    These .idx files can become corrupted and cause EOFError on restart.
+    Clearing them forces cfgrib to regenerate the index.
+    
+    Returns:
+        Number of files deleted
+    """
+    import tempfile
+    import glob
+    
+    temp_dir = tempfile.gettempdir()
+    patterns = [
+        '*.grb.*.idx',
+        '*.grb2.*.idx',
+    ]
+    
+    deleted = 0
+    for pattern in patterns:
+        for idx_file in glob.glob(str(Path(temp_dir) / pattern)):
+            try:
+                Path(idx_file).unlink()
+                deleted += 1
+                logger.debug(f"Deleted cfgrib cache: {idx_file}")
+            except OSError as e:
+                logger.warning(f"Failed to delete {idx_file}: {e}")
+    
+    if deleted > 0:
+        logger.info(f"Cleared {deleted} cfgrib cache file(s)")
+    
+    return deleted
+
+
 def init_grib_reader(grib_dir: str) -> bool:
     """Initialize the GRIB reader with data from the specified directory."""
     global grib_reader
+    
+    # Clear potentially corrupted cfgrib cache files
+    clear_cfgrib_cache()
     
     grib_path = Path(grib_dir)
     if not grib_path.exists():
@@ -561,7 +639,11 @@ def get_route(name: str) -> Dict[str, Any]:
     if routes_dir is None or not routes_dir.exists():
         return jsonify({'error': 'Routes directory not configured'}), 500
     
-    route_path = routes_dir / name
+    # Sanitize the path to prevent directory traversal
+    route_path = sanitize_path(routes_dir, name)
+    if route_path is None:
+        return jsonify({'error': 'Invalid route name'}), 400
+    
     if not route_path.exists():
         return jsonify({'error': f'Route not found: {name}'}), 404
     
@@ -642,7 +724,11 @@ def get_result(name: str) -> Dict[str, Any]:
     if results_dir is None or not results_dir.exists():
         return jsonify({'error': 'Results directory not configured'}), 500
     
-    result_path = results_dir / name
+    # Sanitize the path to prevent directory traversal
+    result_path = sanitize_path(results_dir, name)
+    if result_path is None:
+        return jsonify({'error': 'Invalid result name'}), 400
+    
     ts_file = result_path / 'time_series.csv'
     
     if not ts_file.exists():
