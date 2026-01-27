@@ -642,7 +642,15 @@ def get_result(name: str) -> Dict[str, Any]:
     if results_dir is None or not results_dir.exists():
         return jsonify({'error': 'Results directory not configured'}), 500
     
-    result_path = results_dir / name
+    # Construct result path and validate it stays within results_dir
+    base_path = results_dir.resolve()
+    result_path = (results_dir / name).resolve()
+    try:
+        # Ensure result_path is a subpath of base_path
+        result_path.relative_to(base_path)
+    except ValueError:
+        return jsonify({'error': 'Invalid result name'}), 400
+
     ts_file = result_path / 'time_series.csv'
     
     if not ts_file.exists():
