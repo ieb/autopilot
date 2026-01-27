@@ -14,13 +14,36 @@ let waveData = null;
 let metadata = null;
 let currentTimeIndex = 0;
 
+// Route and result state
+let routeData = null;
+let routeLayer = null;
+let routeMarkers = [];
+let routeBoatMarker = null;
+let resultData = {};  // name -> data
+let resultLayers = {};  // name -> polyline
+let resultBoatMarkers = {};  // name -> marker
+let passageStartTime = null;
+let passageDuration = 0;
+let isPlaying = false;
+let playIntervalId = null;
+
+// Track colors for multiple results
+const RESULT_COLORS = [
+    '#e74c3c',  // Red
+    '#9b59b6',  // Purple
+    '#3498db',  // Blue
+    '#1abc9c',  // Teal
+    '#f39c12',  // Orange
+];
+let resultColorIndex = 0;
+
 // Particle animation state
 let particles = [];
 let animationId = null;
 let lastFrameTime = 0;
 const PARTICLE_MAX_AGE = 100;  // frames
 const PARTICLE_FADE_START = 0.7;  // start fading at 70% of max age
-const SPEED_SCALE = 0.00015;  // scale wind speed to pixel movement
+const SPEED_SCALE = 0.0004;  // scale wind speed to pixel movement (higher = faster particles)
 
 // Particle count based on density setting
 function getParticleCount() {
@@ -36,6 +59,11 @@ function getParticleSize() {
 // Get tail fade factor from slider (higher = longer tail)
 function getTailFade() {
     return parseFloat(document.getElementById('tail-length')?.value || 0.92);
+}
+
+// Get particle speed multiplier from slider
+function getSpeedMultiplier() {
+    return parseFloat(document.getElementById('particle-speed')?.value || 1.0);
 }
 
 // Wave color scale - extended to 9m with gradient interpolation
@@ -425,12 +453,15 @@ function getWindAtPixel(x, y) {
     const speed = closest.speed;
     
     // Scale speed for pixel movement
+    // Particle velocity is proportional to wind speed
     const zoom = map.getZoom();
-    const scale = SPEED_SCALE * Math.pow(2, zoom);
+    const speedMultiplier = getSpeedMultiplier();
+    const scale = SPEED_SCALE * Math.pow(2, zoom) * speedMultiplier;
     
-    // vx = east component, vy = south component (canvas Y is down)
+    // For meteorological angles: sin = east component, cos = north component
+    // Canvas Y increases downward, so north = negative vy
     const vx = Math.sin(rad) * speed * scale;
-    const vy = Math.cos(rad) * speed * scale;
+    const vy = -Math.cos(rad) * speed * scale;
     
     return { vx, vy, speed };
 }
@@ -822,9 +853,772 @@ function setupEventListeners() {
         document.getElementById('tail-length-value').textContent = e.target.value;
     });
     
+    // Particle speed slider - update displayed value
+    document.getElementById('particle-speed').addEventListener('input', (e) => {
+        document.getElementById('particle-speed-value').textContent = e.target.value;
+    });
+    
     // Map hover for tooltip
     map.on('mousemove', updateTooltip);
     map.on('mouseout', hideTooltip);
+    
+    // Route selector
+    document.getElementById('route-select').addEventListener('change', (e) => {
+        loadRoute(e.target.value);
+    });
+    
+    // Show/hide route checkbox
+    document.getElementById('show-route').addEventListener('change', (e) => {
+        if (routeLayer) {
+            if (e.target.checked) {
+                routeLayer.addTo(map);
+                for (const marker of routeMarkers) {
+                    marker.addTo(map);
+                }
+                if (routeBoatMarker) routeBoatMarker.addTo(map);
+            } else {
+                map.removeLayer(routeLayer);
+                for (const marker of routeMarkers) {
+                    map.removeLayer(marker);
+                }
+                if (routeBoatMarker) map.removeLayer(routeBoatMarker);
+            }
+        }
+    });
+    
+    // Passage time slider - syncs GRIB time when moved
+    document.getElementById('passage-slider').addEventListener('input', async (e) => {
+        const seconds = parseFloat(e.target.value);
+        updatePassageTimeDisplay(seconds);
+        updateBoatPositions(seconds);
+        await syncGribTimeToPassage(seconds);
+    });
+    
+    // Play/pause button
+    document.getElementById('play-pause-btn').addEventListener('click', togglePlayPause);
+    
+    // Reset button
+    document.getElementById('reset-btn').addEventListener('click', resetPassage);
+}
+
+// ============================================================================
+// Route and Result Functions
+// ============================================================================
+
+/**
+ * Load list of available routes and populate dropdown
+ */
+async function loadRouteList() {
+    try {
+        const response = await fetch('/api/routes');
+        const data = await response.json();
+        
+        const select = document.getElementById('route-select');
+        select.innerHTML = '<option value="">-- Select Route --</option>';
+        
+        for (const route of data.routes || []) {
+            const option = document.createElement('option');
+            option.value = route;
+            option.textContent = route;
+            select.appendChild(option);
+        }
+    } catch (error) {
+        console.error('Failed to load routes:', error);
+    }
+}
+
+/**
+ * Load list of available results and populate checkboxes
+ */
+async function loadResultList() {
+    try {
+        const response = await fetch('/api/results');
+        const data = await response.json();
+        
+        const container = document.getElementById('result-checkboxes');
+        
+        if (!data.results || data.results.length === 0) {
+            container.innerHTML = '<em>No results available</em>';
+            return;
+        }
+        
+        container.innerHTML = '';
+        
+        for (const result of data.results) {
+            const label = document.createElement('label');
+            label.className = 'result-checkbox';
+            
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.value = result;
+            checkbox.addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    loadResult(result);
+                } else {
+                    removeResult(result);
+                }
+            });
+            
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(' ' + result));
+            container.appendChild(label);
+        }
+    } catch (error) {
+        console.error('Failed to load results:', error);
+    }
+}
+
+/**
+ * Load and display a route
+ */
+async function loadRoute(name) {
+    if (!name) {
+        clearRoute();
+        return;
+    }
+    
+    showLoading(true);
+    try {
+        const response = await fetch(`/api/route/${encodeURIComponent(name)}`);
+        const data = await response.json();
+        
+        if (data.error) {
+            showError(data.error);
+            return;
+        }
+        
+        routeData = data;
+        drawRoute();
+        updatePassageSlider();
+        
+        // Fit map to route bounds
+        if (data.bounds) {
+            const bounds = L.latLngBounds(
+                [data.bounds.lat_min, data.bounds.lon_min],
+                [data.bounds.lat_max, data.bounds.lon_max]
+            );
+            map.fitBounds(bounds.pad(0.1));
+        }
+        
+    } catch (error) {
+        showError(`Failed to load route: ${error.message}`);
+    } finally {
+        showLoading(false);
+    }
+}
+
+/**
+ * Clear route from map
+ */
+function clearRoute() {
+    if (routeLayer) {
+        map.removeLayer(routeLayer);
+        routeLayer = null;
+    }
+    for (const marker of routeMarkers) {
+        map.removeLayer(marker);
+    }
+    routeMarkers = [];
+    if (routeBoatMarker) {
+        map.removeLayer(routeBoatMarker);
+        routeBoatMarker = null;
+    }
+    routeData = null;
+}
+
+/**
+ * Draw route on map
+ */
+function drawRoute() {
+    if (!routeData || !routeData.waypoints) return;
+    
+    // Store data before clearing (clearRoute sets routeData to null)
+    const data = routeData;
+    
+    // Clear existing layers (but not routeData)
+    if (routeLayer) {
+        map.removeLayer(routeLayer);
+        routeLayer = null;
+    }
+    for (const marker of routeMarkers) {
+        map.removeLayer(marker);
+    }
+    routeMarkers = [];
+    if (routeBoatMarker) {
+        map.removeLayer(routeBoatMarker);
+        routeBoatMarker = null;
+    }
+    
+    // Restore data reference
+    routeData = data;
+    
+    // Build polyline coordinates
+    const coords = [];
+    for (const wp of routeData.waypoints) {
+        coords.push([wp.from_lat, wp.from_lon]);
+    }
+    // Add final destination
+    const lastWp = routeData.waypoints[routeData.waypoints.length - 1];
+    coords.push([lastWp.to_lat, lastWp.to_lon]);
+    
+    // Create dashed polyline for planned route
+    routeLayer = L.polyline(coords, {
+        color: '#3498db',
+        weight: 3,
+        dashArray: '10, 10',
+        opacity: 0.8,
+    }).addTo(map);
+    
+    // Add waypoint markers
+    for (let i = 0; i < routeData.waypoints.length; i++) {
+        const wp = routeData.waypoints[i];
+        const marker = L.circleMarker([wp.from_lat, wp.from_lon], {
+            radius: 6,
+            color: '#2980b9',
+            fillColor: '#3498db',
+            fillOpacity: 0.8,
+            weight: 2,
+        }).addTo(map);
+        
+        marker.bindPopup(`
+            <strong>WPT ${i}</strong><br>
+            Time: ${new Date(wp.timestamp).toLocaleString()}<br>
+            COG: ${wp.cog.toFixed(0)}° SOG: ${wp.sog.toFixed(1)} kn<br>
+            TWS: ${wp.tws.toFixed(0)} kn TWD: ${wp.twd.toFixed(0)}°
+        `);
+        
+        routeMarkers.push(marker);
+    }
+    
+    // Add finish marker
+    const finishMarker = L.circleMarker([lastWp.to_lat, lastWp.to_lon], {
+        radius: 8,
+        color: '#27ae60',
+        fillColor: '#2ecc71',
+        fillOpacity: 0.8,
+        weight: 2,
+    }).addTo(map);
+    finishMarker.bindPopup('<strong>FINISH</strong>');
+    routeMarkers.push(finishMarker);
+    
+    // Create boat marker for route with initial data
+    const firstWp = routeData.waypoints[0];
+    const initialRouteData = {
+        heading: firstWp.cog,
+        sog: firstWp.sog,
+        tws: firstWp.tws,
+        twd: firstWp.twd,
+        twa: firstWp.twa,
+    };
+    routeBoatMarker = createBoatMarker([coords[0][0], coords[0][1]], firstWp.cog, '#3498db', true, initialRouteData);
+    routeBoatMarker.addTo(map);
+}
+
+/**
+ * Load and display a result track
+ */
+async function loadResult(name) {
+    showLoading(true);
+    try {
+        const response = await fetch(`/api/result/${encodeURIComponent(name)}`);
+        const data = await response.json();
+        
+        if (data.error) {
+            showError(data.error);
+            return;
+        }
+        
+        // Store data
+        resultData[name] = data;
+        
+        // Assign color
+        const color = RESULT_COLORS[resultColorIndex % RESULT_COLORS.length];
+        resultColorIndex++;
+        data.color = color;
+        
+        // Draw track
+        drawResultTrack(name, data, color);
+        updatePassageSlider();
+        
+    } catch (error) {
+        showError(`Failed to load result: ${error.message}`);
+    } finally {
+        showLoading(false);
+    }
+}
+
+/**
+ * Remove a result track from map
+ */
+function removeResult(name) {
+    if (resultLayers[name]) {
+        map.removeLayer(resultLayers[name]);
+        delete resultLayers[name];
+    }
+    if (resultBoatMarkers[name]) {
+        map.removeLayer(resultBoatMarkers[name]);
+        delete resultBoatMarkers[name];
+    }
+    delete resultData[name];
+    updatePassageSlider();
+}
+
+/**
+ * Draw result track on map
+ */
+function drawResultTrack(name, data, color) {
+    if (!data || !data.points) return;
+    
+    // Build polyline coordinates
+    const coords = data.points.map(p => [p.lat, p.lon]);
+    
+    // Create solid polyline for actual track
+    const layer = L.polyline(coords, {
+        color: color,
+        weight: 2,
+        opacity: 0.9,
+    }).addTo(map);
+    
+    resultLayers[name] = layer;
+    
+    // Create boat marker with initial data
+    const firstPoint = data.points[0];
+    const initialData = {
+        heading: firstPoint.heading,
+        target_heading: firstPoint.target_heading,
+        sog: firstPoint.sog,
+        stw: firstPoint.stw,
+        tws: firstPoint.tws,
+        twd: firstPoint.twd,
+        twa: firstPoint.twa,
+        awa: firstPoint.awa,
+        aws: firstPoint.aws,
+    };
+    const marker = createBoatMarker(
+        [firstPoint.lat, firstPoint.lon],
+        firstPoint.heading,
+        color,
+        false,
+        initialData
+    );
+    marker.addTo(map);
+    resultBoatMarkers[name] = marker;
+}
+
+/**
+ * Create a boat marker (triangle icon)
+ */
+function createBoatMarker(latlng, heading, color, isPlanned, tooltipData = null) {
+    const size = 20;
+    const icon = L.divIcon({
+        className: 'boat-icon',
+        html: `<svg width="${size}" height="${size}" viewBox="0 0 20 20" style="transform: rotate(${heading}deg);">
+            <polygon points="10,2 18,18 10,14 2,18" 
+                     fill="${isPlanned ? 'none' : color}" 
+                     stroke="${color}" 
+                     stroke-width="2"/>
+        </svg>`,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2],
+    });
+    
+    const marker = L.marker(latlng, { icon: icon, zIndexOffset: isPlanned ? 100 : 200 });
+    
+    // Add tooltip with boat data
+    if (tooltipData) {
+        marker.bindTooltip(formatBoatTooltip(tooltipData, isPlanned), {
+            permanent: false,
+            direction: 'top',
+            offset: [0, -10],
+            className: 'boat-tooltip',
+        });
+    }
+    
+    return marker;
+}
+
+/**
+ * Calculate apparent wind from true wind and boat speed
+ * @param {number} tws - True wind speed (knots)
+ * @param {number} twa - True wind angle (degrees, positive = starboard)
+ * @param {number} stw - Speed through water (knots)
+ * @returns {{awa: number, aws: number}} Apparent wind angle and speed
+ */
+function calculateApparentWind(tws, twa, stw) {
+    // Convert TWA to radians
+    const twaRad = twa * Math.PI / 180;
+    
+    // AWS² = TWS² + STW² + 2 * TWS * STW * cos(TWA)
+    const aws = Math.sqrt(tws * tws + stw * stw + 2 * tws * stw * Math.cos(twaRad));
+    
+    // AWA = atan2(TWS * sin(TWA), TWS * cos(TWA) + STW)
+    const awaRad = Math.atan2(tws * Math.sin(twaRad), tws * Math.cos(twaRad) + stw);
+    const awa = awaRad * 180 / Math.PI;
+    
+    return { awa, aws };
+}
+
+/**
+ * Format boat tooltip HTML
+ */
+function formatBoatTooltip(data, isPlanned) {
+    const label = isPlanned ? 'Planned' : 'Actual';
+    let html = `<div class="boat-tooltip-content"><strong>${label}</strong><br>`;
+    
+    if (data.heading !== undefined) {
+        html += `HDG: ${data.heading.toFixed(0)}°`;
+    }
+    if (data.target_heading !== undefined) {
+        html += ` → ${data.target_heading.toFixed(0)}°`;
+    }
+    html += '<br>';
+    
+    if (data.sog !== undefined) {
+        html += `SOG: ${data.sog.toFixed(1)} kn `;
+    }
+    if (data.stw !== undefined) {
+        html += `STW: ${data.stw.toFixed(1)} kn`;
+    }
+    if (data.sog !== undefined || data.stw !== undefined) {
+        html += '<br>';
+    }
+    
+    // Get AWA/AWS - use data if available, otherwise calculate from TWS/TWA/STW
+    let awa = data.awa;
+    let aws = data.aws;
+    
+    if ((awa === undefined || aws === undefined) && 
+        data.tws !== undefined && data.twa !== undefined && data.stw !== undefined) {
+        const apparent = calculateApparentWind(data.tws, data.twa, data.stw);
+        awa = awa !== undefined ? awa : apparent.awa;
+        aws = aws !== undefined ? aws : apparent.aws;
+    }
+    
+    // Show AWA/AWS (apparent wind)
+    if (awa !== undefined) {
+        html += `AWA: ${awa.toFixed(0)}° `;
+    }
+    if (aws !== undefined) {
+        html += `AWS: ${aws.toFixed(0)} kn`;
+    }
+    if (awa !== undefined || aws !== undefined) {
+        html += '<br>';
+    }
+    
+    html += '</div>';
+    return html;
+}
+
+/**
+ * Update boat marker position, heading, and tooltip
+ */
+function updateBoatMarker(marker, latlng, heading, color, isPlanned, tooltipData = null) {
+    marker.setLatLng(latlng);
+    
+    const size = 20;
+    const icon = L.divIcon({
+        className: 'boat-icon',
+        html: `<svg width="${size}" height="${size}" viewBox="0 0 20 20" style="transform: rotate(${heading}deg);">
+            <polygon points="10,2 18,18 10,14 2,18" 
+                     fill="${isPlanned ? 'none' : color}" 
+                     stroke="${color}" 
+                     stroke-width="2"/>
+        </svg>`,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2],
+    });
+    
+    marker.setIcon(icon);
+    
+    // Update tooltip content
+    if (tooltipData) {
+        marker.setTooltipContent(formatBoatTooltip(tooltipData, isPlanned));
+    }
+}
+
+/**
+ * Update passage time slider range based on loaded data
+ */
+function updatePassageSlider() {
+    const slider = document.getElementById('passage-slider');
+    
+    // Calculate max duration from route and results
+    let maxDuration = 0;
+    
+    if (routeData && routeData.start_time && routeData.end_time) {
+        const start = new Date(routeData.start_time);
+        const end = new Date(routeData.end_time);
+        maxDuration = Math.max(maxDuration, (end - start) / 1000);
+        passageStartTime = start;
+    }
+    
+    for (const name in resultData) {
+        const data = resultData[name];
+        if (data.duration_seconds) {
+            maxDuration = Math.max(maxDuration, data.duration_seconds);
+        }
+        if (data.start_time && !passageStartTime) {
+            passageStartTime = new Date(data.start_time);
+        }
+    }
+    
+    passageDuration = maxDuration;
+    slider.max = Math.floor(maxDuration);
+    slider.value = 0;
+    
+    updatePassageTimeDisplay(0);
+}
+
+/**
+ * Sync GRIB time slider to passage time
+ * Called when passage slider moves to show weather at the boat's current time
+ */
+async function syncGribTimeToPassage(seconds) {
+    if (!passageStartTime || !metadata) return;
+    
+    const times = metadata.wind_times.length > 0 ? metadata.wind_times : metadata.wave_times;
+    if (times.length === 0) return;
+    
+    // Calculate absolute time from passage
+    const targetTime = new Date(passageStartTime.getTime() + seconds * 1000);
+    
+    // Find closest GRIB time index
+    let closestIndex = 0;
+    let minDiff = Infinity;
+    
+    for (let i = 0; i < times.length; i++) {
+        const gribTime = new Date(times[i]);
+        const diff = Math.abs(gribTime.getTime() - targetTime.getTime());
+        if (diff < minDiff) {
+            minDiff = diff;
+            closestIndex = i;
+        }
+    }
+    
+    // Only update if index changed
+    if (closestIndex !== currentTimeIndex) {
+        currentTimeIndex = closestIndex;
+        const slider = document.getElementById('time-slider');
+        slider.value = closestIndex;
+        updateTimeDisplay(times[closestIndex]);
+        await loadData();
+    }
+}
+
+/**
+ * Update passage time display
+ */
+function updatePassageTimeDisplay(seconds) {
+    const display = document.getElementById('passage-time-display');
+    
+    if (passageStartTime) {
+        const time = new Date(passageStartTime.getTime() + seconds * 1000);
+        display.textContent = time.toLocaleString();
+    } else {
+        // Display as elapsed time
+        const hours = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        display.textContent = `+${hours}h ${mins}m`;
+    }
+}
+
+/**
+ * Update boat positions based on current passage time
+ */
+function updateBoatPositions(seconds) {
+    // Update route boat
+    if (routeData && routeBoatMarker) {
+        const pos = interpolateRoutePosition(seconds);
+        if (pos) {
+            updateBoatMarker(routeBoatMarker, [pos.lat, pos.lon], pos.cog, '#3498db', true, pos);
+        }
+    }
+    
+    // Update result boats
+    for (const name in resultData) {
+        const data = resultData[name];
+        const marker = resultBoatMarkers[name];
+        if (marker) {
+            const pos = interpolateTrackPosition(data.points, seconds);
+            if (pos) {
+                updateBoatMarker(marker, [pos.lat, pos.lon], pos.heading, data.color, false, pos);
+            }
+        }
+    }
+}
+
+/**
+ * Interpolate position along route at given time
+ */
+function interpolateRoutePosition(seconds) {
+    if (!routeData || !routeData.waypoints || !routeData.start_time) return null;
+    
+    const startTime = new Date(routeData.start_time).getTime();
+    const queryTime = startTime + seconds * 1000;
+    
+    // Find the waypoint for this time
+    for (let i = 0; i < routeData.waypoints.length; i++) {
+        const wp = routeData.waypoints[i];
+        const wpTime = new Date(wp.timestamp).getTime();
+        
+        if (i < routeData.waypoints.length - 1) {
+            const nextWp = routeData.waypoints[i + 1];
+            const nextTime = new Date(nextWp.timestamp).getTime();
+            
+            if (queryTime >= wpTime && queryTime < nextTime) {
+                // Interpolate between waypoints
+                const frac = (queryTime - wpTime) / (nextTime - wpTime);
+                return {
+                    lat: wp.from_lat + (wp.to_lat - wp.from_lat) * frac,
+                    lon: wp.from_lon + (wp.to_lon - wp.from_lon) * frac,
+                    cog: wp.cog,
+                    heading: wp.cog,
+                    sog: wp.sog,
+                    tws: wp.tws,
+                    twd: wp.twd,
+                    twa: wp.twa,
+                };
+            }
+        } else {
+            // Last waypoint
+            if (queryTime >= wpTime) {
+                return {
+                    lat: wp.to_lat,
+                    lon: wp.to_lon,
+                    cog: wp.cog,
+                    heading: wp.cog,
+                    sog: wp.sog,
+                    tws: wp.tws,
+                    twd: wp.twd,
+                    twa: wp.twa,
+                };
+            }
+        }
+    }
+    
+    // Before start
+    const firstWp = routeData.waypoints[0];
+    return {
+        lat: firstWp.from_lat,
+        lon: firstWp.from_lon,
+        cog: firstWp.cog,
+        heading: firstWp.cog,
+        sog: firstWp.sog,
+        tws: firstWp.tws,
+        twd: firstWp.twd,
+        twa: firstWp.twa,
+    };
+}
+
+/**
+ * Interpolate position along track at given time
+ */
+function interpolateTrackPosition(points, seconds) {
+    if (!points || points.length === 0) return null;
+    
+    // Helper to interpolate between two points
+    function lerp(a, b, frac) {
+        return a + (b - a) * frac;
+    }
+    
+    // Helper to interpolate a point's data
+    function interpolatePoint(p1, p2, frac) {
+        return {
+            lat: lerp(p1.lat, p2.lat, frac),
+            lon: lerp(p1.lon, p2.lon, frac),
+            heading: lerp(p1.heading || 0, p2.heading || 0, frac),
+            target_heading: p1.target_heading,
+            sog: lerp(p1.sog || 0, p2.sog || 0, frac),
+            stw: lerp(p1.stw || 0, p2.stw || 0, frac),
+            tws: lerp(p1.tws || 0, p2.tws || 0, frac),
+            twd: lerp(p1.twd || 0, p2.twd || 0, frac),
+            twa: p1.twa,
+            awa: p1.awa,
+            aws: p1.aws,
+        };
+    }
+    
+    // Find points bracketing this timestamp
+    for (let i = 0; i < points.length - 1; i++) {
+        if (seconds >= points[i].timestamp && seconds < points[i + 1].timestamp) {
+            const frac = (seconds - points[i].timestamp) / 
+                        (points[i + 1].timestamp - points[i].timestamp);
+            return interpolatePoint(points[i], points[i + 1], frac);
+        }
+    }
+    
+    // Return last point if past end
+    if (seconds >= points[points.length - 1].timestamp) {
+        const last = points[points.length - 1];
+        return {
+            lat: last.lat, lon: last.lon, heading: last.heading,
+            target_heading: last.target_heading,
+            sog: last.sog, stw: last.stw,
+            tws: last.tws, twd: last.twd, twa: last.twa,
+            awa: last.awa, aws: last.aws,
+        };
+    }
+    
+    // Return first point if before start
+    const first = points[0];
+    return {
+        lat: first.lat, lon: first.lon, heading: first.heading,
+        target_heading: first.target_heading,
+        sog: first.sog, stw: first.stw,
+        tws: first.tws, twd: first.twd, twa: first.twa,
+        awa: first.awa, aws: first.aws,
+    };
+}
+
+/**
+ * Play/pause passage animation
+ */
+function togglePlayPause() {
+    const btn = document.getElementById('play-pause-btn');
+    
+    if (isPlaying) {
+        // Pause
+        isPlaying = false;
+        btn.textContent = 'Play';
+        if (playIntervalId) {
+            clearInterval(playIntervalId);
+            playIntervalId = null;
+        }
+    } else {
+        // Play
+        isPlaying = true;
+        btn.textContent = 'Pause';
+        
+        const slider = document.getElementById('passage-slider');
+        const step = Math.max(60, passageDuration / 500);  // ~500 frames for full passage
+        
+        playIntervalId = setInterval(async () => {
+            let value = parseFloat(slider.value) + step;
+            if (value >= passageDuration) {
+                value = 0;  // Loop
+            }
+            slider.value = value;
+            updatePassageTimeDisplay(value);
+            updateBoatPositions(value);
+            await syncGribTimeToPassage(value);
+        }, 100);  // 10 FPS
+    }
+}
+
+/**
+ * Reset passage to start
+ */
+async function resetPassage() {
+    const slider = document.getElementById('passage-slider');
+    slider.value = 0;
+    updatePassageTimeDisplay(0);
+    updateBoatPositions(0);
+    await syncGribTimeToPassage(0);
+    
+    // Stop playing if playing
+    if (isPlaying) {
+        togglePlayPause();
+    }
 }
 
 /**
@@ -834,6 +1628,8 @@ async function init() {
     initMap();
     setupEventListeners();
     await fetchMetadata();
+    await loadRouteList();
+    await loadResultList();
 }
 
 // Start when DOM is ready

@@ -23,6 +23,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from experiments.experiment1.grib_reader import GribReader
+from experiments.experiment1.route_parser import RouteParser
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ app = Flask(__name__, static_folder='static')
 
 # Global GRIB reader instance
 grib_reader: Optional[GribReader] = None
+
+# Global directories for routes and results
+routes_dir: Optional[Path] = None
+results_dir: Optional[Path] = None
 
 
 def init_grib_reader(grib_dir: str) -> bool:
@@ -524,10 +529,219 @@ def load_all_wave_parameters(query_time: datetime) -> Optional[Dict[str, Any]]:
     }
 
 
+# ============================================================================
+# Route and Result API Endpoints
+# ============================================================================
+
+@app.route('/api/routes')
+def list_routes() -> Dict[str, Any]:
+    """List available route files."""
+    if routes_dir is None or not routes_dir.exists():
+        return jsonify({'routes': [], 'error': 'Routes directory not configured'})
+    
+    route_files = []
+    for pattern in ['*.csv']:
+        for f in routes_dir.glob(pattern):
+            route_files.append(f.name)
+    
+    return jsonify({'routes': sorted(route_files)})
+
+
+@app.route('/api/route/<name>')
+def get_route(name: str) -> Dict[str, Any]:
+    """
+    Get parsed route data.
+    
+    Args:
+        name: Route file name
+        
+    Returns:
+        JSON with waypoints and route metadata
+    """
+    if routes_dir is None or not routes_dir.exists():
+        return jsonify({'error': 'Routes directory not configured'}), 500
+    
+    route_path = routes_dir / name
+    if not route_path.exists():
+        return jsonify({'error': f'Route not found: {name}'}), 404
+    
+    try:
+        parser = RouteParser(str(route_path))
+        waypoints = parser.parse()
+        
+        if not waypoints:
+            return jsonify({'error': 'No waypoints found in route'}), 400
+        
+        # Convert waypoints to JSON-serializable format
+        waypoint_data = []
+        for wp in waypoints:
+            waypoint_data.append({
+                'timestamp': wp.timestamp.isoformat(),
+                'from_lat': wp.from_lat,
+                'from_lon': wp.from_lon,
+                'to_lat': wp.to_lat,
+                'to_lon': wp.to_lon,
+                'cog': wp.cog,
+                'sog': wp.sog,
+                'tws': wp.tws,
+                'twd': wp.twd,
+                'twa': wp.twa,
+                'distance': wp.distance,
+                'distance_to_finish': wp.distance_to_finish,
+            })
+        
+        bounds = parser.get_route_bounds()
+        
+        return jsonify({
+            'name': name,
+            'waypoints': waypoint_data,
+            'start_time': parser.start_time.isoformat() if parser.start_time else None,
+            'end_time': parser.end_time.isoformat() if parser.end_time else None,
+            'total_distance': parser.total_distance,
+            'bounds': {
+                'lat_min': bounds[0],
+                'lat_max': bounds[1],
+                'lon_min': bounds[2],
+                'lon_max': bounds[3],
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to parse route {name}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/results')
+def list_results() -> Dict[str, Any]:
+    """List available result directories."""
+    if results_dir is None or not results_dir.exists():
+        return jsonify({'results': [], 'error': 'Results directory not configured'})
+    
+    result_dirs = []
+    for d in results_dir.iterdir():
+        if d.is_dir():
+            # Check if it has a time_series.csv
+            ts_file = d / 'time_series.csv'
+            if ts_file.exists():
+                result_dirs.append(d.name)
+    
+    return jsonify({'results': sorted(result_dirs)})
+
+
+@app.route('/api/result/<name>')
+def get_result(name: str) -> Dict[str, Any]:
+    """
+    Get experiment result track data.
+    
+    Args:
+        name: Result directory name
+        
+    Returns:
+        JSON with track points
+    """
+    if results_dir is None or not results_dir.exists():
+        return jsonify({'error': 'Results directory not configured'}), 500
+    
+    result_path = results_dir / name
+    ts_file = result_path / 'time_series.csv'
+    
+    if not ts_file.exists():
+        return jsonify({'error': f'Result not found: {name}'}), 404
+    
+    try:
+        import csv
+        
+        points = []
+        start_time = None
+        
+        # Also try to load summary for metadata
+        summary_file = result_path / 'summary.json'
+        summary = None
+        if summary_file.exists():
+            import json
+            with open(summary_file, 'r') as f:
+                summary = json.load(f)
+                if 'start_time' in summary:
+                    start_time = summary['start_time']
+        
+        with open(ts_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    point = {
+                        'timestamp': float(row['timestamp']),
+                        'lat': float(row['latitude']),
+                        'lon': float(row['longitude']),
+                        'heading': float(row.get('heading', 0)),
+                        'sog': float(row.get('sog', 0)),
+                        'stw': float(row.get('stw', 0)),
+                        'tws': float(row.get('tws', 0)),
+                        'twd': float(row.get('twd', 0)),
+                        'steering_mode': row.get('steering_mode', ''),
+                    }
+                    # Add optional fields if present
+                    if 'target_heading' in row and row['target_heading']:
+                        point['target_heading'] = float(row['target_heading'])
+                    if 'twa' in row and row['twa']:
+                        point['twa'] = float(row['twa'])
+                    if 'awa' in row and row['awa']:
+                        point['awa'] = float(row['awa'])
+                    if 'aws' in row and row['aws']:
+                        point['aws'] = float(row['aws'])
+                    if 'heading_error' in row and row['heading_error']:
+                        point['heading_error'] = float(row['heading_error'])
+                    points.append(point)
+                except (ValueError, KeyError) as e:
+                    continue
+        
+        if not points:
+            return jsonify({'error': 'No track points found'}), 400
+        
+        # Calculate bounds
+        lats = [p['lat'] for p in points]
+        lons = [p['lon'] for p in points]
+        
+        # Subsample if too many points (keep every Nth point)
+        max_points = 5000
+        if len(points) > max_points:
+            step = len(points) // max_points
+            sampled = points[::step]
+            # Always include last point
+            if points[-1] not in sampled:
+                sampled.append(points[-1])
+            points = sampled
+        
+        return jsonify({
+            'name': name,
+            'points': points,
+            'start_time': start_time,
+            'duration_seconds': points[-1]['timestamp'] if points else 0,
+            'point_count': len(points),
+            'bounds': {
+                'lat_min': min(lats),
+                'lat_max': max(lats),
+                'lon_min': min(lons),
+                'lon_max': max(lons),
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to load result {name}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 def main():
+    global routes_dir, results_dir
+    
     parser = argparse.ArgumentParser(description='GRIB Visualization Server')
     parser.add_argument('--grib-dir', '-g', required=True,
                         help='Directory containing GRIB files')
+    parser.add_argument('--routes-dir', '-r',
+                        default='data/experiment1/route',
+                        help='Directory containing route CSV files (default: data/experiment1/route)')
+    parser.add_argument('--results-dir',
+                        default='results',
+                        help='Directory containing result folders (default: results)')
     parser.add_argument('--port', '-p', type=int, default=8080,
                         help='Port to run server on (default: 8080)')
     parser.add_argument('--host', default='127.0.0.1',
@@ -540,6 +754,19 @@ def main():
     if not init_grib_reader(args.grib_dir):
         logger.error("Failed to initialize GRIB reader. Exiting.")
         sys.exit(1)
+    
+    # Set routes and results directories
+    routes_dir = Path(args.routes_dir)
+    if routes_dir.exists():
+        logger.info(f"Routes directory: {routes_dir}")
+    else:
+        logger.warning(f"Routes directory not found: {routes_dir}")
+    
+    results_dir = Path(args.results_dir)
+    if results_dir.exists():
+        logger.info(f"Results directory: {results_dir}")
+    else:
+        logger.warning(f"Results directory not found: {results_dir}")
     
     logger.info(f"Starting server at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug)

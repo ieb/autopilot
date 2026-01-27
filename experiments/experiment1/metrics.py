@@ -33,6 +33,8 @@ class TimeSeriesPoint:
     tws: float
     twd: float
     twa: float
+    awa: float                 # Apparent wind angle (degrees)
+    aws: float                 # Apparent wind speed (knots)
     cross_track_error: float   # nm
     polar_performance: float   # ratio (0-1.2+)
     rudder_angle: float
@@ -151,6 +153,7 @@ class MetricsTracker:
                heading: float, target_heading: float,
                stw: float, sog: float,
                tws: float, twd: float,
+               awa: float, aws: float,
                cross_track_error: float,
                polar_performance: float,
                rudder_angle: float,
@@ -168,6 +171,8 @@ class MetricsTracker:
             sog: Speed over ground (knots)
             tws: True wind speed (knots)
             twd: True wind direction (degrees)
+            awa: Apparent wind angle (degrees)
+            aws: Apparent wind speed (knots)
             cross_track_error: Cross-track error (nm)
             polar_performance: Polar performance ratio
             rudder_angle: Current rudder angle (degrees)
@@ -190,6 +195,8 @@ class MetricsTracker:
             tws=tws,
             twd=twd,
             twa=twa,
+            awa=awa,
+            aws=aws,
             cross_track_error=cross_track_error,
             polar_performance=polar_performance,
             rudder_angle=rudder_angle,
@@ -355,7 +362,7 @@ class MetricsTracker:
             # Header
             writer.writerow([
                 'timestamp', 'latitude', 'longitude', 'heading', 'target_heading',
-                'heading_error', 'stw', 'sog', 'tws', 'twd', 'twa',
+                'heading_error', 'stw', 'sog', 'tws', 'twd', 'twa', 'awa', 'aws',
                 'cross_track_error', 'polar_performance', 'rudder_angle',
                 'steering_mode', 'leg_index'
             ])
@@ -376,6 +383,8 @@ class MetricsTracker:
                     f"{p.tws:.1f}",
                     f"{p.twd:.1f}",
                     f"{p.twa:.1f}",
+                    f"{p.awa:.1f}",
+                    f"{p.aws:.1f}",
                     f"{p.cross_track_error:.4f}",
                     f"{p.polar_performance:.3f}",
                     f"{p.rudder_angle:.1f}",

@@ -322,6 +322,8 @@ class PassageSimulator:
                 target_heading=nav_state.target_heading,
                 stw=stw, sog=self.yacht.state.sog,
                 tws=tws, twd=twd,
+                awa=self.yacht.state.awa,
+                aws=self.yacht.state.aws,
                 cross_track_error=nav_state.cross_track_error,
                 polar_performance=polar_perf,
                 rudder_angle=self.yacht.state.rudder_angle,

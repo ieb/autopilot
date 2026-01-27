@@ -54,6 +54,48 @@
             <label for="tail-length">Tail Length: <span id="tail-length-value">0.92</span></label>
             <input type="range" id="tail-length" min="0.8" max="0.99" step="0.01" value="0.92">
         </div>
+        
+        <div class="control-group">
+            <label for="particle-speed">Particle Speed: <span id="particle-speed-value">1.0</span>x</label>
+            <input type="range" id="particle-speed" min="0.2" max="3" step="0.1" value="1.0">
+        </div>
+    </div>
+    
+    <!-- Passage Controls -->
+    <div id="passage-controls">
+        <h3>Passage</h3>
+        
+        <div class="control-group">
+            <label for="route-select">Route:</label>
+            <select id="route-select">
+                <option value="">-- Select Route --</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label>Results:</label>
+            <div id="result-checkboxes">
+                <em>No results available</em>
+            </div>
+        </div>
+        
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="show-route" checked>
+                Show Route
+            </label>
+        </div>
+        
+        <div class="control-group">
+            <label for="passage-slider">Passage Time:</label>
+            <input type="range" id="passage-slider" min="0" max="100" value="0">
+            <div id="passage-time-display">--</div>
+        </div>
+        
+        <div class="control-group">
+            <button id="play-pause-btn" class="btn">Play</button>
+            <button id="reset-btn" class="btn">Reset</button>
+        </div>
     </div>
     
     <!-- Wind legend -->

@@ -156,57 +156,45 @@ See [planning/unit_test_plan.md](planning/unit_test_plan.md) for detailed test d
 
 ## GRIB Weather Visualization
 
-A web-based visualization tool for GRIB weather files, showing wind and wave data overlaid on OpenSeaMap.
+A web-based visualization tool for GRIB weather files with animated wind streamlines, wave overlays, and passage/track display.
+
+See [docs/grib_visualization.md](docs/grib_visualization.md) for complete documentation.
 
 ### Features
 
-- Wind arrows (color-coded by speed, pointing in direction of flow)
-- Wave height gradient overlay (semi-transparent)
-- Time slider to scrub through forecast data
-- Hover tooltip showing wind speed/direction and wave parameters (height, period, swell)
+- **Animated wind streamlines**: Particle-based flow visualization (like windy.com)
+- **Wave height overlay**: Color-coded gradient (0-9m scale)
+- **Time navigation**: Slider to scrub through GRIB forecast times
+- **Passage display**: Overlay planned routes and experiment result tracks
+- **Boat animation**: Synchronized boat icons with heading and sailing data tooltips
+- **Hover tooltips**: Wind, wave, and boat data at cursor position
 
-### Running the Visualization Server
+### Quick Start
 
 ```bash
 # Install visualization dependencies
-uv pip install -e ".[viz,experiment]"
+uv sync --extra viz
 
-# Start the server (specify your GRIB file directory)
-cd vis/gribs
-python server.py --grib-dir /path/to/grib/files --port 8080
+# Start the server
+python vis/gribs/server.py \
+    --grib-dir data/experiment1/grib \
+    --routes-dir data/experiment1/route \
+    --results-dir results \
+    --port 5000
 ```
 
-Then open `http://localhost:8080` in your browser.
+Then open `http://localhost:5000` in your browser.
 
 ### Command Line Options
 
 | Option | Description |
 |--------|-------------|
 | `--grib-dir`, `-g` | Directory containing GRIB files (required) |
-| `--port`, `-p` | Port to run server on (default: 8080) |
+| `--routes-dir` | Directory with route CSV files |
+| `--results-dir` | Directory with experiment result folders |
+| `--port`, `-p` | Port to run server on (default: 5000) |
 | `--host` | Host to bind to (default: 127.0.0.1) |
 | `--debug` | Enable Flask debug mode |
-
-### Supported GRIB Parameters
-
-The visualization extracts these parameters from GRIB files:
-
-| Parameter | Description |
-|-----------|-------------|
-| u10, v10 | 10m wind components |
-| swh | Significant wave height |
-| mwp, pp1d | Mean/peak wave period |
-| mwd | Mean wave direction |
-| shww, mpww, mdww | Wind wave components |
-| shts, mpts, mdts | Swell components |
-
-### Debug Endpoint
-
-To inspect what parameters are available in your GRIB files:
-
-```
-http://localhost:8080/api/debug/grib
-```
 
 ## Project Structure
 
