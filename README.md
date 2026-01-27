@@ -1,8 +1,21 @@
 # ML Yacht Autopilot for Pogo 1250
 
-An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht. The code built here is AI assisted, closely supervised.
+An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht. The code built here is AI assisted, closely supervised. An experiment to find the limits.
 
-## Overview
+# Original AI driven development process
+
+* Started with the [specification.md](specification.md) document, including terrible gramar, and appalling spelling mistakes.
+* Claud generated [implementation_plan.md](planning/implementation_plan.md) which was then executed, with many subplans and iterations.
+
+For planned todo's see the end.
+
+## Findings
+
+* No limits in software
+* AI generated harware is a total failure, not clear if its Claud or me.
+
+
+# Overview
 
 This autopilot uses an LSTM neural network to directly output rudder commands from sensor observations. The model learns yacht dynamics implicitly through imitation learning from logged human helming sessions, then fine-tunes in real-time while in standby mode.
 
