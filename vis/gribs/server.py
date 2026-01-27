@@ -682,7 +682,7 @@ def get_route(name: str) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to parse route {name}: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': "Failed to parse route"}), 500
 
 
 @app.route('/api/results')
@@ -805,7 +805,7 @@ def get_result(name: str) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to load result {name}: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Failed to load result'}), 500
 
 
 def main():
