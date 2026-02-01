@@ -2,7 +2,7 @@
  * Actuator Controller Configuration
  * ==================================
  *
- * Pin definitions and configuration for ATtiny3226 actuator controller.
+ * Pin definitions and configuration for ATtiny3224 actuator controller.
  */
 
 #ifndef CONFIG_H
@@ -15,10 +15,11 @@
 // Select ONE via build flags or uncomment here:
 //   -DCURRENT_SENSE_ADC       Option A: Direct ADC with shunt + op-amp
 //   -DCURRENT_SENSE_INA219    Option B: INA219 I2C module (recommended)
+//   -DCURRENT_SENSE_BTS7960   Option C: BTS7960 IS pins (RC filter on ADC)
 //
-// If neither is defined, default to INA219
-#if !defined(CURRENT_SENSE_ADC) && !defined(CURRENT_SENSE_INA219)
-#define CURRENT_SENSE_INA219
+// If neither is defined, default to BTS7960
+#if !defined(CURRENT_SENSE_ADC) && !defined(CURRENT_SENSE_INA219) && !defined(CURRENT_SENSE_BTS7960)
+#define CURRENT_SENSE_BTS7960
 #endif
 
 // INA219 Configuration (defaults, can be overridden via build flags)
@@ -35,30 +36,35 @@
 #endif
 
 // ============================================================================
-// Pin Definitions (ATtiny3226)
+// Pin Definitions (ATtiny3224)
 // ============================================================================
 
 // Analog inputs
-#define PIN_ADC_RUDDER    PIN_PA1   // Rudder potentiometer
+#define PIN_ADC_RUDDER    PIN_PA2   // Rudder potentiometer
 
 #ifdef CURRENT_SENSE_ADC
 // Option A: Direct ADC sensing
-#define PIN_ADC_CURRENT   PIN_PA2   // Motor current sense (shunt resistor)
-#define PIN_ADC_VOLTAGE   PIN_PA3   // Supply voltage (divider)
+#define PIN_ADC_CURRENT   PIN_PB1   // Motor current sense (shunt resistor)
+#define PIN_ADC_VOLTAGE   PIN_PB0   // Supply voltage (divider)
 #else
-// Option B: I2C for INA219 (PA2/PA3 become I2C)
-#define PIN_I2C_SDA       PIN_PA2   // I2C data
+// Option B: I2C for INA219 (PA2/PA3 become I2C) - NOT RECOMMENDED for 3224 with this layout
+#define PIN_I2C_SDA       PIN_PA2   // I2C data (conflicts with Rudder ADC on 3224 netlist)
 #define PIN_I2C_SCL       PIN_PA3   // I2C clock
 // Note: INA219 also reads bus voltage, so no separate ADC needed
+#elif defined(CURRENT_SENSE_BTS7960)
+// Option C: BTS7960 IS pins
+#define PIN_ADC_CURRENT   PIN_PB1   // Motor current sense (BTS7960 IS)
+#define PIN_ADC_VOLTAGE   PIN_PB0   // Supply voltage (divider)
 #endif
 
 // PWM outputs (TCA0)
-#define PIN_PWM_PORT      PIN_PA4   // Port drive (TCA0 WO4)
-#define PIN_PWM_STBD      PIN_PA5   // Starboard drive (TCA0 WO5)
+#define PIN_PWM_PORT      PIN_PA5   // Port drive (TCA0 WO5)
+#define PIN_PWM_STBD      PIN_PA4   // Starboard drive (TCA0 WO4)
 
 // Digital outputs
-#define PIN_CLUTCH        PIN_PA6   // Electromagnetic clutch (N-FET gate)
-#define PIN_LED           PIN_PA7   // Status LED
+#define PIN_CLUTCH        PIN_PA1   // Electromagnetic clutch (N-FET gate)
+#define PIN_BRIDGE_EN     PIN_PA6   // H-Bridge enable (BEnable)
+#define PIN_LED           PIN_PA3   // Status LED
 
 // Serial (hardware UART)
 #define PIN_TX            PIN_PB2   // Serial TX to Pi RX
@@ -140,9 +146,16 @@
 // V = I * 0.01 * 50 = I * 0.5, so 1A = 0.5V = 102 ADC counts @ 5V ref
 #define ADC_CURRENT_SCALE        0.0098f  // Amps per ADC count
 
-// Voltage sense (assuming 4:1 divider)
-// 12V -> 3V at ADC, 3V = 614 counts @ 5V ref
-#define ADC_VOLTAGE_SCALE        0.0195f  // Volts per ADC count
+// BTS7960 Current Sense Scale
+// I_is = I_load / 8500. With 1k resistor, V_is = I_load / 8.5.
+// 1A -> 0.1176V -> (0.1176 / 5.0) * 1023 = 24 counts.
+// Scale = 1 / 24 = 0.0416 Amps per ADC count
+#define BTS7960_CURRENT_SCALE    0.0416f
+
+// Voltage sense (assuming 10k/2.2k divider -> 1/5.54)
+// 12V -> 2.16V at ADC, 2.16V = 442 counts @ 5V ref
+// Scale = 12 / 442 = 0.0271 Volts per ADC count
+#define ADC_VOLTAGE_SCALE        0.0271f
 
 // ============================================================================
 // EEPROM Layout

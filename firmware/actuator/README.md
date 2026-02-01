@@ -14,12 +14,24 @@ This MCU handles the "Layer 1" hardware protection for the autopilot system:
 
 ## Current Sensing Options
 
-The firmware supports two current sensing methods, selectable at compile time:
+The firmware supports three current sensing methods, selectable at compile time:
 
-### Option A: INA219 I2C Module (Recommended, Default)
+### Option A: BTS7960 IS Pins (Recommended for BTS7960/IBT-2 Modules)
 
 ```bash
-pio run -e attiny3226          # Build with INA219 support
+# Define CURRENT_SENSE_BTS7960 in platformio.ini or pio command
+pio run -e attiny3226_bts7960
+```
+
+- Uses the `L_IS` and `R_IS` (current sense) pins of the BTS7960 H-Bridge.
+- Requires an RC filter (1kΩ resistor to GND + 1uF capacitor) connected to PA2.
+- Provides high-side current sensing integrated into the power module.
+- Scale: $I_{load} \approx I_{IS} \times 8500$.
+
+### Option B: INA219 I2C Module
+
+```bash
+pio run -e attiny3226_ina219
 ```
 
 - Uses INA219 I2C current/voltage monitor
@@ -28,10 +40,10 @@ pio run -e attiny3226          # Build with INA219 support
 - Also provides bus voltage reading
 - Requires external 0.01Ω shunt for 20A range
 
-### Option B: Direct ADC with Shunt + Op-Amp
+### Option C: Direct ADC with Shunt + Op-Amp
 
 ```bash
-pio run -e attiny3226_adc      # Build with ADC support
+pio run -e attiny3226_adc
 ```
 
 - Uses discrete shunt resistor + differential amplifier
@@ -43,7 +55,22 @@ pio run -e attiny3226_adc      # Build with ADC support
 
 ### Pin Allocation (ATtiny3226)
 
-**With INA219 (Option A - Default):**
+**With BTS7960 IS (Option A - Recommended):**
+
+| Pin | Function | Description |
+|-----|----------|-------------|
+| PA0 | UPDI | Programming interface |
+| PA1 | ADC_RUDDER | Rudder potentiometer input |
+| PA2 | ADC_CURRENT | Motor current sense (BTS7960 IS) |
+| PA3 | ADC_VOLTAGE | Supply voltage sense (divider) |
+| PA4 | PWM_PORT | TCA0 WO4 - Port drive to H-Bridge |
+| PA5 | PWM_STBD | TCA0 WO5 - Starboard drive to H-Bridge |
+| PA6 | CLUTCH | N-FET gate for electromagnetic clutch |
+| PA7 | LED | Status indicator |
+| PB2 | TX | Serial to Pi RX |
+| PB3 | RX | Serial from Pi TX |
+
+**With INA219 (Option B):**
 
 | Pin | Function | Description |
 |-----|----------|-------------|
@@ -58,7 +85,7 @@ pio run -e attiny3226_adc      # Build with ADC support
 | PB2 | TX | Serial to Pi RX |
 | PB3 | RX | Serial from Pi TX |
 
-**With Direct ADC (Option B):**
+**With Direct ADC (Option C):**
 
 | Pin | Function | Description |
 |-----|----------|-------------|
@@ -75,14 +102,18 @@ pio run -e attiny3226_adc      # Build with ADC support
 
 ### Current Sensing
 
+Using a 1kΩ resistor with BTS7960 IS pins:
+- 1A motor current $\approx$ 0.117V at ADC
+- 15A motor current $\approx$ 1.76V at ADC
+
 Using a 0.01Ω shunt resistor with 50x gain op-amp:
 - 1A = 0.5V at ADC
 - 15A = 7.5V (clamped to VDD)
 
 ### Voltage Sensing
 
-Using 4:1 voltage divider:
-- 12V system = 3V at ADC
+Using 10k/2.2k voltage divider:
+- 12V system = 2.16V at ADC
 
 ## Serial Protocol
 

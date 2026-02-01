@@ -2,12 +2,13 @@
  * Actuator Controller Firmware
  * ============================
  *
- * ATtiny3226 firmware for closed-loop rudder control.
+ * ATtiny3224 firmware for closed-loop rudder control.
  *
  * Features:
  * - Rudder position sensing via ADC
  * - PWM motor control via H-Bridge
  * - Electromagnetic clutch control with soft-start
+ * - H-Bridge enable linked to clutch state
  * - Current/voltage monitoring (ADC or INA219 I2C)
  * - Serial communication with Raspberry Pi
  * - Watchdog timeout for fail-safe operation
@@ -120,12 +121,14 @@ void setup() {
     pinMode(PIN_PWM_PORT, OUTPUT);
     pinMode(PIN_PWM_STBD, OUTPUT);
     pinMode(PIN_CLUTCH, OUTPUT);
+    pinMode(PIN_BRIDGE_EN, OUTPUT);
     pinMode(PIN_LED, OUTPUT);
     
     // Start with everything off
     analogWrite(PIN_PWM_PORT, 0);
     analogWrite(PIN_PWM_STBD, 0);
     digitalWrite(PIN_CLUTCH, LOW);
+    digitalWrite(PIN_BRIDGE_EN, LOW);
     digitalWrite(PIN_LED, LOW);
     
     // Configure ADC (always needed for rudder position)
@@ -233,6 +236,17 @@ void readSensors() {
         supplyVoltage = 0.0f;
         // Don't set fault continuously, just note it's unavailable
     }
+#elif defined(CURRENT_SENSE_BTS7960)
+    // Read current via BTS7960 IS pins with software averaging
+    uint32_t currentSum = 0;
+    for (int i = 0; i < 8; i++) {
+        currentSum += analogRead(PIN_ADC_CURRENT);
+    }
+    motorCurrent = (currentSum / 8.0f) * calibration.current_scale;
+    
+    // Read voltage via ADC with resistor divider
+    uint16_t adcVoltage = analogRead(PIN_ADC_VOLTAGE);
+    supplyVoltage = adcVoltage * calibration.voltage_scale;
 #else
     // Read current via direct ADC (Option A: shunt + op-amp)
     uint16_t adcCurrent = analogRead(PIN_ADC_CURRENT);
@@ -355,6 +369,7 @@ void updateClutch() {
         if (clutchEngageStart == 0) {
             clutchEngageStart = millis();
             digitalWrite(PIN_CLUTCH, HIGH);
+            digitalWrite(PIN_BRIDGE_EN, HIGH);
         }
         
         // Check if ramp complete
@@ -367,6 +382,7 @@ void updateClutch() {
         clutchEngaged = false;
         clutchEngageStart = 0;
         digitalWrite(PIN_CLUTCH, LOW);
+        digitalWrite(PIN_BRIDGE_EN, LOW);
         
         // Stop motor
         analogWrite(PIN_PWM_PORT, 0);
@@ -374,6 +390,7 @@ void updateClutch() {
     } else if (!clutchRequested) {
         clutchEngageStart = 0;
         digitalWrite(PIN_CLUTCH, LOW);
+        digitalWrite(PIN_BRIDGE_EN, LOW);
     }
 }
 
@@ -479,7 +496,12 @@ void loadCalibration() {
         calibration.adc_center = ADC_RUDDER_CENTER;
         calibration.adc_port_limit = ADC_RUDDER_PORT_LIMIT;
         calibration.adc_stbd_limit = ADC_RUDDER_STBD_LIMIT;
+        
+#if defined(CURRENT_SENSE_BTS7960)
+        calibration.current_scale = BTS7960_CURRENT_SCALE;
+#else
         calibration.current_scale = ADC_CURRENT_SCALE;
+#endif
         calibration.voltage_scale = ADC_VOLTAGE_SCALE;
         calibration.watchdog_timeout = WATCHDOG_TIMEOUT_MS;
         calibration.magic = EEPROM_MAGIC;
