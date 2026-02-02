@@ -109,18 +109,6 @@ class IMUSimulator(HardwareSimulator):
         self._cmd_thread: Optional[threading.Thread] = None
         self._cmd_buffer = ""
     
-    def _on_client_connect(self):
-        """Called when a client connects. Send startup sequence."""
-        # Send version
-        self._send_message(f"VER,{self.imu_config.firmware_version}")
-        time.sleep(0.05)
-        
-        # Send ready
-        self._send_message("RDY")
-        
-        self._sim_state = SimState.CONFIG
-        logger.info("IMU simulator: client connected, sent startup sequence")
-    
     def _send_message(self, payload: str):
         """Send an NMEA-style message with checksum."""
         checksum = self.compute_checksum(payload)
@@ -130,9 +118,15 @@ class IMUSimulator(HardwareSimulator):
     def _step(self):
         """Main simulation step - behavior depends on state."""
         if self._sim_state == SimState.WAITING_FOR_CONNECTION:
-            # Check if we have a client
-            if self._client is not None:
-                self._on_client_connect()
+            # Check if we have a client - send startup sequence
+            if self._client_socket is not None:
+                # Send version
+                self._send_message(f"VER,{self.imu_config.firmware_version}")
+                time.sleep(0.05)
+                # Send ready
+                self._send_message("RDY")
+                self._sim_state = SimState.CONFIG
+                logger.info("IMU simulator: client connected, sent startup sequence")
             return
         
         elif self._sim_state == SimState.CONFIG:
@@ -152,22 +146,10 @@ class IMUSimulator(HardwareSimulator):
     
     def _process_commands(self):
         """Process incoming configuration commands."""
-        # Read available data
-        try:
-            if self._client is not None:
-                self._client.setblocking(False)
-                try:
-                    data = self._client.recv(256)
-                    if data:
-                        self._cmd_buffer += data.decode('ascii', errors='ignore')
-                except BlockingIOError:
-                    pass
-                except Exception:
-                    pass
-                finally:
-                    self._client.setblocking(True)
-        except Exception:
-            pass
+        # Read available data using base class method
+        data = self.recv(256)
+        if data:
+            self._cmd_buffer += data.decode('ascii', errors='ignore')
         
         # Process complete commands
         while '\n' in self._cmd_buffer:
