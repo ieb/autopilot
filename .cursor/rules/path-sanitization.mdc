@@ -1,0 +1,94 @@
+---
+description: Path sanitization for HTTP request handlers to prevent directory traversal attacks
+globs: "**/server.py"
+alwaysApply: false
+---
+
+# Path Sanitization for HTTP Requests
+
+When handling file paths derived from HTTP requests (URL parameters, query strings, form data), **always sanitize** to prevent directory traversal attacks.
+
+## Required Pattern
+
+Use `os.path.normpath` + `os.path.join` + `startswith` check:
+
+```python
+import os
+
+def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
+    """Sanitize user-provided path to prevent directory traversal."""
+    if not name or not name.strip():
+        return None
+    
+    base_path = os.path.abspath(str(base_dir))
+    full_path = os.path.normpath(os.path.join(base_path, name))
+    
+    # Must start with base_path + separator to prevent prefix attacks
+    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
+        return None
+    
+    return Path(full_path)
+```
+
+## Usage in Flask Routes
+
+```python
+# ❌ BAD - Direct path concatenation
+@app.route('/api/file/<name>')
+def get_file(name: str):
+    file_path = base_dir / name  # VULNERABLE!
+    return send_file(file_path)
+
+# ✅ GOOD - Sanitized path
+@app.route('/api/file/<name>')
+def get_file(name: str):
+    file_path = sanitize_path(base_dir, name)
+    if file_path is None:
+        return jsonify({'error': 'Invalid filename'}), 400
+    return send_file(file_path)
+```
+
+## Error Response Security
+
+**Never disclose internal implementation details in HTTP responses:**
+- Stack traces
+- Exception messages
+- Internal file paths
+- Module/library versions
+- Database schema details
+- Environment variables
+
+### Good Error Handling Pattern
+
+```python
+# ❌ BAD - Exposes implementation details
+@app.route('/api/data/<id>')
+def get_data(id: str):
+    try:
+        return process_data(id)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500  # REVEALS STACK TRACE!
+
+# ✅ GOOD - Generic message, detailed logging
+@app.route('/api/data/<id>')
+def get_data(id: str):
+    try:
+        return process_data(id)
+    except ValueError as e:
+        logger.warning(f"Invalid data ID {id}: {e}")
+        return jsonify({'error': 'Invalid data ID'}), 400
+    except Exception as e:
+        logger.error(f"Failed to process data {id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to process data'}), 500
+```
+
+### Error Response Rules
+
+1. **Log detailed errors internally** - Use `logger.error()` with full exception
+2. **Return generic messages** - User gets "Failed to X", not exception text
+3. **Use appropriate status codes** - 400 for client errors, 500 for server errors
+4. **Disable Flask debug mode in production** - `app.run(debug=False)`
+
+## Reference
+
+See `vis/gribs/server.py` for the canonical `sanitize_path()` implementation and `tests/test_vis_server.py` for test cases.

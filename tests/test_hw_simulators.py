@@ -159,7 +159,7 @@ class TestIMUSimulator:
         assert not os.path.exists(temp_socket_path)
         
     def test_socket_accepts_connection(self, shared_state, temp_socket_path):
-        """Test that clients can connect to the socket."""
+        """Test that clients can connect and receive startup sequence."""
         config = IMUSimulatorConfig(socket_path=temp_socket_path)
         sim = IMUSimulator(shared_state, config)
         sim.start()
@@ -170,18 +170,19 @@ class TestIMUSimulator:
             client.settimeout(2.0)
             client.connect(temp_socket_path)
             
-            # Should receive data
-            time.sleep(0.1)  # Wait for simulation thread to start
+            # Should receive startup sequence ($VER, $RDY)
+            time.sleep(0.1)
             data = client.recv(1024)
             assert len(data) > 0
-            assert data.startswith(b'$IMU,')
+            assert b'$VER,' in data
+            assert b'$RDY' in data
             
             client.close()
         finally:
             sim.stop()
             
     def test_imu_message_format(self, shared_state, temp_socket_path):
-        """Test IMU message format is correct."""
+        """Test IMU message format is correct after starting streaming."""
         config = IMUSimulatorConfig(
             socket_path=temp_socket_path,
             heading_noise_std=0,  # Disable noise for predictable output
@@ -198,12 +199,23 @@ class TestIMUSimulator:
             client.settimeout(2.0)
             client.connect(temp_socket_path)
             
-            time.sleep(0.05)
+            # Wait for startup sequence
+            time.sleep(0.1)
+            client.recv(1024)  # Consume $VER, $RDY
+            
+            # Send START command to begin streaming
+            start_cs = HardwareSimulator.compute_checksum("START")
+            cmd = f"$START*{start_cs}\r\n"
+            client.send(cmd.encode('ascii'))
+            
+            time.sleep(0.1)
             data = client.recv(1024).decode('ascii')
             lines = [l.strip() for l in data.split('\n') if l.strip()]
             
-            assert len(lines) > 0
-            line = lines[0]
+            # Find first $IMU line (skip $ACK)
+            imu_lines = [l for l in lines if l.startswith('$IMU,')]
+            assert len(imu_lines) > 0
+            line = imu_lines[0]
             
             # Verify format: $IMU,heading,pitch,roll,yaw_rate,pitch_rate,roll_rate,ax,ay,az*XX
             assert line.startswith('$IMU,')
@@ -225,7 +237,7 @@ class TestIMUSimulator:
             sim.stop()
             
     def test_imu_reads_shared_state(self, shared_state, temp_socket_path):
-        """Test IMU reads values from shared state."""
+        """Test IMU reads values from shared state after streaming starts."""
         shared_state['heading'] = 123.4
         shared_state['pitch'] = 5.6
         shared_state['roll'] = 7.8
@@ -246,9 +258,22 @@ class TestIMUSimulator:
             client.settimeout(2.0)
             client.connect(temp_socket_path)
             
-            time.sleep(0.05)
+            # Wait for and consume startup sequence
+            time.sleep(0.1)
+            client.recv(1024)
+            
+            # Send START command
+            start_cs = HardwareSimulator.compute_checksum("START")
+            cmd = f"$START*{start_cs}\r\n"
+            client.send(cmd.encode('ascii'))
+            
+            time.sleep(0.1)
             data = client.recv(1024).decode('ascii')
-            line = [l.strip() for l in data.split('\n') if l.strip()][0]
+            
+            # Find $IMU line
+            imu_lines = [l.strip() for l in data.split('\n') if l.strip().startswith('$IMU,')]
+            assert len(imu_lines) > 0
+            line = imu_lines[0]
             
             payload = line[1:line.index('*')]
             parts = payload.split(',')

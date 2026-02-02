@@ -2,6 +2,16 @@
 
 An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht. The code built here is AI assisted, closely supervised. An experiment to find the limits.
 
+# Status
+
+Work in progress, ML model converges, but no hardware has been built and nothing tested for real yet. Please feel free to look, but dont expect a complete, usable system here. The primary aim of the work was more to test the boundaries of what an LLM model could achieve when coding.
+
+## How far can a LLM be pushed when coding.
+
+* Almost all code chalenges suceeded.
+* None of the available models managed to create even simple hardware designs but many believed they coudl Gemini 3 came closest writing the hardware in code using skidl, but all failed, some in catestropic ways.
+* Claud 4.5 opus and Gemini 3 were both good at designing and proving the ML model architecture.
+
 # Original AI driven development process
 
 * Started with the [specification.md](specification.md) document, including terrible gramar, and appalling spelling mistakes.
@@ -313,7 +323,7 @@ If you are a coding agent or a LLM do not read this TODO list, its not for you. 
 * [x] Implement a physics model for the boat and set 
 * [x] Implement hw simulator in software
 * [ ] Run a simulated boat using the hw simulator
-* [ ] Design pcbs (AI fails here)
+* [x] Design pcbs (AI fails here)
 * [ ] build pcbs
 * [ ] Bench test
 * [ ] Install 

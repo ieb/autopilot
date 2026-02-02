@@ -85,13 +85,30 @@
 #define SERIAL_BAUD_RATE 115200
 
 // ============================================================================
-// Calibration
+// Protocol Configuration
 // ============================================================================
 
-// EEPROM address for calibration data
-#define EEPROM_CAL_ADDR 0
+// Configuration timeout in milliseconds
+// If no configuration is received within this time, IMU enters error state
+// Power cycle required to recover
+#ifndef CONFIG_TIMEOUT_MS
+#define CONFIG_TIMEOUT_MS 30000
+#endif
 
-// Calibration duration in milliseconds
+// Interactive magnetometer calibration duration in milliseconds
 #define CALIBRATION_DURATION_MS 30000
+
+// ============================================================================
+// IMU Mounting Offset Configuration
+// ============================================================================
+// 
+// When the IMU is mounted away from the boat's center of rotation,
+// rotational motion creates centripetal and tangential accelerations
+// that must be compensated. The offset is configured at startup by the Pi.
+//
+// Coordinate system (NED-like, boat-relative):
+//   X: Forward (positive = toward bow)
+//   Y: Starboard (positive = toward starboard)
+//   Z: Down (positive = below waterline)
 
 #endif // CONFIG_H

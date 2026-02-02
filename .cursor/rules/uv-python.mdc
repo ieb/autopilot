@@ -1,0 +1,40 @@
+---
+description: Always use uv to run Python in this project
+alwaysApply: true
+---
+
+# Use uv for Python
+
+This project uses `uv` for Python package management. **Always use `uv run` to execute Python code.**
+
+## Running Python
+
+```bash
+# ✅ CORRECT
+uv run python script.py
+uv run pytest tests/
+uv run python -m module
+
+# ❌ WRONG - these will fail or use wrong environment
+python script.py
+python3 script.py
+pytest tests/
+pip install package
+```
+
+## Installing Dependencies
+
+```bash
+# ✅ CORRECT
+uv add package-name
+uv sync
+
+# ❌ WRONG
+pip install package-name
+```
+
+## Why
+
+- Project dependencies are managed in `pyproject.toml` and locked in `uv.lock`
+- `uv run` ensures the correct virtual environment and dependencies are used
+- Direct `python` or `pip` commands will use system Python or wrong environment
