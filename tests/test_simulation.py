@@ -532,7 +532,7 @@ class TestWaveModel:
         
         rolls = []
         for i in range(100):
-            roll, pitch = waves.step(dt=0.1, tws=15.0)
+            roll, pitch, yaw = waves.step(dt=0.1, tws=15.0)
             rolls.append(roll)
             
         # Should have positive and negative values
@@ -544,13 +544,13 @@ class TestWaveModel:
         waves = WaveModel(seed=42)
         
         # Light wind
-        roll_light, _ = waves.step(dt=0.1, tws=5.0)
+        roll_light, _, _ = waves.step(dt=0.1, tws=5.0)
         waves.reset()
         
         # Heavy wind - run for a bit to get motion
         rolls_heavy = []
         for _ in range(50):
-            roll, _ = waves.step(dt=0.1, tws=25.0)
+            roll, _, _ = waves.step(dt=0.1, tws=25.0)
             rolls_heavy.append(abs(roll))
             
         # Heavy wind should produce larger motion on average
@@ -562,11 +562,129 @@ class TestWaveModel:
         
         rolls = []
         for _ in range(100):
-            roll, _ = waves.step(dt=0.1, tws=5.0)
+            roll, _, _ = waves.step(dt=0.1, tws=5.0)
             rolls.append(abs(roll))
             
         # Calm seas should have limited motion
         assert max(rolls) < 15.0  # Less than 15 degrees
+    
+    def test_wave_yaw_downwind_rounds_up(self):
+        """Test wave yaw causes rounding up toward wind when running downwind."""
+        waves = WaveModel(seed=42)
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)  # 2m swell (6°/3)
+        
+        # Running downwind on starboard tack (TWA > 120, positive = wind from starboard)
+        # With heel to port (negative roll - starboard tack convention)
+        yaws = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-10.0)
+            yaws.append(yaw)
+        
+        # Should have positive yaw values when stern lifts (rounding up toward wind)
+        # The oscillation should produce both positive and negative values
+        assert max(yaws) > 0, "Should have positive yaw (rounding up) when stern lifts"
+        assert min(yaws) < 0, "Yaw should oscillate with wave phase"
+        
+    def test_wave_yaw_upwind_falls_off(self):
+        """Test wave yaw causes boat to fall off wind when beating upwind."""
+        waves = WaveModel(seed=42)
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)  # 2m swell
+        
+        # Beating upwind on starboard tack (TWA < 60, positive = wind from starboard)
+        # With heel to port (negative roll)
+        yaws = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=45.0, heel=-15.0)
+            yaws.append(yaw)
+        
+        # Should have negative yaw values when bow lifts (falling off to port)
+        assert min(yaws) < 0, "Should have negative yaw (falling off) when bow lifts"
+        assert max(yaws) > 0, "Yaw should oscillate with wave phase"
+        
+    def test_wave_yaw_scales_with_heel(self):
+        """Test wave yaw effect increases with heel angle."""
+        waves = WaveModel(seed=42)
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
+        
+        # Collect max yaw with small heel
+        waves.state.swell_phase = 0  # Reset phase
+        yaws_small_heel = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-5.0)
+            yaws_small_heel.append(abs(yaw))
+        
+        # Reset and collect max yaw with large heel
+        waves.reset()
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
+        yaws_large_heel = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-20.0)
+            yaws_large_heel.append(abs(yaw))
+        
+        # Large heel should produce larger yaw effect
+        assert max(yaws_large_heel) > max(yaws_small_heel), \
+            "Wave yaw should increase with heel angle"
+            
+    def test_wave_yaw_scales_with_swell(self):
+        """Test wave yaw effect increases with swell amplitude."""
+        waves = WaveModel(seed=42)
+        
+        # Small swell
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=3.0)  # ~1m swell
+        yaws_small_swell = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-10.0)
+            yaws_small_swell.append(abs(yaw))
+        
+        # Reset with large swell
+        waves.reset()
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=9.0)  # ~3m swell
+        yaws_large_swell = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-10.0)
+            yaws_large_swell.append(abs(yaw))
+        
+        # Large swell should produce larger yaw effect
+        assert max(yaws_large_swell) > max(yaws_small_swell), \
+            "Wave yaw should increase with swell amplitude"
+            
+    def test_wave_yaw_minimal_at_beam_reach(self):
+        """Test wave yaw effect is minimal at beam reach (TWA ~90°)."""
+        waves = WaveModel(seed=42)
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
+        
+        # At beam reach
+        yaws_beam = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=90.0, heel=-15.0)
+            yaws_beam.append(abs(yaw))
+        
+        # Reset and test downwind
+        waves.reset()
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
+        yaws_downwind = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-15.0)
+            yaws_downwind.append(abs(yaw))
+        
+        # Beam reach should have much smaller yaw effect than downwind
+        assert max(yaws_beam) < max(yaws_downwind) * 0.5, \
+            "Wave yaw at beam reach should be much smaller than downwind"
+    
+    def test_wave_yaw_disabled(self):
+        """Test wave yaw can be disabled via config."""
+        from src.simulation.wave_model import WaveConfig
+        config = WaveConfig(yaw_effect_enabled=False)
+        waves = WaveModel(config=config, seed=42)
+        waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
+        
+        yaws = []
+        for _ in range(100):
+            _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-15.0)
+            yaws.append(yaw)
+        
+        # All yaw values should be zero when disabled
+        assert all(y == 0.0 for y in yaws), "Wave yaw should be zero when disabled"
 
 
 class TestHelmController:

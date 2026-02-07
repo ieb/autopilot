@@ -41,6 +41,13 @@ class WaveConfig:
     
     # Pitch-roll phase relationship
     pitch_roll_phase: float = math.pi / 2  # Pitch leads roll by 90 degrees
+    
+    # Wave-induced yaw (heading perturbation)
+    # Downwind: stern lift causes boat to round up toward wind
+    # Upwind: waves knock boat off wind (away from wind)
+    yaw_effect_enabled: bool = True
+    downwind_yaw_factor: float = 0.1     # deg/s per degree heel per meter swell (downwind)
+    upwind_yaw_factor: float = 0.025     # deg/s per degree heel per meter swell (upwind)
 
 
 @dataclass
@@ -62,6 +69,7 @@ class WaveState:
     wave_roll: float = 0.0           # Wave-induced roll (degrees)
     wave_pitch: float = 0.0          # Wave-induced pitch (degrees)
     wave_heave: float = 0.0          # Vertical motion (m/s^2 for accel)
+    wave_yaw: float = 0.0            # Wave-induced yaw rate (deg/s)
 
 
 class WaveModel:
@@ -114,7 +122,8 @@ class WaveModel:
         )
         
     def step(self, dt: float, tws: float = 15.0, heading: float = 0.0,
-             wave_direction: Optional[float] = None) -> Tuple[float, float]:
+             wave_direction: Optional[float] = None,
+             twa: float = 90.0, heel: float = 0.0) -> Tuple[float, float, float]:
         """
         Advance wave state by one timestep.
         
@@ -123,9 +132,11 @@ class WaveModel:
             tws: True wind speed (knots) - affects chop amplitude
             heading: Boat heading (degrees) - affects wave impact angle
             wave_direction: Direction waves coming from (degrees), defaults to downwind
+            twa: True wind angle (degrees) - affects yaw behavior
+            heel: Current heel angle (degrees) - affects yaw magnitude
             
         Returns:
-            Tuple of (wave_roll, wave_pitch) in degrees
+            Tuple of (wave_roll, wave_pitch, wave_yaw) in degrees/deg/s
         """
         # Default wave direction from downwind
         if wave_direction is None:
@@ -133,8 +144,9 @@ class WaveModel:
             
         self._update_phases(dt)
         self._compute_motion(tws, heading, wave_direction)
+        self._compute_wave_yaw(twa, heel)
         
-        return (self.state.wave_roll, self.state.wave_pitch)
+        return (self.state.wave_roll, self.state.wave_pitch, self.state.wave_yaw)
         
     def _update_phases(self, dt: float):
         """Update all wave phases."""
@@ -210,9 +222,92 @@ class WaveModel:
             math.sin(self.state.swell_phase + math.pi / 4)
         )
         
-    def get_motion(self) -> Tuple[float, float, float]:
-        """Get current wave motion as (roll, pitch, heave) tuple."""
-        return (self.state.wave_roll, self.state.wave_pitch, self.state.wave_heave)
+    def _compute_wave_yaw(self, twa: float, heel: float):
+        """
+        Compute wave-induced yaw rate based on point of sail and heel angle.
+        
+        Physics:
+        - Downwind (TWA > 120°): Stern lift causes boat to round up toward wind.
+          More heel amplifies this effect. Requires counter-rudder.
+        - Upwind (TWA < 60°): Waves knock boat off wind (away from wind).
+          Weather helm from sails partially counteracts. Effect varies with wave phase.
+        - Beam reach: Minimal heading effect from waves.
+        
+        Args:
+            twa: True wind angle (degrees, -180 to 180)
+            heel: Current heel angle (degrees, negative = heel to port)
+        """
+        if not self.config.yaw_effect_enabled:
+            self.state.wave_yaw = 0.0
+            return
+            
+        abs_twa = abs(twa)
+        abs_heel = abs(heel)
+        
+        # Estimate swell height from amplitude (rough approximation)
+        # Amplitude in degrees relates to swell height - typically 2-4° per meter
+        swell_height_m = self.state.swell_amplitude / 3.0
+        
+        # Wave phase factor: positive when stern lifting (phase near π)
+        # sin(phase) oscillates between -1 and 1
+        phase_factor = math.sin(self.state.swell_phase)
+        
+        # Determine yaw effect based on point of sail
+        if abs_twa > 120:
+            # Downwind (running): stern lift causes rounding up toward wind
+            # Positive yaw rate means heading increases (turning to starboard)
+            # When on port tack (twa > 0), rounding up = heading toward wind = positive
+            # When on starboard tack (twa < 0), rounding up = heading toward wind = negative
+            base_yaw = self.config.downwind_yaw_factor * abs_heel * swell_height_m
+            
+            # Sign: positive phase_factor means stern lifting
+            # Stern lift causes rounding up toward wind
+            # If TWA > 0 (wind from starboard), round up = turn to starboard = positive heading change
+            # If TWA < 0 (wind from port), round up = turn to port = negative heading change
+            if twa > 0:
+                self.state.wave_yaw = base_yaw * phase_factor
+            else:
+                self.state.wave_yaw = -base_yaw * phase_factor
+                
+        elif abs_twa < 60:
+            # Upwind (beating): waves knock boat away from wind
+            # Falling off = heading moving away from wind direction
+            # If TWA > 0 (wind from starboard), fall off = turn to port = negative heading change
+            # If TWA < 0 (wind from port), fall off = turn to starboard = positive heading change
+            base_yaw = self.config.upwind_yaw_factor * abs_heel * swell_height_m
+            
+            # Waves knock bow off when climbing wave (bow lifting)
+            # Bow lifts when phase_factor is negative (opposite of stern lift)
+            if twa > 0:
+                self.state.wave_yaw = -base_yaw * (-phase_factor)  # Fall off to port
+            else:
+                self.state.wave_yaw = base_yaw * (-phase_factor)   # Fall off to starboard
+                
+        else:
+            # Beam reach: transition zone, reduced effect
+            # Linear interpolation between upwind and downwind effects
+            if abs_twa <= 90:
+                # Closer to upwind - reduce upwind effect
+                blend = (abs_twa - 60) / 30.0  # 0 at 60°, 1 at 90°
+                base_yaw = self.config.upwind_yaw_factor * abs_heel * swell_height_m
+                base_yaw *= (1 - blend)  # Fade out toward beam reach
+                if twa > 0:
+                    self.state.wave_yaw = -base_yaw * (-phase_factor)
+                else:
+                    self.state.wave_yaw = base_yaw * (-phase_factor)
+            else:
+                # Closer to downwind - reduce downwind effect
+                blend = (120 - abs_twa) / 30.0  # 0 at 120°, 1 at 90°
+                base_yaw = self.config.downwind_yaw_factor * abs_heel * swell_height_m
+                base_yaw *= (1 - blend)  # Fade out toward beam reach
+                if twa > 0:
+                    self.state.wave_yaw = base_yaw * phase_factor
+                else:
+                    self.state.wave_yaw = -base_yaw * phase_factor
+        
+    def get_motion(self) -> Tuple[float, float, float, float]:
+        """Get current wave motion as (roll, pitch, heave, yaw) tuple."""
+        return (self.state.wave_roll, self.state.wave_pitch, self.state.wave_heave, self.state.wave_yaw)
         
     def set_sea_state(self, swell_period: float, swell_amplitude: float):
         """Set sea state directly."""

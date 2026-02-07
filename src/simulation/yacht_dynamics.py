@@ -161,13 +161,14 @@ class YachtDynamics:
         self.config.metacentric_height = vary(self.config.metacentric_height)
         self.config.weather_helm_factor = vary(self.config.weather_helm_factor)
         
-    def step(self, rudder_command: float, dt: float) -> YachtState:
+    def step(self, rudder_command: float, dt: float, wave_yaw: float = 0.0) -> YachtState:
         """
         Advance yacht state by one timestep.
         
         Args:
             rudder_command: Commanded rudder angle (degrees)
             dt: Time step (seconds)
+            wave_yaw: Wave-induced yaw rate (deg/s) from wave model
             
         Returns:
             Updated yacht state
@@ -176,7 +177,7 @@ class YachtDynamics:
         self._apply_rudder(rudder_command, dt)
         
         # Compute forces and moments
-        self._update_heading(dt)
+        self._update_heading(dt, wave_yaw)
         self._update_heel(dt)
         self._check_reefing()  # Auto-adjust sails based on heel
         self._update_speed(dt)
@@ -201,8 +202,16 @@ class YachtDynamics:
         
         self.state.rudder_angle += diff
         
-    def _update_heading(self, dt: float):
-        """Update heading based on rudder and other forces."""
+    def _update_heading(self, dt: float, wave_yaw: float = 0.0):
+        """
+        Update heading based on rudder, weather helm, and wave effects.
+        
+        Args:
+            dt: Time step (seconds)
+            wave_yaw: Wave-induced yaw rate (deg/s) - accounts for:
+                - Downwind: stern lift causing boat to round up toward wind
+                - Upwind: waves knocking boat off wind
+        """
         # Target heading rate from rudder
         rudder_effect = self.config.rudder_effectiveness * self.state.rudder_angle
         
@@ -213,8 +222,8 @@ class YachtDynamics:
         # Weather helm from heel
         weather_helm = self.config.weather_helm_factor * self.state.roll
         
-        # Target rate
-        target_rate = rudder_effect + weather_helm
+        # Target rate including wave-induced yaw
+        target_rate = rudder_effect + weather_helm + wave_yaw
         
         # First-order response
         self.state.heading_rate = (

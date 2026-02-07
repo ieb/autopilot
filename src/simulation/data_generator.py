@@ -178,11 +178,17 @@ class SailingDataGenerator:
         wind_state = self.wind.step(dt)
         self.yacht.set_wind(wind_state.twd, wind_state.tws)
         
-        # Step wave model
-        self.waves.step(dt, tws=wind_state.tws, heading=self.yacht.state.heading)
-        
-        # Compute TWA for helm controller
+        # Compute TWA for wave model and helm controller
         twa = self._compute_twa()
+        
+        # Step wave model (includes yaw effect)
+        _, _, wave_yaw = self.waves.step(
+            dt, 
+            tws=wind_state.tws, 
+            heading=self.yacht.state.heading,
+            twa=twa,
+            heel=self.yacht.state.roll
+        )
         
         # Compute rudder command (normal helm control, no maneuvers during warmup)
         rudder_command = self.helm.compute_rudder(
@@ -193,8 +199,8 @@ class SailingDataGenerator:
             dt=dt,
         )
         
-        # Step yacht dynamics
-        self.yacht.step(rudder_command, dt)
+        # Step yacht dynamics (wave_yaw affects heading)
+        self.yacht.step(rudder_command, dt, wave_yaw=wave_yaw)
         
     def _set_initial_conditions(self):
         """Set initial yacht and wind conditions."""
@@ -269,15 +275,17 @@ class SailingDataGenerator:
             wind_state = self.wind.step(dt)
             self.yacht.set_wind(wind_state.twd, wind_state.tws)
             
-            # Step wave model
-            wave_roll, wave_pitch = self.waves.step(
+            # Compute current TWA for wave model and maneuver decisions
+            twa = self._compute_twa()
+            
+            # Step wave model (now includes yaw effect based on TWA and heel)
+            wave_roll, wave_pitch, wave_yaw = self.waves.step(
                 dt, 
                 tws=wind_state.tws,
-                heading=self.yacht.state.heading
+                heading=self.yacht.state.heading,
+                twa=twa,
+                heel=self.yacht.state.roll
             )
-            
-            # Compute current TWA for maneuver decisions
-            twa = self._compute_twa()
             
             # Check for maneuvers
             if self.scenario and self.scenario.enable_maneuvers:
@@ -306,8 +314,8 @@ class SailingDataGenerator:
                     dt=dt,
                 )
                 
-            # Step yacht dynamics
-            self.yacht.step(rudder_command, dt)
+            # Step yacht dynamics (wave_yaw affects heading)
+            self.yacht.step(rudder_command, dt, wave_yaw=wave_yaw)
             
             # Combine wave motion with heel
             total_roll = self.yacht.state.roll + wave_roll

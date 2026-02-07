@@ -275,13 +275,21 @@ class PassageSimulator:
         # Update yacht wind state
         self.yacht.set_wind(twd, tws)
         
+        # Compute TWA for wave model
+        twa = twd - heading
+        while twa > 180:
+            twa -= 360
+        while twa < -180:
+            twa += 360
+        
         # Get wave conditions and update wave model
         waves = self.wave_provider.get_waves(lat, lon, self.current_time, tws, twd)
         self.wave_model.set_sea_state(waves.mean_period, waves.amplitude_degrees)
         
-        # Step wave model for motion
-        wave_roll, wave_pitch = self.wave_model.step(
-            dt, tws=tws, heading=heading
+        # Step wave model for motion (includes yaw effect based on TWA and heel)
+        wave_roll, wave_pitch, wave_yaw = self.wave_model.step(
+            dt, tws=tws, heading=heading,
+            twa=twa, heel=self.yacht.state.roll
         )
         
         # Update navigator
@@ -297,19 +305,14 @@ class PassageSimulator:
             # Sailing mode - use autopilot or helm controller
             rudder_command = self._compute_sailing_rudder(nav_state, twd)
             
-        # Step yacht dynamics
-        self.yacht.step(rudder_command, dt)
+        # Step yacht dynamics (wave_yaw affects heading)
+        self.yacht.step(rudder_command, dt, wave_yaw=wave_yaw)
         
         # Apply wave motion to attitude
         total_roll = self.yacht.state.roll + wave_roll
         total_pitch = self.yacht.state.pitch + wave_pitch
         
-        # Compute polar performance
-        twa = twd - heading
-        while twa > 180:
-            twa -= 360
-        while twa < -180:
-            twa += 360
+        # Compute polar performance (twa already computed above)
         polar_target = self.polar.get_target_speed(abs(twa), tws)
         polar_perf = stw / polar_target if polar_target > 0 else 0.0
         
