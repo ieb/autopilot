@@ -5,31 +5,43 @@ description = "ML Yacht Autopilot"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # Core dependencies only - no ML frameworks
     "numpy>=1.21.0",
     "python-can>=4.0.0",
     "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# ML training (requires PyTorch) - for development machines
+ml = [
     "torch>=2.2.0",
     "onnx>=1.17.0",
     "onnxruntime>=1.20.1",
     "onnxscript>=0.5.0",
 ]
-
-[project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",
     "mlflow>=2.10.0",
+    # Include ML dependencies for full testing
+    "torch>=2.2.0",
+    "onnx>=1.17.0",
+    "onnxruntime>=1.20.1",
+    "onnxscript>=0.5.0",
 ]
+# Raspberry Pi 64-bit (aarch64) - inference with ONNX Runtime
 rpi = [
-    # Raspberry Pi specific dependencies (inference only, no PyTorch)
     "onnxruntime>=1.20.1",
     "RPi.GPIO",
     "adafruit-circuitpython-ads1x15",
     "smbus2>=0.4.0",
 ]
-
+# Raspberry Pi 32-bit (armv6l/armv7l) - no inference, sensors only
+imu = [
+    "smbus2>=0.4.0",
+]
 rpi32 = [
-    # Raspberry Pi 32 bit specific dependencies (no inference only, no PyTorch)
+    # Raspberry Pi 32-bit: sensors only, no ML inference
     "RPi.GPIO",
     "adafruit-circuitpython-ads1x15",
     "smbus2>=0.4.0",

@@ -57,8 +57,14 @@ Navigate to: Interface Options → I2C → Enable
 ### 2. Install Dependencies
 
 ```bash
-# Install rpi dependencies (includes smbus2)
+# For Raspberry Pi 64-bit (aarch64) - includes inference
 uv sync --extra rpi
+
+# For Raspberry Pi 32-bit (armv6l/armv7l) - sensors only, no inference
+uv sync --extra rpi32
+
+# For IMU testing only (minimal dependencies)
+uv sync --extra imu
 ```
 
 ### 3. Verify Connection

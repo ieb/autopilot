@@ -59,8 +59,14 @@ cd autopilot
 # Install uv (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install dependencies (inference only, no PyTorch)
+# For Pi 64-bit (aarch64) - includes ONNX inference
 uv sync --extra rpi
+
+# For Pi 32-bit (armv6l/armv7l) - sensors only, no inference
+uv sync --extra rpi32
+
+# For IMU testing only (minimal)
+uv sync --extra imu
 
 # Setup CAN interface
 sudo ip link set can0 up type can bitrate 250000

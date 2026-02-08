@@ -174,19 +174,19 @@ source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "onnx" },
-    { name = "onnxruntime" },
-    { name = "onnxscript" },
     { name = "pyserial" },
     { name = "python-can" },
-    { name = "torch" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "mlflow" },
+    { name = "onnx" },
+    { name = "onnxruntime" },
+    { name = "onnxscript" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "torch" },
 ]
 experiment = [
     { name = "cfgrib" },
@@ -194,10 +194,25 @@ experiment = [
     { name = "xarray", version = "2025.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "xarray", version = "2026.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
+imu = [
+    { name = "smbus2" },
+]
+ml = [
+    { name = "onnx" },
+    { name = "onnxruntime" },
+    { name = "onnxscript" },
+    { name = "torch" },
+]
 rpi = [
     { name = "adafruit-circuitpython-ads1x15" },
     { name = "onnxruntime" },
     { name = "rpi-gpio" },
+    { name = "smbus2" },
+]
+rpi32 = [
+    { name = "adafruit-circuitpython-ads1x15" },
+    { name = "rpi-gpio" },
+    { name = "smbus2" },
 ]
 viz = [
     { name = "flask" },
@@ -207,25 +222,34 @@ viz = [
 [package.metadata]
 requires-dist = [
     { name = "adafruit-circuitpython-ads1x15", marker = "extra == 'rpi'" },
+    { name = "adafruit-circuitpython-ads1x15", marker = "extra == 'rpi32'" },
     { name = "cfgrib", marker = "extra == 'experiment'", specifier = ">=0.9.10" },
     { name = "eccodes", marker = "extra == 'experiment'", specifier = ">=1.5.0" },
     { name = "flask", marker = "extra == 'viz'", specifier = ">=3.0.0" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.5.0" },
     { name = "mlflow", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "numpy", specifier = ">=1.21.0" },
-    { name = "onnx", specifier = ">=1.17.0" },
-    { name = "onnxruntime", specifier = ">=1.20.1" },
+    { name = "onnx", marker = "extra == 'dev'", specifier = ">=1.17.0" },
+    { name = "onnx", marker = "extra == 'ml'", specifier = ">=1.17.0" },
+    { name = "onnxruntime", marker = "extra == 'dev'", specifier = ">=1.20.1" },
+    { name = "onnxruntime", marker = "extra == 'ml'", specifier = ">=1.20.1" },
     { name = "onnxruntime", marker = "extra == 'rpi'", specifier = ">=1.20.1" },
-    { name = "onnxscript", specifier = ">=0.5.0" },
+    { name = "onnxscript", marker = "extra == 'dev'", specifier = ">=0.5.0" },
+    { name = "onnxscript", marker = "extra == 'ml'", specifier = ">=0.5.0" },
     { name = "pyserial", specifier = ">=3.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=3.0.0" },
     { name = "python-can", specifier = ">=4.0.0" },
     { name = "rpi-gpio", marker = "extra == 'rpi'" },
-    { name = "torch", specifier = ">=2.2.0" },
+    { name = "rpi-gpio", marker = "extra == 'rpi32'" },
+    { name = "smbus2", marker = "extra == 'imu'", specifier = ">=0.4.0" },
+    { name = "smbus2", marker = "extra == 'rpi'", specifier = ">=0.4.0" },
+    { name = "smbus2", marker = "extra == 'rpi32'", specifier = ">=0.4.0" },
+    { name = "torch", marker = "extra == 'dev'", specifier = ">=2.2.0" },
+    { name = "torch", marker = "extra == 'ml'", specifier = ">=2.2.0" },
     { name = "xarray", marker = "extra == 'experiment'", specifier = ">=2023.1.0" },
 ]
-provides-extras = ["dev", "rpi", "viz", "experiment"]
+provides-extras = ["ml", "dev", "rpi", "imu", "rpi32", "viz", "experiment"]
 
 [[package]]
 name = "binho-host-adapter"
@@ -3079,6 +3103,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/0c/5ec987633e077dd0076178ea6ade2d6e57780b34afea0b497fb507d7a1ed/skops-0.13.0.tar.gz", hash = "sha256:66949fd3c95cbb5c80270fbe40293c0fe1e46cb4a921860e42584dd9c20ebeb1", size = 581312 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/e8/6a2b2030f0689f894432b9c2f0357f2f3286b2a00474827e04b8fe9eea13/skops-0.13.0-py3-none-any.whl", hash = "sha256:55e2cccb18c86f5916e4cfe5acf55ed7b0eecddf08a151906414c092fa5926dc", size = 131200 },
+]
+
+[[package]]
+name = "smbus2"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/36/afafd43770caae69f04e21402552a8f94a072def46a002fab9357f4852ce/smbus2-0.6.0.tar.gz", hash = "sha256:9b5ff1e998e114730f9dfe0c4babbef06c92468cfb61eaa684e30f225661b95b", size = 17403 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/cf/2e1d6805da6f9c9b3a4358076ff2e072d828ba7fed124edc1b729e210c55/smbus2-0.6.0-py2.py3-none-any.whl", hash = "sha256:03d83d2a9a4afc5ddca0698ccabf101cb3de52bc5aefd7b76778ffb27ff654e0", size = 11849 },
 ]
 
 [[package]]
