@@ -56,16 +56,11 @@ This autopilot uses an LSTM neural network to directly output rudder commands fr
 git clone <repo-url>
 cd autopilot
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install dependencies
-pip install -r requirements.txt
-
-# For Pi-specific hardware:
-pip install RPi.GPIO adafruit-circuitpython-ads1x15
-pip install tflite-runtime  # Lightweight inference
+# Install dependencies (inference only, no PyTorch)
+uv sync --extra rpi
 
 # Setup CAN interface
 sudo ip link set can0 up type can bitrate 250000
@@ -74,7 +69,11 @@ sudo ip link set can0 up type can bitrate 250000
 ### For Development (Mac/Linux)
 
 ```bash
-pip install -r requirements.txt
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install all dependencies including dev tools
+uv sync --extra dev
 ```
 
 ## Usage
@@ -107,20 +106,20 @@ uv run python -m src.simulation.data_generator --hours 20 --calibrate-from n2klo
 
 ```bash
 # Train from logged data
-python -m src.training.train_imitation data/training/ --output models/ --epochs 100
+uv run python -m src.training.train_imitation data/training/ --output models/ --epochs 100
 ```
 
 ### Running
 
 ```bash
 # Production (on Pi)
-python -m src.main --model models/autopilot.tflite
+uv run python -m src.main --model models/autopilot.onnx
 
 # Simulation mode (no hardware)
-python -m src.main --simulation
+uv run python -m src.main --simulation
 
 # Verbose logging
-python -m src.main --simulation --verbose
+uv run python -m src.main --simulation --verbose
 ```
 
 ## Testing
@@ -129,7 +128,7 @@ python -m src.main --simulation --verbose
 
 ```bash
 # Install dev dependencies
-uv pip install -e ".[dev]"
+uv sync --extra dev
 
 # Run all tests with coverage
 uv run pytest
@@ -157,10 +156,10 @@ The test suite covers the core modules:
 | Mode manager | 37 | 85% |
 | Actuator interface | 30 | 69% |
 | IMU fusion | 20 | 71% |
-| Autopilot model | 20 | 46%* |
+| Autopilot model | 21 | 59%* |
 | Simulation | 30 | 85% |
 
-*Model tests require TensorFlow; mock tests run without it.
+*Model tests require PyTorch; mock tests run without it.
 
 See [planning/unit_test_plan.md](planning/unit_test_plan.md) for detailed test documentation.
 
@@ -186,7 +185,7 @@ See [docs/grib_visualization.md](docs/grib_visualization.md) for complete docume
 uv sync --extra viz
 
 # Start the server
-python vis/gribs/server.py \
+uv run python vis/gribs/server.py \
     --grib-dir data/experiment1/grib \
     --routes-dir data/experiment1/route \
     --results-dir results \

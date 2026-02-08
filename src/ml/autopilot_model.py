@@ -4,29 +4,28 @@ Autopilot Model Module
 
 End-to-end LSTM model that directly outputs rudder commands
 from sensor observations.
+
+Uses PyTorch for training and exports to ONNX for edge deployment.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-# TensorFlow imports with fallback
+# PyTorch imports with fallback
 try:
-    import tensorflow as tf
-    HAS_TF = True
+    import torch
+    import torch.nn as nn
+    HAS_TORCH = True
 except ImportError:
-    tf = None
-    HAS_TF = False
-    logger.warning("TensorFlow not available. Model training disabled.")
-
-try:
-    import tflite_runtime.interpreter as tflite
-    HAS_TFLITE_RUNTIME = True
-except ImportError:
-    HAS_TFLITE_RUNTIME = False
+    torch = None
+    nn = None
+    HAS_TORCH = False
+    logger.warning("PyTorch not available. Model training disabled.")
 
 # ONNX Runtime for edge deployment
 try:
@@ -48,319 +47,226 @@ class ModelConfig:
     dropout_rate: float = 0.2      # Dropout for regularization
 
 
-def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'tf.keras.Model':
+class AutopilotLSTM(nn.Module):
     """
-    Build the end-to-end LSTM autopilot model.
+    End-to-end LSTM autopilot model.
     
     Architecture:
         Input: [batch, sequence_length, feature_dim]
-        -> TimeDistributed Dense (feature mixing)
+        -> Linear + ReLU (feature mixing)
+        -> BatchNorm
         -> LSTM (temporal processing)
+        -> Dropout
         -> LSTM (temporal processing)
-        -> Dense (output mapping)
-        -> tanh activation (bounded output)
+        -> Dropout
+        -> Linear + LeakyReLU
+        -> Linear + Tanh (bounded output)
         Output: [batch, 1] - rudder command in [-1, 1]
+    """
+    
+    def __init__(self, config: Optional[ModelConfig] = None):
+        """
+        Initialize the autopilot model.
+        
+        Args:
+            config: Model configuration
+        """
+        if not HAS_TORCH:
+            raise ImportError("PyTorch is required to build the model")
+            
+        super().__init__()
+        self.config = config or ModelConfig()
+        
+        # Feature mixing layer (applied to each timestep)
+        self.feature_mix = nn.Sequential(
+            nn.Linear(self.config.feature_dim, 128),
+            nn.ReLU(),
+        )
+        
+        # Batch normalization across sequence dimension
+        self.bn = nn.BatchNorm1d(self.config.sequence_length)
+        
+        # First LSTM layer
+        self.lstm1 = nn.LSTM(
+            input_size=128,
+            hidden_size=self.config.lstm_units_1,
+            batch_first=True
+        )
+        self.dropout1 = nn.Dropout(self.config.dropout_rate)
+        
+        # Second LSTM layer
+        self.lstm2 = nn.LSTM(
+            input_size=self.config.lstm_units_1,
+            hidden_size=self.config.lstm_units_2,
+            batch_first=True
+        )
+        self.dropout2 = nn.Dropout(self.config.dropout_rate)
+        
+        # Output layers
+        self.output = nn.Sequential(
+            nn.Linear(self.config.lstm_units_2, self.config.dense_units),
+            nn.LeakyReLU(0.01),
+            nn.Linear(self.config.dense_units, 1),
+            nn.Tanh()
+        )
+        
+    def forward(self, x: 'torch.Tensor') -> 'torch.Tensor':
+        """
+        Forward pass.
+        
+        Args:
+            x: Input tensor of shape [batch, sequence_length, feature_dim]
+            
+        Returns:
+            Output tensor of shape [batch, 1] with values in [-1, 1]
+        """
+        # Feature mixing (apply to each timestep)
+        # x: [batch, seq, features] -> [batch, seq, 128]
+        x = self.feature_mix(x)
+        
+        # Batch normalization
+        x = self.bn(x)
+        
+        # First LSTM
+        x, _ = self.lstm1(x)
+        x = self.dropout1(x)
+        
+        # Second LSTM
+        x, _ = self.lstm2(x)
+        x = self.dropout2(x)
+        
+        # Take only the last timestep output
+        x = x[:, -1, :]
+        
+        # Output mapping
+        return self.output(x)
+    
+    def count_parameters(self) -> int:
+        """Count trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+def build_autopilot_model(config: Optional[ModelConfig] = None) -> 'AutopilotLSTM':
+    """
+    Build the end-to-end LSTM autopilot model.
     
     Args:
         config: Model configuration
         
     Returns:
-        Compiled Keras model
+        PyTorch model
     """
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required to build the model")
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is required to build the model")
         
-    config = config or ModelConfig()
-    
-    inputs = tf.keras.Input(
-        shape=(config.sequence_length, config.feature_dim),
-        name='sensor_sequence'
-    )
-    
-    # Initial feature mixing across time
-    x = tf.keras.layers.TimeDistributed(
-        tf.keras.layers.Dense(128, activation='relu'),
-        name='feature_mixing'
-    )(inputs)
-    x = tf.keras.layers.TimeDistributed(
-        tf.keras.layers.BatchNormalization(),
-        name='bn_feature'
-    )(x)
-    
-    # First LSTM layer - returns sequences for stacking
-    x = tf.keras.layers.LSTM(
-        config.lstm_units_1,
-        return_sequences=True,
-        name='lstm_1'
-    )(x)
-    x = tf.keras.layers.Dropout(config.dropout_rate)(x)
-    
-    # Second LSTM layer - returns final state only
-    x = tf.keras.layers.LSTM(
-        config.lstm_units_2,
-        return_sequences=False,
-        name='lstm_2'
-    )(x)
-    x = tf.keras.layers.Dropout(config.dropout_rate)(x)
-    
-    # Output mapping with BatchNormalization for stability
-    x = tf.keras.layers.Dense(config.dense_units, activation=tf.keras.layers.LeakyReLU(alpha=0.01), name='dense_out')(x)
-    ## On advice, throttling x = tf.keras.layers.BatchNormalization(name='bn_dense')(x)
-    
-    # Rudder command output with tanh for bounded [-1, 1]
-    outputs = tf.keras.layers.Dense(1, activation='tanh', name='rudder_command')(x)
-    
-    model = tf.keras.Model(inputs, outputs, name='autopilot_lstm')
-    
-    return model
+    return AutopilotLSTM(config)
 
 
-def compile_model(model: 'tf.keras.Model', learning_rate: float = 1e-4):
-    """Compile model with appropriate loss and optimizer."""
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required")
+def get_device() -> 'torch.device':
+    """Get the best available device (MPS for Apple Silicon, CUDA, or CPU)."""
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is required")
         
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(
-            learning_rate=learning_rate,
-            clipnorm=1.0  # Gradient clipping to prevent exploding gradients
-        ),
-        loss=autopilot_loss,
-        metrics=['mae']
-    )
-    return model
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
 
-@tf.keras.utils.register_keras_serializable(package="autopilot")
-def autopilot_loss(y_true, y_pred):
+def convert_to_onnx(model: 'AutopilotLSTM', output_path: str,
+                    config: Optional[ModelConfig] = None) -> str:
     """
-    Custom loss for autopilot training.
-    
-    Combines:
-    1. MSE on rudder position (primary)
-    2. Smoothness penalty on predicted changes (secondary)
-    """
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required")
-        
-    # Position accuracy
-    mse = tf.reduce_mean(tf.square(y_true - y_pred))
-    
-    return mse
-
-
-def convert_to_tflite(model: 'tf.keras.Model', output_path: str,
-                      quantize: bool = True) -> str:
-    """
-    Convert Keras model to TensorFlow Lite for Pi deployment.
+    Convert PyTorch model to ONNX format for edge deployment.
     
     Args:
-        model: Trained Keras model
-        output_path: Path for .tflite file
-        quantize: Whether to quantize to int8
-        
-    Returns:
-        Path to saved model
-    """
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required")
-        
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    
-    # Enable SELECT_TF_OPS to handle LSTM + batch normalization patterns
-    # that aren't natively supported in TFLite
-    converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS
-    ]
-    # Disable lowering tensor list ops to avoid MLIR compilation issues
-    converter._experimental_lower_tensor_list_ops = False
-    
-    if quantize:
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        # For full int8 quantization, would need representative dataset
-        
-    tflite_model = converter.convert()
-    
-    with open(output_path, 'wb') as f:
-        f.write(tflite_model)
-        
-    logger.info(f"Saved TFLite model to {output_path}")
-    logger.info(f"Model size: {len(tflite_model) / 1024:.1f} KB")
-    
-    return output_path
-
-
-def convert_to_onnx(model: 'tf.keras.Model', output_path: str) -> str:
-    """
-    Convert Keras model to ONNX format for edge deployment.
-    
-    ONNX is preferred over TFLite due to Keras 3 compatibility issues
-    with the TFLite converter.
-    
-    This function uses a subprocess with GPU disabled to ensure no GPU-specific
-    ops (like CudnnRNNV3) are included in the exported graph. The subprocess
-    approach is required because TensorFlow's GPU devices cannot be disabled
-    after initialization.
-    
-    Args:
-        model: Trained Keras model
+        model: Trained PyTorch model
         output_path: Path for .onnx file
+        config: Model configuration (uses model.config if not provided)
         
     Returns:
         Path to saved model
     """
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required")
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is required")
     
-    import os
-    import subprocess
-    import sys
-    import tempfile
+    config = config or model.config
     
-    # Save model to temp file for subprocess to load
-    with tempfile.NamedTemporaryFile(suffix='.keras', delete=False) as f:
-        keras_temp_path = f.name
-    model.save(keras_temp_path)
+    # Move model to CPU and set to eval mode
+    model = model.cpu()
+    model.eval()
     
-    # Python script to run in subprocess with GPU disabled
-    conversion_script = f'''
-import os
-# Disable GPU BEFORE importing TensorFlow
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-os.environ["TF_METAL_DEVICE_SELECTOR"] = ""
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-import tensorflow as tf
-# Force CPU-only mode
-tf.config.set_visible_devices([], "GPU")
-
-import tf2onnx
-import onnx
-import numpy as np
-from src.ml.autopilot_model import autopilot_loss
-
-# Load model
-model = tf.keras.models.load_model(
-    "{keras_temp_path}",
-    custom_objects={{"autopilot_loss": autopilot_loss}}
-)
-
-# Convert to ONNX
-input_shape = model.input_shape
-input_signature = [tf.TensorSpec(input_shape, tf.float32, name="input")]
-onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
-
-# Save
-onnx.save(onnx_model, "{output_path}")
-print(f"Saved ONNX model to {output_path}")
-'''
+    # Create dummy input
+    dummy_input = torch.randn(1, config.sequence_length, config.feature_dim)
     
-    try:
-        # Run conversion in subprocess with clean environment
-        result = subprocess.run(
-            [sys.executable, "-c", conversion_script],
-            capture_output=True,
-            text=True,
-            cwd=os.getcwd(),
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"ONNX conversion failed: {result.stderr}")
-            raise RuntimeError(f"ONNX conversion failed: {result.stderr}")
-        
-        # Log output
-        if result.stdout:
-            for line in result.stdout.strip().split('\n'):
-                logger.info(line)
-        
-        size_kb = os.path.getsize(output_path) / 1024
-        logger.info(f"Model size: {size_kb:.1f} KB")
-        
-    finally:
-        # Clean up temp file
-        if os.path.exists(keras_temp_path):
-            os.unlink(keras_temp_path)
+    # Export to ONNX using legacy exporter for LSTM compatibility
+    # The new dynamo-based exporter has issues with LSTM + ONNX Runtime
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        input_names=['input'],
+        output_names=['output'],
+        dynamic_axes={
+            'input': {0: 'batch_size'},
+            'output': {0: 'batch_size'}
+        },
+        opset_version=14,
+        do_constant_folding=True,
+        dynamo=False,  # Use legacy exporter for better ONNX Runtime compatibility
+    )
+    
+    size_kb = os.path.getsize(output_path) / 1024
+    logger.info(f"Saved ONNX model to {output_path}")
+    logger.info(f"Model size: {size_kb:.1f} KB")
     
     return output_path
 
 
-def _convert_to_onnx_inprocess(model: 'tf.keras.Model', output_path: str) -> str:
+def save_model(model: 'AutopilotLSTM', path: str):
     """
-    In-process ONNX conversion (legacy, may include GPU ops).
+    Save PyTorch model checkpoint.
     
-    Use convert_to_onnx() instead for reliable CPU-only conversion.
+    Args:
+        model: Model to save
+        path: Path for .pt file
     """
-    if not HAS_TF:
-        raise ImportError("TensorFlow is required")
-    
-    try:
-        import tf2onnx
-        import onnx
-    except ImportError:
-        raise ImportError("tf2onnx and onnx packages are required. "
-                         "Install with: pip install tf2onnx onnx")
-    
-    import os
-    import tempfile
-    import numpy as np
-    
-    # Save original environment and disable GPU completely
-    original_cuda = os.environ.get('CUDA_VISIBLE_DEVICES')
-    os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    
-    # Also disable GPU via TensorFlow config
-    try:
-        tf.config.set_visible_devices([], 'GPU')
-    except Exception:
-        pass  # May fail if already initialized
-    
-    try:
-        # Save weights to temp file
-        with tempfile.NamedTemporaryFile(suffix='.weights.h5', delete=False) as f:
-            weights_path = f.name
-        model.save_weights(weights_path)
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is required")
         
-        # Get model config and rebuild on CPU
-        # This ensures LSTM uses CPU implementation, not CudnnRNN
-        with tf.device('/CPU:0'):
-            # Clone the model architecture
-            model_config = model.get_config()
-            cpu_model = tf.keras.Model.from_config(model_config)
-            
-            # Build the model with the correct input shape
-            input_shape = model.input_shape
-            dummy = np.zeros((1, input_shape[1], input_shape[2]), dtype=np.float32)
-            _ = cpu_model(dummy, training=False)
-            
-            # Load weights into CPU model
-            cpu_model.load_weights(weights_path)
-            
-            # Run forward pass to ensure graph is built
-            _ = cpu_model(dummy, training=False)
-            
-            # Convert CPU model to ONNX
-            input_signature = [tf.TensorSpec(input_shape, tf.float32, name='input')]
-            onnx_model, _ = tf2onnx.convert.from_keras(cpu_model, input_signature, opset=13)
-        
-        # Save ONNX model
-        onnx.save(onnx_model, output_path)
-        
-        size_kb = os.path.getsize(output_path) / 1024
-        logger.info(f"Saved ONNX model to {output_path}")
-        logger.info(f"Model size: {size_kb:.1f} KB")
-        
-        # Clean up temp file
-        os.unlink(weights_path)
-        
-    finally:
-        # Restore original CUDA setting
-        if original_cuda is not None:
-            os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda
-        elif 'CUDA_VISIBLE_DEVICES' in os.environ:
-            del os.environ['CUDA_VISIBLE_DEVICES']
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': model.config,
+    }, path)
+    logger.info(f"Saved model checkpoint to {path}")
+
+
+def load_model(path: str, device: Optional['torch.device'] = None) -> 'AutopilotLSTM':
+    """
+    Load PyTorch model from checkpoint.
     
-    return output_path
+    Args:
+        path: Path to .pt file
+        device: Device to load model to
+        
+    Returns:
+        Loaded model
+    """
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is required")
+        
+    device = device or get_device()
+    checkpoint = torch.load(path, map_location=device)
+    
+    config = checkpoint.get('config', ModelConfig())
+    model = AutopilotLSTM(config)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    
+    logger.info(f"Loaded model from {path}")
+    return model
 
 
 class AutopilotInference:
@@ -369,11 +275,10 @@ class AutopilotInference:
     
     Supports multiple model formats:
     - ONNX (.onnx) - Preferred for edge deployment (Raspberry Pi)
-    - TensorFlow Lite (.tflite) - Alternative edge format
-    - Keras (.keras, .h5) - For development/debugging
+    - PyTorch (.pt) - For development/debugging
     
-    ONNX is recommended for Pi deployment due to Keras 3 compatibility
-    issues with TFLite converter.
+    ONNX is recommended for Pi deployment for maximum compatibility
+    and performance.
     """
     
     def __init__(self, model_path: str, config: Optional[ModelConfig] = None):
@@ -381,36 +286,30 @@ class AutopilotInference:
         Initialize inference engine.
         
         Args:
-            model_path: Path to model file (.onnx, .tflite, .keras, or .h5)
+            model_path: Path to model file (.onnx or .pt)
             config: Model configuration
         """
         self.config = config or ModelConfig()
-        self._interpreter = None
-        self._keras_model = None
         self._onnx_session = None
-        self._input_details = None
-        self._output_details = None
-        self._model_type = None  # 'onnx', 'tflite', or 'keras'
+        self._torch_model = None
+        self._model_type = None  # 'onnx' or 'torch'
+        self._onnx_input_name = None
         
         self._load_model(model_path)
         
     def _load_model(self, model_path: str):
-        """Load model from file (supports .onnx, .tflite, .keras, .h5)."""
-        import os
+        """Load model from file (supports .onnx and .pt)."""
         ext = os.path.splitext(model_path)[1].lower()
         
         try:
             if ext == '.onnx':
                 self._load_onnx_model(model_path)
-            elif ext == '.tflite':
-                self._load_tflite_model(model_path)
-            elif ext in ('.keras', '.h5'):
-                self._load_keras_model(model_path)
+            elif ext == '.pt':
+                self._load_torch_model(model_path)
             else:
-                # Try ONNX first, then TFLite, then Keras
+                # Try ONNX first, then PyTorch
                 loaded = False
-                for loader in [self._load_onnx_model, self._load_tflite_model, 
-                              self._load_keras_model]:
+                for loader in [self._load_onnx_model, self._load_torch_model]:
                     try:
                         loader(model_path)
                         loaded = True
@@ -446,39 +345,16 @@ class AutopilotInference:
         logger.info(f"Input: {inp.name}, shape: {inp.shape}")
         logger.info(f"Output: {out.name}, shape: {out.shape}")
     
-    def _load_tflite_model(self, model_path: str):
-        """Load TensorFlow Lite model."""
-        if HAS_TFLITE_RUNTIME:
-            self._interpreter = tflite.Interpreter(model_path=model_path)
-        elif HAS_TF:
-            self._interpreter = tf.lite.Interpreter(model_path=model_path)
-        else:
-            raise ImportError("No TFLite runtime available")
-            
-        self._interpreter.allocate_tensors()
-        self._input_details = self._interpreter.get_input_details()
-        self._output_details = self._interpreter.get_output_details()
-        self._model_type = 'tflite'
+    def _load_torch_model(self, model_path: str):
+        """Load PyTorch model."""
+        if not HAS_TORCH:
+            raise ImportError("PyTorch is required to load .pt models")
         
-        logger.info(f"Loaded TFLite model from {model_path}")
-        logger.info(f"Input shape: {self._input_details[0]['shape']}")
-        logger.info(f"Output shape: {self._output_details[0]['shape']}")
-    
-    def _load_keras_model(self, model_path: str):
-        """Load Keras model (.keras or .h5)."""
-        if not HAS_TF:
-            raise ImportError("TensorFlow is required to load Keras models")
+        self._torch_model = load_model(model_path)
+        self._torch_model.eval()
+        self._model_type = 'torch'
         
-        # Load with custom objects for our custom loss
-        self._keras_model = tf.keras.models.load_model(
-            model_path,
-            custom_objects={'autopilot_loss': autopilot_loss}
-        )
-        self._model_type = 'keras'
-        
-        logger.info(f"Loaded Keras model from {model_path}")
-        logger.info(f"Input shape: {self._keras_model.input_shape}")
-        logger.info(f"Output shape: {self._keras_model.output_shape}")
+        logger.info(f"Loaded PyTorch model from {model_path}")
             
     def predict(self, sequence: np.ndarray) -> float:
         """
@@ -501,18 +377,13 @@ class AutopilotInference:
             if self._onnx_session is None:
                 raise RuntimeError("Model not loaded")
             output = self._onnx_session.run(None, {self._onnx_input_name: sequence})[0]
-        elif self._model_type == 'keras':
-            # Keras model inference
-            if self._keras_model is None:
+        elif self._model_type == 'torch':
+            # PyTorch inference
+            if self._torch_model is None:
                 raise RuntimeError("Model not loaded")
-            output = self._keras_model.predict(sequence, verbose=0)
-        elif self._model_type == 'tflite':
-            # TFLite inference
-            if self._interpreter is None:
-                raise RuntimeError("Model not loaded")
-            self._interpreter.set_tensor(self._input_details[0]['index'], sequence)
-            self._interpreter.invoke()
-            output = self._interpreter.get_tensor(self._output_details[0]['index'])
+            with torch.no_grad():
+                tensor = torch.from_numpy(sequence)
+                output = self._torch_model(tensor).numpy()
         else:
             raise RuntimeError(f"Unknown model type: {self._model_type}")
         
@@ -565,7 +436,9 @@ class MockAutopilotInference(AutopilotInference):
     
     def __init__(self, config: Optional[ModelConfig] = None):
         self.config = config or ModelConfig()
-        self._interpreter = "mock"
+        self._onnx_session = None
+        self._torch_model = None
+        self._model_type = 'mock'
         
     def _load_model(self, model_path: str):
         pass

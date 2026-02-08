@@ -87,19 +87,16 @@ Then open http://localhost:5000 in your browser.
 
 ## What Gets Logged
 
-### Automatic (via autolog)
+### Per-Epoch Metrics
 
-These are logged automatically by `mlflow.keras.autolog()`:
+These are logged at the end of each training epoch:
 
-- Per-epoch metrics: `loss`, `val_loss`, `mae`, `val_mae`
-- Fit parameters: `epochs`, `batch_size`
-- Model summary and architecture
-- Trained model (saved in native `.keras` format)
-- Model signature (input/output schema)
+- `loss`: Training loss (MSE)
+- `val_loss`: Validation loss (MSE)
 
-### Manual (custom logging)
+### Parameters
 
-These are logged by our custom integration:
+These are logged at the start of each run:
 
 **Training Config:**
 - `learning_rate`, `patience`, `min_delta`
@@ -120,6 +117,7 @@ These are logged by our custom integration:
 - `eval_max_error_degrees`, `eval_std_error`
 
 **Artifacts:**
+- PyTorch model (via `mlflow.pytorch.log_model`)
 - ONNX model (`autopilot.onnx`)
 - Config JSON (`autopilot_config.json`)
 - Training history (`autopilot_history.json`)

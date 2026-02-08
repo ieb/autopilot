@@ -918,3 +918,40 @@ class TrainingDataLoader:
         
         logger.info(f"Train: {len(X_train)}, Validation: {len(X_val)}")
         return X_train, y_train, X_val, y_val
+
+
+# PyTorch Dataset wrapper (optional, for custom data loading)
+try:
+    import torch
+    from torch.utils.data import Dataset
+    
+    class AutopilotDataset(Dataset):
+        """
+        PyTorch Dataset wrapper for autopilot training data.
+        
+        Converts NumPy arrays to PyTorch tensors for use with DataLoader.
+        """
+        
+        def __init__(self, X: np.ndarray, y: np.ndarray):
+            """
+            Initialize dataset.
+            
+            Args:
+                X: Input sequences of shape [n_samples, sequence_length, feature_dim]
+                y: Target labels of shape [n_samples, 1] or [n_samples]
+            """
+            self.X = torch.from_numpy(X).float()
+            self.y = torch.from_numpy(y).float()
+            if self.y.ndim == 1:
+                self.y = self.y.unsqueeze(1)
+        
+        def __len__(self) -> int:
+            return len(self.X)
+        
+        def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+            return self.X[idx], self.y[idx]
+    
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    AutopilotDataset = None
