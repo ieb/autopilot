@@ -27,6 +27,14 @@ rpi = [
     "adafruit-circuitpython-ads1x15",
     "smbus2>=0.4.0",
 ]
+
+rpi32 = [
+    # Raspberry Pi 32 bit specific dependencies (no inference only, no PyTorch)
+    "RPi.GPIO",
+    "adafruit-circuitpython-ads1x15",
+    "smbus2>=0.4.0",
+]
+
 viz = [
     "matplotlib>=3.5.0",
     "flask>=3.0.0",
