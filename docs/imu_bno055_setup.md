@@ -57,17 +57,18 @@ Navigate to: Interface Options → I2C → Enable
 ### 2. Install Dependencies
 
 ```bash
-# With uv (recommended)
-uv add smbus2
-
-# Or with pip
-pip install smbus2 numpy
+# Install rpi dependencies (includes smbus2)
+uv sync --extra rpi
 ```
 
 ### 3. Verify Connection
 
 ```bash
+# Using i2cdetect
 sudo i2cdetect -y 1
+
+# Or use the detection script
+uv run python scripts/bno055_detect.py --scan
 ```
 
 Expected output:
@@ -81,6 +82,65 @@ Expected output:
 50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 70: -- -- -- -- -- -- -- --
+```
+
+## Test Scripts
+
+Several scripts are provided for testing and debugging the BNO055:
+
+### Detect and Verify Connection
+
+```bash
+# Detect BNO055 and show chip IDs, calibration status
+uv run python scripts/bno055_detect.py
+
+# Scan I2C bus for all devices
+uv run python scripts/bno055_detect.py --scan
+
+# Use alternate address
+uv run python scripts/bno055_detect.py --address 0x29
+```
+
+### Read Orientation Data
+
+```bash
+# Continuously display heading, pitch, roll
+uv run python scripts/bno055_read.py
+
+# Show raw sensor data (accel, gyro, mag)
+uv run python scripts/bno055_read.py --raw
+
+# Output as CSV for logging
+uv run python scripts/bno055_read.py --csv > imu_log.csv
+
+# Custom display rate
+uv run python scripts/bno055_read.py --rate 50
+```
+
+### Interactive Calibration
+
+```bash
+# Run calibration with progress display
+uv run python scripts/bno055_calibrate.py
+
+# Save calibration to file when complete
+uv run python scripts/bno055_calibrate.py --save /etc/autopilot/bno055_cal.json
+
+# Set calibration timeout
+uv run python scripts/bno055_calibrate.py --timeout 120
+```
+
+### Performance Benchmarks
+
+```bash
+# Run all benchmarks (I2C, driver, stability)
+uv run python scripts/bno055_benchmark.py
+
+# Run for specific duration
+uv run python scripts/bno055_benchmark.py --duration 30
+
+# Skip stability test (requires keeping sensor still)
+uv run python scripts/bno055_benchmark.py --skip-stability
 ```
 
 ## Usage
