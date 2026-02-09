@@ -374,3 +374,97 @@ The BNO055 version adds:
 - `get_calibration_status()` - Detailed calibration info
 - `IMUData.cal_sys/gyro/accel/mag` - Per-sensor calibration status
 - `IMUData.is_calibrated` - Quick check for full calibration
+
+## Web Testing Tool
+
+A web-based visualization and calibration tool is available for testing the BNO055 directly from a browser.
+
+### Starting the Web Server
+
+On the Raspberry Pi:
+
+```bash
+# Start the IMU web server
+uv run python vis/imu/server.py --host 0.0.0.0 --port 8080
+
+# With custom I2C settings
+uv run python vis/imu/server.py --host 0.0.0.0 --port 8080 --bus 1 --address 0x28
+
+# Start without IMU for UI testing (demo mode)
+uv run python vis/imu/server.py --host 0.0.0.0 --port 8080 --no-imu
+```
+
+### Accessing the Web Interface
+
+Open Chrome (or any modern browser) and navigate to:
+
+```
+http://<pi-ip-address>:8080
+```
+
+For example: `http://192.168.1.110:8080`
+
+### Features
+
+- **3D Visualization**: Real-time 3D representation of sensor orientation
+- **Orientation Display**: Heading, pitch, and roll values
+- **Calibration Status**: Visual indicators for system, gyroscope, accelerometer, and magnetometer calibration (0-3 scale)
+- **Calibration Hints**: Instructions for completing sensor calibration
+- **Save/Load Calibration**: Persist and restore calibration data
+- **Raw Data Display**: Angular rates and acceleration values
+- **Configuration**: Change I2C bus/address and restart IMU
+
+### Calibration Procedure via Web UI
+
+1. Start the web server and open the interface
+2. Watch the calibration indicators:
+   - **Gyroscope**: Keep sensor still for a few seconds
+   - **Accelerometer**: Rotate sensor to 6 different positions (each axis up and down)
+   - **Magnetometer**: Wave sensor in a figure-8 pattern
+   - **System**: Automatically calibrates when all sensors are calibrated
+3. Once fully calibrated (all indicators at 3/3), click "Save Calibration"
+4. Calibration is automatically loaded on next IMU start
+
+### API Endpoints
+
+The web server provides REST API endpoints for integration:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/stream` | GET | SSE stream of real-time IMU data (~20Hz) |
+| `/api/status` | GET | IMU connection status and configuration |
+| `/api/calibrate/status` | GET | Detailed calibration status with hints |
+| `/api/calibrate/save` | POST | Save calibration to file |
+| `/api/calibrate/load` | POST | Load calibration (restarts IMU) |
+| `/api/config` | GET | Get current I2C configuration |
+| `/api/config` | POST | Update configuration and restart IMU |
+| `/api/restart` | POST | Restart the IMU |
+
+### SSE Data Format
+
+The `/stream` endpoint sends JSON data:
+
+```json
+{
+  "connected": true,
+  "timestamp": 1234567890.123,
+  "heading": 45.2,
+  "pitch": 3.1,
+  "roll": -2.5,
+  "yaw_rate": 0.5,
+  "pitch_rate": 0.1,
+  "roll_rate": -0.2,
+  "accel_x": 0.05,
+  "accel_y": -0.02,
+  "accel_z": 9.81,
+  "cal_sys": 3,
+  "cal_gyro": 3,
+  "cal_accel": 2,
+  "cal_mag": 3,
+  "is_calibrated": false,
+  "valid": true,
+  "age_ms": 5.2,
+  "message_count": 1234,
+  "error_count": 0
+}
+```

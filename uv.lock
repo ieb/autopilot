@@ -216,7 +216,6 @@ rpi32 = [
 ]
 viz = [
     { name = "flask" },
-    { name = "matplotlib" },
 ]
 
 [package.metadata]
@@ -226,7 +225,6 @@ requires-dist = [
     { name = "cfgrib", marker = "extra == 'experiment'", specifier = ">=0.9.10" },
     { name = "eccodes", marker = "extra == 'experiment'", specifier = ">=1.5.0" },
     { name = "flask", marker = "extra == 'viz'", specifier = ">=3.0.0" },
-    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.5.0" },
     { name = "mlflow", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "numpy", specifier = ">=1.21.0" },
     { name = "onnx", marker = "extra == 'dev'", specifier = ">=1.17.0" },

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BNO055 IMU Testing Tool</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>BNO055 IMU Testing Tool</h1>
+            <div id="connection-status" class="status disconnected">
+                <span class="indicator"></span>
+                <span class="text">Disconnected</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- 3D Visualization -->
+            <section class="visualization-panel">
+                <h2>3D Orientation</h2>
+                <div class="canvas-container">
+                    <canvas id="imu-canvas" width="400" height="400"></canvas>
+                </div>
+                <div class="orientation-values">
+                    <div class="value-group">
+                        <label>Heading</label>
+                        <span id="heading-value" class="value">---</span>
+                    </div>
+                    <div class="value-group">
+                        <label>Pitch</label>
+                        <span id="pitch-value" class="value">---</span>
+                    </div>
+                    <div class="value-group">
+                        <label>Roll</label>
+                        <span id="roll-value" class="value">---</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Calibration Panel -->
+            <section class="calibration-panel">
+                <h2>Calibration</h2>
+                <div class="calibration-status">
+                    <div class="cal-item">
+                        <label>System</label>
+                        <div class="cal-bars" id="cal-sys">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                        <span class="cal-value" id="cal-sys-value">0/3</span>
+                    </div>
+                    <div class="cal-item">
+                        <label>Gyroscope</label>
+                        <div class="cal-bars" id="cal-gyro">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                        <span class="cal-value" id="cal-gyro-value">0/3</span>
+                    </div>
+                    <div class="cal-item">
+                        <label>Accelerometer</label>
+                        <div class="cal-bars" id="cal-accel">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                        <span class="cal-value" id="cal-accel-value">0/3</span>
+                    </div>
+                    <div class="cal-item">
+                        <label>Magnetometer</label>
+                        <div class="cal-bars" id="cal-mag">
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                            <span class="bar"></span>
+                        </div>
+                        <span class="cal-value" id="cal-mag-value">0/3</span>
+                    </div>
+                </div>
+                
+                <div id="calibration-hint" class="hint">
+                    Connect to see calibration hints...
+                </div>
+                
+                <div class="calibration-actions">
+                    <button id="btn-save-cal" class="btn">Save Calibration</button>
+                    <button id="btn-load-cal" class="btn">Load Calibration</button>
+                </div>
+            </section>
+
+            <!-- Data Panel -->
+            <section class="data-panel">
+                <h2>Sensor Data</h2>
+                
+                <div class="data-section">
+                    <h3>Angular Rates (deg/s)</h3>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>Yaw Rate</label>
+                            <span id="yaw-rate-value" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Pitch Rate</label>
+                            <span id="pitch-rate-value" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Roll Rate</label>
+                            <span id="roll-rate-value" class="value">---</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="data-section">
+                    <h3>Acceleration (m/s2)</h3>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>X (Forward)</label>
+                            <span id="accel-x-value" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Y (Right)</label>
+                            <span id="accel-y-value" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Z (Down)</label>
+                            <span id="accel-z-value" class="value">---</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="data-section">
+                    <h3>Statistics</h3>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>Data Rate</label>
+                            <span id="data-rate-value" class="value">--- Hz</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Messages</label>
+                            <span id="msg-count-value" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Errors</label>
+                            <span id="error-count-value" class="value">---</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Configuration Panel -->
+            <section class="config-panel">
+                <h2>Configuration</h2>
+                <div class="config-form">
+                    <div class="form-group">
+                        <label for="i2c-bus">I2C Bus</label>
+                        <input type="number" id="i2c-bus" value="1" min="0" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="i2c-address">I2C Address</label>
+                        <select id="i2c-address">
+                            <option value="0x28">0x28 (default)</option>
+                            <option value="0x29">0x29 (alt)</option>
+                        </select>
+                    </div>
+                    <div class="config-actions">
+                        <button id="btn-apply-config" class="btn btn-primary">Apply</button>
+                        <button id="btn-restart" class="btn">Restart IMU</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <div id="status-message"></div>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
