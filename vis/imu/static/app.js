@@ -1,8 +1,7 @@
 /**
  * BNO055 IMU Testing Tool
  * 
- * Pure JavaScript application for real-time IMU visualization.
- * Uses 2D canvas with manual 3D projection for orientation display.
+ * WebGL-based 3D visualization for real-time IMU orientation display.
  */
 
 // =============================================================================
@@ -33,299 +32,510 @@ const state = {
 };
 
 let eventSource = null;
-let canvas = null;
-let ctx = null;
+let glCanvas = null;
+let gl = null;
+let compassCanvas = null;
+let compassCtx = null;
 let animationId = null;
+let shaderProgram = null;
+let cubeBuffers = null;
+
+// Camera view settings
+let cameraAzimuth = 315;  // Initial view from NW (315 degrees)
+let cameraElevation = 35; // Degrees above horizon
+
+// =============================================================================
+// WebGL Utilities
+// =============================================================================
+
+function degToRad(deg) {
+    return deg * Math.PI / 180;
+}
+
+/**
+ * Create a shader from source
+ */
+function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+    }
+    return shader;
+}
+
+/**
+ * Create shader program from vertex and fragment shaders
+ */
+function createProgram(gl, vertexShader, fragmentShader) {
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error('Program link error:', gl.getProgramInfoLog(program));
+        gl.deleteProgram(program);
+        return null;
+    }
+    return program;
+}
+
+// =============================================================================
+// Matrix Math (Column-major for WebGL)
+// =============================================================================
+
+function mat4Identity() {
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+function mat4Multiply(a, b) {
+    const result = new Float32Array(16);
+    for (let row = 0; row < 4; row++) {
+        for (let col = 0; col < 4; col++) {
+            result[col * 4 + row] = 
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    return result;
+}
+
+function mat4RotateX(angle) {
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, c, s, 0,
+        0, -s, c, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+function mat4RotateY(angle) {
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return new Float32Array([
+        c, 0, -s, 0,
+        0, 1, 0, 0,
+        s, 0, c, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+function mat4RotateZ(angle) {
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return new Float32Array([
+        c, s, 0, 0,
+        -s, c, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+function mat4Perspective(fovY, aspect, near, far) {
+    const f = 1.0 / Math.tan(fovY / 2);
+    const rangeInv = 1 / (near - far);
+    return new Float32Array([
+        f / aspect, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (near + far) * rangeInv, -1,
+        0, 0, near * far * rangeInv * 2, 0
+    ]);
+}
+
+function mat4Translate(x, y, z) {
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        x, y, z, 1
+    ]);
+}
+
+// =============================================================================
+// WebGL Initialization
+// =============================================================================
+
+const vertexShaderSource = `
+    attribute vec3 aPosition;
+    attribute vec3 aColor;
+    
+    uniform mat4 uModelMatrix;
+    uniform mat4 uViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    
+    varying vec3 vColor;
+    
+    void main() {
+        gl_Position = uProjectionMatrix * uViewMatrix * uModelMatrix * vec4(aPosition, 1.0);
+        vColor = aColor;
+    }
+`;
+
+const fragmentShaderSource = `
+    precision mediump float;
+    
+    varying vec3 vColor;
+    
+    void main() {
+        gl_FragColor = vec4(vColor, 1.0);
+    }
+`;
+
+/**
+ * Initialize WebGL context and shaders
+ */
+function initWebGL() {
+    glCanvas = document.getElementById('imu-canvas');
+    gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+    
+    if (!gl) {
+        console.error('WebGL not supported');
+        return false;
+    }
+    
+    // Create shaders
+    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+    
+    if (!vertexShader || !fragmentShader) {
+        return false;
+    }
+    
+    // Create program
+    shaderProgram = createProgram(gl, vertexShader, fragmentShader);
+    if (!shaderProgram) {
+        return false;
+    }
+    
+    // Get attribute and uniform locations
+    shaderProgram.aPosition = gl.getAttribLocation(shaderProgram, 'aPosition');
+    shaderProgram.aColor = gl.getAttribLocation(shaderProgram, 'aColor');
+    shaderProgram.uModelMatrix = gl.getUniformLocation(shaderProgram, 'uModelMatrix');
+    shaderProgram.uViewMatrix = gl.getUniformLocation(shaderProgram, 'uViewMatrix');
+    shaderProgram.uProjectionMatrix = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
+    
+    // Create cube buffers
+    cubeBuffers = createCubeBuffers();
+    
+    // Enable depth testing
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    
+    // Set clear color
+    gl.clearColor(0.1, 0.1, 0.18, 1.0);
+    
+    return true;
+}
+
+/**
+ * Create buffers for the cube geometry
+ */
+function createCubeBuffers() {
+    // Cube dimensions (representing the IMU board)
+    const w = 0.8;  // width (X - forward/back)
+    const h = 0.5;  // height (Y - left/right)
+    const d = 0.15; // depth (Z - up/down)
+    
+    // Vertices for each face (each face has 4 vertices, 6 faces = 24 vertices)
+    // Position: x, y, z
+    const positions = new Float32Array([
+        // Top face (Z+) - Blue deck
+        -w, -h,  d,   w, -h,  d,   w,  h,  d,  -w,  h,  d,
+        // Bottom face (Z-) - Dark
+        -w, -h, -d,  -w,  h, -d,   w,  h, -d,   w, -h, -d,
+        // Front face (Y-) - Bow, Red
+        -w, -h, -d,   w, -h, -d,   w, -h,  d,  -w, -h,  d,
+        // Back face (Y+) - Stern, Dark blue
+        -w,  h, -d,  -w,  h,  d,   w,  h,  d,   w,  h, -d,
+        // Right face (X+) - Starboard, Green
+         w, -h, -d,   w,  h, -d,   w,  h,  d,   w, -h,  d,
+        // Left face (X-) - Port, Red/purple
+        -w, -h, -d,  -w, -h,  d,  -w,  h,  d,  -w,  h, -d,
+    ]);
+    
+    // Colors for each vertex (RGB)
+    const colors = new Float32Array([
+        // Top - Blue deck
+        0.29, 0.56, 0.76,  0.29, 0.56, 0.76,  0.29, 0.56, 0.76,  0.29, 0.56, 0.76,
+        // Bottom - Dark
+        0.1, 0.15, 0.2,  0.1, 0.15, 0.2,  0.1, 0.15, 0.2,  0.1, 0.15, 0.2,
+        // Front (bow) - Red
+        0.76, 0.31, 0.31,  0.76, 0.31, 0.31,  0.76, 0.31, 0.31,  0.76, 0.31, 0.31,
+        // Back (stern) - Dark blue
+        0.16, 0.29, 0.42,  0.16, 0.29, 0.42,  0.16, 0.29, 0.42,  0.16, 0.29, 0.42,
+        // Right (starboard) - Green
+        0.23, 0.48, 0.35,  0.23, 0.48, 0.35,  0.23, 0.48, 0.35,  0.23, 0.48, 0.35,
+        // Left (port) - Red/purple
+        0.54, 0.23, 0.35,  0.54, 0.23, 0.35,  0.54, 0.23, 0.35,  0.54, 0.23, 0.35,
+    ]);
+    
+    // Indices for triangles (2 triangles per face, 6 faces = 12 triangles = 36 indices)
+    const indices = new Uint16Array([
+        0, 1, 2,    0, 2, 3,    // Top
+        4, 5, 6,    4, 6, 7,    // Bottom
+        8, 9, 10,   8, 10, 11,  // Front
+        12, 13, 14, 12, 14, 15, // Back
+        16, 17, 18, 16, 18, 19, // Right
+        20, 21, 22, 20, 22, 23, // Left
+    ]);
+    
+    // Create position buffer
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    
+    // Create color buffer
+    const colorBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+    
+    // Create index buffer
+    const indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    
+    return {
+        position: positionBuffer,
+        color: colorBuffer,
+        indices: indexBuffer,
+        numIndices: indices.length
+    };
+}
+
+/**
+ * Create buffers for axis lines
+ */
+function createAxisBuffers() {
+    const len = 1.2;
+    
+    // Axis line vertices: origin to tip for X, Y, Z
+    const positions = new Float32Array([
+        // X axis (forward) - Red
+        0, 0, 0,  len, 0, 0,
+        // Y axis (right) - Green  
+        0, 0, 0,  0, len, 0,
+        // Z axis (up) - Blue
+        0, 0, 0,  0, 0, len,
+    ]);
+    
+    const colors = new Float32Array([
+        // X - Red
+        1.0, 0.42, 0.42,  1.0, 0.42, 0.42,
+        // Y - Green
+        0.29, 0.87, 0.5,  0.29, 0.87, 0.5,
+        // Z - Blue
+        0.38, 0.65, 0.98,  0.38, 0.65, 0.98,
+    ]);
+    
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    
+    const colorBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+    
+    return {
+        position: positionBuffer,
+        color: colorBuffer,
+        numVertices: 6
+    };
+}
+
+let axisBuffers = null;
 
 // =============================================================================
 // 3D Rendering
 // =============================================================================
 
 /**
- * Convert degrees to radians
+ * Create a look-at view matrix
  */
-function degToRad(deg) {
-    return deg * Math.PI / 180;
+function mat4LookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, upX, upY, upZ) {
+    // Calculate forward vector (from eye to target)
+    let fx = targetX - eyeX;
+    let fy = targetY - eyeY;
+    let fz = targetZ - eyeZ;
+    
+    // Normalize forward
+    let fLen = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    fx /= fLen; fy /= fLen; fz /= fLen;
+    
+    // Calculate right vector (forward x up)
+    let rx = fy * upZ - fz * upY;
+    let ry = fz * upX - fx * upZ;
+    let rz = fx * upY - fy * upX;
+    
+    // Normalize right
+    let rLen = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    rx /= rLen; ry /= rLen; rz /= rLen;
+    
+    // Calculate true up (right x forward)
+    let ux = ry * fz - rz * fy;
+    let uy = rz * fx - rx * fz;
+    let uz = rx * fy - ry * fx;
+    
+    // Build rotation matrix (transpose of orientation)
+    // Then translate by -eye position
+    return new Float32Array([
+        rx, ux, -fx, 0,
+        ry, uy, -fy, 0,
+        rz, uz, -fz, 0,
+        -(rx * eyeX + ry * eyeY + rz * eyeZ),
+        -(ux * eyeX + uy * eyeY + uz * eyeZ),
+        (fx * eyeX + fy * eyeY + fz * eyeZ),
+        1
+    ]);
 }
 
 /**
- * Multiply two 3x3 matrices
+ * Draw the 3D scene
  */
-function matMul(a, b) {
-    return [
-        [a[0][0]*b[0][0] + a[0][1]*b[1][0] + a[0][2]*b[2][0],
-         a[0][0]*b[0][1] + a[0][1]*b[1][1] + a[0][2]*b[2][1],
-         a[0][0]*b[0][2] + a[0][1]*b[1][2] + a[0][2]*b[2][2]],
-        [a[1][0]*b[0][0] + a[1][1]*b[1][0] + a[1][2]*b[2][0],
-         a[1][0]*b[0][1] + a[1][1]*b[1][1] + a[1][2]*b[2][1],
-         a[1][0]*b[0][2] + a[1][1]*b[1][2] + a[1][2]*b[2][2]],
-        [a[2][0]*b[0][0] + a[2][1]*b[1][0] + a[2][2]*b[2][0],
-         a[2][0]*b[0][1] + a[2][1]*b[1][1] + a[2][2]*b[2][1],
-         a[2][0]*b[0][2] + a[2][1]*b[1][2] + a[2][2]*b[2][2]]
-    ];
+function drawScene() {
+    if (!gl || !shaderProgram) return;
+    
+    // Set viewport
+    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    
+    // Clear
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    
+    // Use shader program
+    gl.useProgram(shaderProgram);
+    
+    // Create projection matrix (perspective)
+    const aspect = glCanvas.width / glCanvas.height;
+    const projectionMatrix = mat4Perspective(degToRad(45), aspect, 0.1, 100.0);
+    
+    // Create view matrix using proper look-at
+    // Camera orbits around origin at given azimuth and elevation
+    const distance = 3.0;
+    const azimuthRad = degToRad(cameraAzimuth);
+    const elevationRad = degToRad(cameraElevation);
+    
+    // Camera position in spherical coordinates (Y is forward, Z is up)
+    const camX = distance * Math.cos(elevationRad) * Math.sin(azimuthRad);
+    const camY = distance * Math.cos(elevationRad) * Math.cos(azimuthRad);
+    const camZ = distance * Math.sin(elevationRad);
+    
+    // Look at origin, Z is up
+    const viewMatrix = mat4LookAt(camX, camY, camZ, 0, 0, 0, 0, 0, 1);
+    
+    // Create model matrix from IMU orientation
+    // BNO055 uses: Heading (yaw around Z), Pitch (around X), Roll (around Y)
+    let modelMatrix = mat4Identity();
+    
+    // The cube geometry has bow at -Y, but we want heading 0 to point +Y (North)
+    // So we need a 180° base rotation, then apply heading
+    // Combined: rotate by (180 - heading) degrees
+    // Heading increases CW when viewed from above, RotateZ positive is CCW,
+    // so we negate to get CW rotation
+    modelMatrix = mat4Multiply(mat4RotateZ(degToRad(180 - state.heading)), modelMatrix);
+    // BNO055: Roll is around fore-aft axis (Y), Pitch is around lateral axis (X)
+    // Swapped to match BNO055 convention, roll sign inverted
+    modelMatrix = mat4Multiply(mat4RotateX(degToRad(state.roll)), modelMatrix);
+    modelMatrix = mat4Multiply(mat4RotateY(degToRad(state.pitch)), modelMatrix);
+    
+    // Set uniforms
+    gl.uniformMatrix4fv(shaderProgram.uProjectionMatrix, false, projectionMatrix);
+    gl.uniformMatrix4fv(shaderProgram.uViewMatrix, false, viewMatrix);
+    gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
+    
+    // Draw cube
+    drawCube(modelMatrix);
+    
+    // Draw axes
+    drawAxes(modelMatrix);
 }
 
 /**
- * Apply matrix to vector
+ * Draw the cube
  */
-function matVec(m, v) {
-    return [
-        m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
-        m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
-        m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2]
-    ];
+function drawCube(modelMatrix) {
+    gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
+    
+    // Bind position buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, cubeBuffers.position);
+    gl.enableVertexAttribArray(shaderProgram.aPosition);
+    gl.vertexAttribPointer(shaderProgram.aPosition, 3, gl.FLOAT, false, 0, 0);
+    
+    // Bind color buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, cubeBuffers.color);
+    gl.enableVertexAttribArray(shaderProgram.aColor);
+    gl.vertexAttribPointer(shaderProgram.aColor, 3, gl.FLOAT, false, 0, 0);
+    
+    // Bind index buffer and draw
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeBuffers.indices);
+    gl.drawElements(gl.TRIANGLES, cubeBuffers.numIndices, gl.UNSIGNED_SHORT, 0);
 }
 
 /**
- * Create rotation matrix for Euler angles (ZYX order: heading, pitch, roll)
- * Following nautical convention:
- * - Heading (yaw): rotation around Z axis (positive = clockwise from above)
- * - Pitch: rotation around Y axis  
- * - Roll: rotation around X axis
+ * Draw axis lines
  */
-function createRotationMatrix(heading, pitch, roll) {
-    const h = degToRad(heading);  // Heading: 0=N, 90=E, 180=S, 270=W
-    const p = degToRad(-pitch);   // Negate pitch for correct visual
-    const r = degToRad(-roll);    // Negate roll for correct visual
-    
-    // Rotation around Z (heading/yaw)
-    const rz = [
-        [Math.cos(h), -Math.sin(h), 0],
-        [Math.sin(h),  Math.cos(h), 0],
-        [0,            0,           1]
-    ];
-    
-    // Rotation around Y (pitch)
-    const ry = [
-        [ Math.cos(p), 0, Math.sin(p)],
-        [ 0,           1, 0          ],
-        [-Math.sin(p), 0, Math.cos(p)]
-    ];
-    
-    // Rotation around X (roll)
-    const rx = [
-        [1, 0,            0           ],
-        [0, Math.cos(r), -Math.sin(r)],
-        [0, Math.sin(r),  Math.cos(r)]
-    ];
-    
-    // Combined: R = Rz * Ry * Rx
-    return matMul(matMul(rz, ry), rx);
-}
-
-/**
- * Create camera view matrix for fixed viewing angle
- * Camera positioned North-West looking at the board from above
- * 
- * World coordinates (BNO055): X=forward, Y=right, Z=up
- * Screen coordinates: X=right, Y=up
- * 
- * Camera is positioned at NW (azimuth -45° from North) and 30° above horizon
- */
-function createCameraMatrix() {
-    // Azimuth: -45 degrees (NW position, looking toward SE)
-    const azimuth = degToRad(-45);
-    
-    // Elevation: 30 degrees above horizon (looking slightly down)
-    const elevation = degToRad(30);
-    
-    // Step 1: Rotate around Z axis for azimuth (horizontal rotation)
-    const cosA = Math.cos(azimuth);
-    const sinA = Math.sin(azimuth);
-    const rz = [
-        [cosA, -sinA, 0],
-        [sinA,  cosA, 0],
-        [0,     0,    1]
-    ];
-    
-    // Step 2: Rotate around the NEW X axis for elevation (tilt view down)
-    const cosE = Math.cos(elevation);
-    const sinE = Math.sin(elevation);
-    const rx = [
-        [1, 0,     0    ],
-        [0, cosE, -sinE],
-        [0, sinE,  cosE]
-    ];
-    
-    // Step 3: Transform from world coords (Z-up) to screen coords (Y-up)
-    // This swaps Y and Z so that world-Z appears as screen-Y (vertical)
-    const coordTransform = [
-        [1, 0, 0],
-        [0, 0, 1],
-        [0, -1, 0]
-    ];
-    
-    // Combined: world rotation, then elevation, then coord transform
-    return matMul(coordTransform, matMul(rx, rz));
-}
-
-// Pre-compute camera matrix (static view angle)
-let cameraMatrix = null;
-
-/**
- * Project 3D point to 2D screen coordinates
- */
-function project(point, rotMatrix, scale, offsetX, offsetY) {
-    // Apply rotation
-    const rotated = matVec(rotMatrix, point);
-    
-    // Simple perspective projection
-    // Camera is positioned further back for a better view
-    const fov = 300;
-    const cameraDistance = 200;  // Distance from origin to camera
-    const z = rotated[2] + cameraDistance;
-    const factor = fov / z;
-    
-    return {
-        x: offsetX + rotated[0] * factor * scale,
-        y: offsetY - rotated[1] * factor * scale,  // Flip Y for screen coords
-        z: rotated[2]
-    };
-}
-
-/**
- * Draw the 3D sensor visualization
- */
-function draw3D() {
-    if (!ctx || !canvas) return;
-    
-    const width = canvas.width;
-    const height = canvas.height;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const scale = 2.5;  // Scale up to compensate for zoomed out camera
-    
-    // Clear canvas
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, width, height);
-    
-    // Initialize camera matrix if needed
-    if (!cameraMatrix) {
-        cameraMatrix = createCameraMatrix();
+function drawAxes(modelMatrix) {
+    if (!axisBuffers) {
+        axisBuffers = createAxisBuffers();
     }
     
-    // Create rotation matrix from current orientation
-    const imuRotation = createRotationMatrix(state.heading, state.pitch, state.roll);
+    gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
     
-    // Apply camera view transformation after IMU rotation
-    const rotMatrix = matMul(cameraMatrix, imuRotation);
+    // Bind position buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, axisBuffers.position);
+    gl.enableVertexAttribArray(shaderProgram.aPosition);
+    gl.vertexAttribPointer(shaderProgram.aPosition, 3, gl.FLOAT, false, 0, 0);
     
-    // Define box vertices (representing the sensor)
-    // Dimensions: 80x50x20 (length x width x height)
-    const hw = 40, hd = 25, hh = 10;  // half-widths
-    const vertices = [
-        [-hw, -hd, -hh], [hw, -hd, -hh], [hw, hd, -hh], [-hw, hd, -hh],  // bottom
-        [-hw, -hd,  hh], [hw, -hd,  hh], [hw, hd,  hh], [-hw, hd,  hh]   // top
-    ];
+    // Bind color buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, axisBuffers.color);
+    gl.enableVertexAttribArray(shaderProgram.aColor);
+    gl.vertexAttribPointer(shaderProgram.aColor, 3, gl.FLOAT, false, 0, 0);
     
-    // Define edges (pairs of vertex indices)
-    const edges = [
-        [0,1], [1,2], [2,3], [3,0],  // bottom
-        [4,5], [5,6], [6,7], [7,4],  // top
-        [0,4], [1,5], [2,6], [3,7]   // sides
-    ];
-    
-    // Define faces for depth sorting (vertex indices, color)
-    const faces = [
-        { verts: [0,1,2,3], color: '#2a4a7a', label: 'Bottom' },  // bottom
-        { verts: [4,5,6,7], color: '#3a6a9a', label: 'Top' },     // top
-        { verts: [0,1,5,4], color: '#4a5a8a', label: 'Front' },   // front (bow)
-        { verts: [2,3,7,6], color: '#3a4a7a', label: 'Back' },    // back (stern)
-        { verts: [1,2,6,5], color: '#4a6a8a', label: 'Right' },   // right (starboard)
-        { verts: [0,3,7,4], color: '#3a5a7a', label: 'Left' }     // left (port)
-    ];
-    
-    // Project all vertices
-    const projected = vertices.map(v => project(v, rotMatrix, scale, centerX, centerY));
-    
-    // Calculate face depths and sort back-to-front
-    const facesWithDepth = faces.map(face => {
-        const avgZ = face.verts.reduce((sum, vi) => sum + projected[vi].z, 0) / face.verts.length;
-        return { ...face, avgZ };
-    });
-    facesWithDepth.sort((a, b) => a.avgZ - b.avgZ);
-    
-    // Draw faces
-    facesWithDepth.forEach(face => {
-        ctx.beginPath();
-        const first = projected[face.verts[0]];
-        ctx.moveTo(first.x, first.y);
-        for (let i = 1; i < face.verts.length; i++) {
-            const p = projected[face.verts[i]];
-            ctx.lineTo(p.x, p.y);
-        }
-        ctx.closePath();
-        ctx.fillStyle = face.color;
-        ctx.fill();
-        ctx.strokeStyle = '#5a7aaa';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-    });
-    
-    // Draw front indicator (arrow on bow)
-    const bowCenter = [0, -hd - 15, 0];
-    const bowLeft = [-8, -hd - 5, 0];
-    const bowRight = [8, -hd - 5, 0];
-    const bowP = project(bowCenter, rotMatrix, scale, centerX, centerY);
-    const bowL = project(bowLeft, rotMatrix, scale, centerX, centerY);
-    const bowR = project(bowRight, rotMatrix, scale, centerX, centerY);
-    
-    ctx.beginPath();
-    ctx.moveTo(bowP.x, bowP.y);
-    ctx.lineTo(bowL.x, bowL.y);
-    ctx.lineTo(bowR.x, bowR.y);
-    ctx.closePath();
-    ctx.fillStyle = '#e94560';
-    ctx.fill();
-    
-    // Draw axis indicators
-    const axisLength = 60;
-    const axisOrigin = [0, 0, 0];
-    const axes = [
-        { dir: [axisLength, 0, 0], color: '#ff6b6b', label: 'X' },  // X - Red (forward)
-        { dir: [0, axisLength, 0], color: '#4ade80', label: 'Y' },  // Y - Green (right)
-        { dir: [0, 0, axisLength], color: '#60a5fa', label: 'Z' }   // Z - Blue (up)
-    ];
-    
-    const originP = project(axisOrigin, rotMatrix, scale, centerX, centerY);
-    
-    axes.forEach(axis => {
-        const endPoint = [axis.dir[0], axis.dir[1], axis.dir[2]];
-        const endP = project(endPoint, rotMatrix, scale, centerX, centerY);
-        
-        ctx.beginPath();
-        ctx.moveTo(originP.x, originP.y);
-        ctx.lineTo(endP.x, endP.y);
-        ctx.strokeStyle = axis.color;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        
-        // Axis label
-        ctx.fillStyle = axis.color;
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillText(axis.label, endP.x + 5, endP.y - 5);
-    });
-    
-    // Draw compass rose in corner
-    drawCompassRose(50, height - 50, 35);
+    // Draw lines
+    gl.drawArrays(gl.LINES, 0, axisBuffers.numVertices);
 }
 
-/**
- * Draw a compass rose showing current heading
- */
-function drawCompassRose(cx, cy, radius) {
-    const headingRad = degToRad(state.heading);
+// =============================================================================
+// Compass (2D Canvas)
+// =============================================================================
+
+function initCompass() {
+    compassCanvas = document.getElementById('compass-canvas');
+    compassCtx = compassCanvas.getContext('2d');
+}
+
+function drawCompass() {
+    if (!compassCtx) return;
+    
+    const cx = compassCanvas.width / 2;
+    const cy = compassCanvas.height / 2;
+    const radius = Math.min(cx, cy) - 5;
+    
+    // Clear
+    compassCtx.clearRect(0, 0, compassCanvas.width, compassCanvas.height);
     
     // Background circle
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fill();
-    ctx.strokeStyle = '#5a7aaa';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    compassCtx.beginPath();
+    compassCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+    compassCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    compassCtx.fill();
+    compassCtx.strokeStyle = '#5a7aaa';
+    compassCtx.lineWidth = 1;
+    compassCtx.stroke();
     
-    // Cardinal directions (fixed)
+    // Cardinal directions (rotated with view)
     const dirs = [
         { label: 'N', angle: 0 },
         { label: 'E', angle: 90 },
@@ -333,39 +543,48 @@ function drawCompassRose(cx, cy, radius) {
         { label: 'W', angle: 270 }
     ];
     
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    compassCtx.font = '10px sans-serif';
+    compassCtx.textAlign = 'center';
+    compassCtx.textBaseline = 'middle';
     
     dirs.forEach(d => {
-        const a = degToRad(d.angle - 90);
-        const x = cx + Math.cos(a) * (radius - 8);
-        const y = cy + Math.sin(a) * (radius - 8);
-        ctx.fillStyle = d.label === 'N' ? '#e94560' : '#888';
-        ctx.fillText(d.label, x, y);
+        // Position cardinal labels using polar coordinates
+        // In canvas: cos/sin give (right, down), so subtract 90° to put 0° at top
+        const a = degToRad(d.angle - cameraAzimuth - 90);
+        const x = cx + Math.cos(a) * (radius - 10);
+        const y = cy + Math.sin(a) * (radius - 10);
+        compassCtx.fillStyle = d.label === 'N' ? '#e94560' : '#888';
+        compassCtx.fillText(d.label, x, y);
     });
     
-    // Heading indicator (rotating arrow)
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(headingRad);
+    // Heading indicator (arrow showing where IMU is pointing)
+    // Arrow is drawn pointing up, canvas rotate() rotates CW for positive angles
+    // Heading 0 (North) should point up (no rotation), Heading 90 (East) should rotate 90° CW
+    const headingRad = degToRad(state.heading - cameraAzimuth);
     
-    ctx.beginPath();
-    ctx.moveTo(0, -radius + 15);
-    ctx.lineTo(-6, 5);
-    ctx.lineTo(6, 5);
-    ctx.closePath();
-    ctx.fillStyle = '#e94560';
-    ctx.fill();
+    compassCtx.save();
+    compassCtx.translate(cx, cy);
+    compassCtx.rotate(headingRad);
     
-    ctx.restore();
+    // Draw arrow
+    compassCtx.beginPath();
+    compassCtx.moveTo(0, -radius + 18);
+    compassCtx.lineTo(-6, 5);
+    compassCtx.lineTo(6, 5);
+    compassCtx.closePath();
+    compassCtx.fillStyle = '#e94560';
+    compassCtx.fill();
+    
+    compassCtx.restore();
 }
 
-/**
- * Animation loop
- */
+// =============================================================================
+// Animation Loop
+// =============================================================================
+
 function animate() {
-    draw3D();
+    drawScene();
+    drawCompass();
     animationId = requestAnimationFrame(animate);
 }
 
@@ -373,9 +592,6 @@ function animate() {
 // SSE Client
 // =============================================================================
 
-/**
- * Connect to SSE stream
- */
 function connectSSE() {
     if (eventSource) {
         eventSource.close();
@@ -401,7 +617,6 @@ function connectSSE() {
         console.error('SSE error:', error);
         updateConnectionStatus(false);
         
-        // Attempt reconnect after delay
         setTimeout(() => {
             if (eventSource.readyState === EventSource.CLOSED) {
                 connectSSE();
@@ -410,9 +625,6 @@ function connectSSE() {
     };
 }
 
-/**
- * Handle incoming IMU data
- */
 function handleIMUData(data) {
     if (!data.connected) {
         updateConnectionStatus(false, data.error);
@@ -458,9 +670,6 @@ function handleIMUData(data) {
 // UI Updates
 // =============================================================================
 
-/**
- * Update connection status indicator
- */
 function updateConnectionStatus(connected, error = null) {
     state.connected = connected;
     const statusEl = document.getElementById('connection-status');
@@ -477,18 +686,12 @@ function updateConnectionStatus(connected, error = null) {
     }
 }
 
-/**
- * Update orientation value displays
- */
 function updateOrientationDisplay() {
     document.getElementById('heading-value').textContent = state.heading.toFixed(1) + '\u00B0';
     document.getElementById('pitch-value').textContent = state.pitch.toFixed(1) + '\u00B0';
     document.getElementById('roll-value').textContent = state.roll.toFixed(1) + '\u00B0';
 }
 
-/**
- * Update calibration status display
- */
 function updateCalibrationDisplay() {
     updateCalBars('cal-sys', state.calSys);
     updateCalBars('cal-gyro', state.calGyro);
@@ -500,7 +703,6 @@ function updateCalibrationDisplay() {
     document.getElementById('cal-accel-value').textContent = state.calAccel + '/3';
     document.getElementById('cal-mag-value').textContent = state.calMag + '/3';
     
-    // Update hint
     const hintEl = document.getElementById('calibration-hint');
     if (state.isCalibrated) {
         hintEl.textContent = 'Fully calibrated! You can save the calibration data.';
@@ -513,17 +715,11 @@ function updateCalibrationDisplay() {
     }
 }
 
-/**
- * Update calibration bar display
- */
 function updateCalBars(id, level) {
     const container = document.getElementById(id);
     container.className = 'cal-bars level-' + level;
 }
 
-/**
- * Update sensor data display
- */
 function updateDataDisplay() {
     document.getElementById('yaw-rate-value').textContent = state.yawRate.toFixed(2);
     document.getElementById('pitch-rate-value').textContent = state.pitchRate.toFixed(2);
@@ -538,15 +734,11 @@ function updateDataDisplay() {
     document.getElementById('error-count-value').textContent = state.errorCount;
 }
 
-/**
- * Show status message in footer
- */
 function showStatus(message, type = 'info') {
     const el = document.getElementById('status-message');
     el.textContent = message;
     el.className = type;
     
-    // Clear after delay
     setTimeout(() => {
         if (el.textContent === message) {
             el.textContent = '';
@@ -559,9 +751,6 @@ function showStatus(message, type = 'info') {
 // API Calls
 // =============================================================================
 
-/**
- * Save calibration to file
- */
 async function saveCalibration() {
     try {
         const response = await fetch('/api/calibrate/save', { method: 'POST' });
@@ -577,9 +766,6 @@ async function saveCalibration() {
     }
 }
 
-/**
- * Load calibration from file
- */
 async function loadCalibration() {
     try {
         showStatus('Loading calibration (restarting IMU)...');
@@ -596,9 +782,6 @@ async function loadCalibration() {
     }
 }
 
-/**
- * Apply new configuration
- */
 async function applyConfig() {
     const bus = parseInt(document.getElementById('i2c-bus').value);
     const address = document.getElementById('i2c-address').value;
@@ -622,9 +805,6 @@ async function applyConfig() {
     }
 }
 
-/**
- * Restart IMU
- */
 async function restartIMU() {
     try {
         showStatus('Restarting IMU...');
@@ -641,23 +821,45 @@ async function restartIMU() {
     }
 }
 
+async function loadConfig() {
+    try {
+        const response = await fetch('/api/config');
+        const data = await response.json();
+        
+        document.getElementById('i2c-bus').value = data.i2c_bus;
+        
+        const addressSelect = document.getElementById('i2c-address');
+        const address = data.i2c_address;
+        for (let option of addressSelect.options) {
+            if (option.value === address) {
+                option.selected = true;
+                break;
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load config:', e);
+    }
+}
+
+function azimuthToCardinal(deg) {
+    const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'N'];
+    const index = Math.round(deg / 45) % 8;
+    return directions[index];
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================
 
 function init() {
-    // Get canvas
-    canvas = document.getElementById('imu-canvas');
-    ctx = canvas.getContext('2d');
+    // Initialize WebGL
+    if (!initWebGL()) {
+        console.error('Failed to initialize WebGL');
+        return;
+    }
     
-    // Handle high DPI displays
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-    canvas.style.width = rect.width + 'px';
-    canvas.style.height = rect.height + 'px';
+    // Initialize compass
+    initCompass();
     
     // Start animation loop
     state.lastUpdate = Date.now();
@@ -672,33 +874,21 @@ function init() {
     document.getElementById('btn-apply-config').addEventListener('click', applyConfig);
     document.getElementById('btn-restart').addEventListener('click', restartIMU);
     
+    // View rotation slider
+    const azimuthSlider = document.getElementById('view-azimuth');
+    const azimuthValue = document.getElementById('view-azimuth-value');
+    
+    azimuthSlider.addEventListener('input', (e) => {
+        cameraAzimuth = parseInt(e.target.value);
+        azimuthValue.textContent = azimuthToCardinal(cameraAzimuth);
+    });
+    
+    // Initialize azimuth display
+    azimuthValue.textContent = azimuthToCardinal(cameraAzimuth);
+    azimuthSlider.value = cameraAzimuth;
+    
     // Load current config
     loadConfig();
 }
 
-/**
- * Load current configuration
- */
-async function loadConfig() {
-    try {
-        const response = await fetch('/api/config');
-        const data = await response.json();
-        
-        document.getElementById('i2c-bus').value = data.i2c_bus;
-        
-        // Set address dropdown
-        const addressSelect = document.getElementById('i2c-address');
-        const address = data.i2c_address;
-        for (let option of addressSelect.options) {
-            if (option.value === address) {
-                option.selected = true;
-                break;
-            }
-        }
-    } catch (e) {
-        console.error('Failed to load config:', e);
-    }
-}
-
-// Start when DOM is ready
 document.addEventListener('DOMContentLoaded', init);

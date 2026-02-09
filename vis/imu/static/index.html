@@ -22,6 +22,12 @@
                 <h2>3D Orientation</h2>
                 <div class="canvas-container">
                     <canvas id="imu-canvas" width="400" height="400"></canvas>
+                    <canvas id="compass-canvas" width="80" height="80"></canvas>
+                </div>
+                <div class="view-control">
+                    <label for="view-azimuth">View Rotation:</label>
+                    <input type="range" id="view-azimuth" min="0" max="360" value="315">
+                    <span id="view-azimuth-value">NW</span>
                 </div>
                 <div class="orientation-values">
                     <div class="value-group">
