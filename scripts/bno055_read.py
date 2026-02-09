@@ -39,6 +39,8 @@ if not HAS_SMBUS:
 
 # Global flag for clean shutdown
 running = True
+start_time = 0
+sample_count = 0
 
 
 def signal_handler(sig, frame):
@@ -109,8 +111,12 @@ def main():
         print()
         print("=" * 70)
     
+    global start_time, sample_count
+    
     update_interval = 1.0 / args.rate
     last_update = 0
+    start_time = time.time()
+    sample_count = 0
     
     while running:
         now = time.time()
@@ -123,6 +129,8 @@ def main():
             if data is None:
                 print("Waiting for data...")
                 continue
+            
+            sample_count += 1
             
             if args.csv:
                 # CSV output
@@ -169,8 +177,10 @@ def main():
                 # Data quality
                 age_ms = (time.time() - data.timestamp) * 1000
                 quality = "✓ Fresh" if age_ms < 50 else f"⚠ Stale ({age_ms:.0f}ms)"
+                runtime = time.time() - start_time
+                rate = sample_count / runtime if runtime > 0 else 0
                 lines.append("")
-                lines.append(f"Data: {quality}  |  Rate: {imu.stats.update_rate_hz:.1f} Hz")
+                lines.append(f"Data: {quality}  |  Rate: {rate:.1f} Hz")
                 
                 # Clear screen and print (move cursor up)
                 num_lines = len(lines) + 2
@@ -187,11 +197,15 @@ def main():
     print("\nIMU stopped.")
     
     # Print stats
+    runtime = time.time() - start_time
+    avg_rate = sample_count / runtime if runtime > 0 else 0
     stats = imu.stats
     print(f"\nSession Statistics:")
-    print(f"  Runtime: {stats.runtime_s:.1f}s")
-    print(f"  Samples: {stats.sample_count}")
-    print(f"  Avg Rate: {stats.update_rate_hz:.1f} Hz")
+    print(f"  Runtime: {runtime:.1f}s")
+    print(f"  Samples: {sample_count}")
+    print(f"  Avg Rate: {avg_rate:.1f} Hz")
+    print(f"  Messages: {stats['message_count']}")
+    print(f"  Errors: {stats['error_count']}")
 
 
 if __name__ == "__main__":

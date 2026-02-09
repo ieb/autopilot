@@ -174,8 +174,8 @@ def benchmark_imu_driver(config: IMUConfigBNO055, duration: float = 10.0):
     # Driver stats
     stats = imu.stats
     print(f"\nDriver statistics:")
-    print(f"  Update Rate: {stats.update_rate_hz:.1f} Hz")
-    print(f"  Total Samples: {stats.sample_count}")
+    print(f"  Messages: {stats['message_count']}")
+    print(f"  Errors: {stats['error_count']}")
 
 
 def benchmark_orientation_stability(config: IMUConfigBNO055, duration: float = 10.0):
