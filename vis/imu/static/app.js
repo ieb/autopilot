@@ -753,33 +753,79 @@ function showStatus(message, type = 'info') {
 
 async function saveCalibration() {
     try {
-        const response = await fetch('/api/calibrate/save', { method: 'POST' });
-        const data = await response.json();
+        showStatus('Downloading calibration data...');
+        const response = await fetch('/api/calibrate/save', { method: 'GET' });
         
-        if (data.success) {
-            showStatus('Calibration saved successfully', 'success');
-        } else {
-            showStatus('Failed to save: ' + data.error, 'error');
+        if (!response.ok) {
+            const data = await response.json();
+            showStatus('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+            return;
         }
+        
+        // Get the JSON data and trigger download
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'bno055_calibration.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        
+        showStatus('Calibration file downloaded', 'success');
     } catch (e) {
         showStatus('Error saving calibration: ' + e.message, 'error');
     }
 }
 
-async function loadCalibration() {
-    try {
-        showStatus('Loading calibration (restarting IMU)...');
-        const response = await fetch('/api/calibrate/load', { method: 'POST' });
-        const data = await response.json();
+function loadCalibration() {
+    // Create a hidden file input and trigger it
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
         
-        if (data.success) {
-            showStatus('Calibration loaded successfully', 'success');
-        } else {
-            showStatus('Failed to load: ' + data.error, 'error');
+        try {
+            showStatus('Reading calibration file...');
+            const text = await file.text();
+            const calData = JSON.parse(text);
+            
+            // Validate basic structure
+            if (!calData.calibration_bytes) {
+                showStatus('Invalid calibration file format', 'error');
+                return;
+            }
+            
+            showStatus('Applying calibration to sensor...');
+            const response = await fetch('/api/calibrate/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(calData)
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                const savedAt = calData.saved_at ? 
+                    ` (saved: ${new Date(calData.saved_at).toLocaleString()})` : '';
+                showStatus('Calibration applied successfully' + savedAt, 'success');
+            } else {
+                showStatus('Failed to apply: ' + data.error, 'error');
+            }
+        } catch (e) {
+            if (e instanceof SyntaxError) {
+                showStatus('Invalid JSON file', 'error');
+            } else {
+                showStatus('Error loading calibration: ' + e.message, 'error');
+            }
         }
-    } catch (e) {
-        showStatus('Error loading calibration: ' + e.message, 'error');
-    }
+    };
+    
+    input.click();
 }
 
 async function applyConfig() {

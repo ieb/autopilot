@@ -13,10 +13,12 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -210,42 +212,95 @@ def get_calibration_status():
     })
 
 
-@app.route('/api/calibrate/save', methods=['POST'])
+@app.route('/api/calibrate/save', methods=['GET'])
 def save_calibration():
-    """Save current calibration to file."""
+    """
+    Download current calibration as JSON file.
+    
+    Returns calibration data that can be saved locally and uploaded later.
+    """
     if imu is None:
         return jsonify({"error": "IMU not initialized"}), 503
     
     try:
-        success = imu.save_calibration()
-        if success:
-            return jsonify({"success": True, "message": "Calibration saved"})
-        else:
-            return jsonify({"success": False, "error": "Failed to save calibration"}), 500
+        # Read calibration directly from sensor
+        if imu._driver is None:
+            return jsonify({"error": "IMU driver not available"}), 503
+        
+        cal_bytes = imu._driver.get_calibration()
+        cal_status = imu.get_calibration_status()
+        
+        # Create calibration data structure
+        cal_data = {
+            "calibration_bytes": base64.b64encode(cal_bytes).decode('ascii'),
+            "calibration_status": cal_status,
+            "saved_at": datetime.now().isoformat(),
+            "device": {
+                "i2c_bus": imu_config.i2c_bus,
+                "i2c_address": f"0x{imu_config.i2c_address:02X}"
+            }
+        }
+        
+        # Return as downloadable JSON file
+        response = Response(
+            json.dumps(cal_data, indent=2),
+            mimetype='application/json',
+            headers={
+                'Content-Disposition': 'attachment; filename=bno055_calibration.json'
+            }
+        )
+        return response
+        
     except Exception as e:
+        logger.exception("Failed to save calibration")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/calibrate/load', methods=['POST'])
 def load_calibration():
-    """Load calibration from file (requires IMU restart)."""
+    """
+    Upload and apply calibration data.
+    
+    Accepts JSON calibration data (from save) and applies it to the sensor.
+    """
     if imu is None:
         return jsonify({"error": "IMU not initialized"}), 503
     
     try:
-        # Need to restart IMU to load calibration
-        # The calibration is loaded automatically on start if file exists
-        bus = imu_config.i2c_bus
-        address = imu_config.i2c_address
+        data = request.get_json()
         
-        imu.stop()
-        success = init_imu(bus, address)
+        if not data:
+            return jsonify({"error": "No calibration data provided"}), 400
+        
+        if 'calibration_bytes' not in data:
+            return jsonify({"error": "Invalid calibration data format"}), 400
+        
+        # Decode calibration bytes
+        cal_bytes = base64.b64decode(data['calibration_bytes'])
+        
+        if len(cal_bytes) != 22:
+            return jsonify({"error": f"Invalid calibration data length: {len(cal_bytes)} (expected 22)"}), 400
+        
+        # Apply calibration to sensor
+        if imu._driver is None:
+            return jsonify({"error": "IMU driver not available"}), 503
+        
+        success = imu._driver.set_calibration(cal_bytes)
         
         if success:
-            return jsonify({"success": True, "message": "IMU restarted with saved calibration"})
+            logger.info("Calibration data applied successfully")
+            return jsonify({
+                "success": True, 
+                "message": "Calibration applied successfully",
+                "saved_at": data.get("saved_at", "unknown")
+            })
         else:
-            return jsonify({"success": False, "error": "Failed to restart IMU"}), 500
+            return jsonify({"success": False, "error": "Failed to apply calibration to sensor"}), 500
+            
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON data"}), 400
     except Exception as e:
+        logger.exception("Failed to load calibration")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
