@@ -340,7 +340,9 @@ def set_config():
         else:
             return jsonify({"success": False, "error": "Failed to initialize IMU"}), 500
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # Log full exception details server-side without exposing them to the client
+        logging.exception("Failed to set IMU configuration")
+        return jsonify({"success": False, "error": "Internal server error while configuring IMU"}), 500
 
 
 @app.route('/api/restart', methods=['POST'])
@@ -356,7 +358,9 @@ def restart_imu():
         else:
             return jsonify({"success": False, "error": "Failed to restart IMU"}), 500
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        # Log full exception details server-side without exposing them to the client
+        logging.exception("Failed to restart IMU")
+        return jsonify({"success": False, "error": "Internal server error while restarting IMU"}), 500
 
 
 # =============================================================================
