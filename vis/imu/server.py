@@ -301,7 +301,7 @@ def load_calibration():
         return jsonify({"error": "Invalid JSON data"}), 400
     except Exception as e:
         logger.exception("Failed to load calibration")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "Failed to load calibration data"}), 500
 
 
 @app.route('/api/config', methods=['GET'])
