@@ -355,8 +355,9 @@ def restart_imu():
             return jsonify({"success": True, "message": "IMU restarted"})
         else:
             return jsonify({"success": False, "error": "Failed to restart IMU"}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+    except Exception:
+        logging.exception("Error while restarting IMU")
+        return jsonify({"success": False, "error": "An internal error occurred while restarting the IMU"}), 500
 
 
 # =============================================================================
