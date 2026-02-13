@@ -253,7 +253,7 @@ def save_calibration():
         
     except Exception as e:
         logger.exception("Failed to save calibration")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": "Failed to save calibration"}), 500
 
 
 @app.route('/api/calibrate/load', methods=['POST'])
