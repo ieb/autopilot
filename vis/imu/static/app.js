@@ -38,11 +38,12 @@ let compassCanvas = null;
 let compassCtx = null;
 let animationId = null;
 let shaderProgram = null;
-let cubeBuffers = null;
+let boatBuffers = null;
+let riggingBuffers = null;
 
 // Camera view settings
 let cameraAzimuth = 315;  // Initial view from NW (315 degrees)
-let cameraElevation = 35; // Degrees above horizon
+let cameraElevation = 25; // Degrees above horizon
 
 // =============================================================================
 // WebGL Utilities
@@ -228,92 +229,27 @@ function initWebGL() {
     shaderProgram.uViewMatrix = gl.getUniformLocation(shaderProgram, 'uViewMatrix');
     shaderProgram.uProjectionMatrix = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
     
-    // Create cube buffers
-    cubeBuffers = createCubeBuffers();
+    // Create boat model buffers (from pogo1250.js)
+    if (typeof createPogo1250Buffers !== 'function') {
+        console.error('createPogo1250Buffers not found. Ensure pogo1250.js loads before app.js.');
+        return false;
+    }
+    try {
+        boatBuffers = createPogo1250Buffers(gl);
+        riggingBuffers = createRiggingBuffers(gl);
+    } catch (e) {
+        console.error('Failed to create Pogo 1250 model buffers:', e);
+        throw e;
+    }
     
     // Enable depth testing
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     
     // Set clear color
-    gl.clearColor(0.1, 0.1, 0.18, 1.0);
+    gl.clearColor(0.85, 0.92, 0.98, 1.0);
     
     return true;
-}
-
-/**
- * Create buffers for the cube geometry
- */
-function createCubeBuffers() {
-    // Cube dimensions (representing the IMU board)
-    const w = 0.8;  // width (X - forward/back)
-    const h = 0.5;  // height (Y - left/right)
-    const d = 0.15; // depth (Z - up/down)
-    
-    // Vertices for each face (each face has 4 vertices, 6 faces = 24 vertices)
-    // Position: x, y, z
-    const positions = new Float32Array([
-        // Top face (Z+) - Blue deck
-        -w, -h,  d,   w, -h,  d,   w,  h,  d,  -w,  h,  d,
-        // Bottom face (Z-) - Dark
-        -w, -h, -d,  -w,  h, -d,   w,  h, -d,   w, -h, -d,
-        // Front face (Y-) - Bow, Red
-        -w, -h, -d,   w, -h, -d,   w, -h,  d,  -w, -h,  d,
-        // Back face (Y+) - Stern, Dark blue
-        -w,  h, -d,  -w,  h,  d,   w,  h,  d,   w,  h, -d,
-        // Right face (X+) - Starboard, Green
-         w, -h, -d,   w,  h, -d,   w,  h,  d,   w, -h,  d,
-        // Left face (X-) - Port, Red/purple
-        -w, -h, -d,  -w, -h,  d,  -w,  h,  d,  -w,  h, -d,
-    ]);
-    
-    // Colors for each vertex (RGB)
-    const colors = new Float32Array([
-        // Top - Blue deck
-        0.29, 0.56, 0.76,  0.29, 0.56, 0.76,  0.29, 0.56, 0.76,  0.29, 0.56, 0.76,
-        // Bottom - Dark
-        0.1, 0.15, 0.2,  0.1, 0.15, 0.2,  0.1, 0.15, 0.2,  0.1, 0.15, 0.2,
-        // Front (bow) - Red
-        0.76, 0.31, 0.31,  0.76, 0.31, 0.31,  0.76, 0.31, 0.31,  0.76, 0.31, 0.31,
-        // Back (stern) - Dark blue
-        0.16, 0.29, 0.42,  0.16, 0.29, 0.42,  0.16, 0.29, 0.42,  0.16, 0.29, 0.42,
-        // Right (starboard) - Green
-        0.23, 0.48, 0.35,  0.23, 0.48, 0.35,  0.23, 0.48, 0.35,  0.23, 0.48, 0.35,
-        // Left (port) - Red/purple
-        0.54, 0.23, 0.35,  0.54, 0.23, 0.35,  0.54, 0.23, 0.35,  0.54, 0.23, 0.35,
-    ]);
-    
-    // Indices for triangles (2 triangles per face, 6 faces = 12 triangles = 36 indices)
-    const indices = new Uint16Array([
-        0, 1, 2,    0, 2, 3,    // Top
-        4, 5, 6,    4, 6, 7,    // Bottom
-        8, 9, 10,   8, 10, 11,  // Front
-        12, 13, 14, 12, 14, 15, // Back
-        16, 17, 18, 16, 18, 19, // Right
-        20, 21, 22, 20, 22, 23, // Left
-    ]);
-    
-    // Create position buffer
-    const positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-    
-    // Create color buffer
-    const colorBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
-    
-    // Create index buffer
-    const indexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-    
-    return {
-        position: positionBuffer,
-        color: colorBuffer,
-        indices: indexBuffer,
-        numIndices: indices.length
-    };
 }
 
 /**
@@ -422,65 +358,86 @@ function drawScene() {
     const projectionMatrix = mat4Perspective(degToRad(45), aspect, 0.1, 100.0);
     
     // Create view matrix using proper look-at
-    // Camera orbits around origin at given azimuth and elevation
-    const distance = 3.0;
+    // Camera orbits around a point slightly above waterline (to frame hull + mast)
+    const distance = 5.5;
+    const lookAtZ = 0.4;  // look above waterline to centre the tall mast in view
     const azimuthRad = degToRad(cameraAzimuth);
     const elevationRad = degToRad(cameraElevation);
     
     // Camera position in spherical coordinates (Y is forward, Z is up)
     const camX = distance * Math.cos(elevationRad) * Math.sin(azimuthRad);
     const camY = distance * Math.cos(elevationRad) * Math.cos(azimuthRad);
-    const camZ = distance * Math.sin(elevationRad);
+    const camZ = lookAtZ + distance * Math.sin(elevationRad);
     
-    // Look at origin, Z is up
-    const viewMatrix = mat4LookAt(camX, camY, camZ, 0, 0, 0, 0, 0, 1);
+    // Look at point above waterline, Z is up
+    const viewMatrix = mat4LookAt(camX, camY, camZ, 0, 0, lookAtZ, 0, 0, 1);
     
     // Create model matrix from IMU orientation
-    // BNO055 uses: Heading (yaw around Z), Pitch (around X), Roll (around Y)
+    // Roll and pitch are applied first in the boat's LOCAL frame,
+    // then heading rotates the whole thing into world coordinates.
     let modelMatrix = mat4Identity();
     
-    // The cube geometry has bow at -Y, but we want heading 0 to point +Y (North)
-    // So we need a 180° base rotation, then apply heading
-    // Combined: rotate by (180 - heading) degrees
-    // Heading increases CW when viewed from above, RotateZ positive is CCW,
-    // so we negate to get CW rotation
-    modelMatrix = mat4Multiply(mat4RotateZ(degToRad(180 - state.heading)), modelMatrix);
-    // BNO055: Roll is around fore-aft axis (Y), Pitch is around lateral axis (X)
-    // Swapped to match BNO055 convention, roll sign inverted
-    modelMatrix = mat4Multiply(mat4RotateX(degToRad(state.roll)), modelMatrix);
-    modelMatrix = mat4Multiply(mat4RotateY(degToRad(state.pitch)), modelMatrix);
+    // 1. Pitch in local frame: around lateral axis (X). Negated because
+    //    RotateX positive tilts bow down, but BNO055 positive pitch = bow up.
+    modelMatrix = mat4Multiply(mat4RotateX(degToRad(-state.pitch)), modelMatrix);
+    // 2. Roll in local frame: around fore-aft axis (Y).
+    modelMatrix = mat4Multiply(mat4RotateY(degToRad(state.roll)), modelMatrix);
+    // 3. Heading last (world Z): CW heading → negated for CCW RotateZ.
+    modelMatrix = mat4Multiply(mat4RotateZ(degToRad(-state.heading)), modelMatrix);
     
     // Set uniforms
     gl.uniformMatrix4fv(shaderProgram.uProjectionMatrix, false, projectionMatrix);
     gl.uniformMatrix4fv(shaderProgram.uViewMatrix, false, viewMatrix);
     gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
     
-    // Draw cube
-    drawCube(modelMatrix);
+    // Draw boat hull and spars
+    drawBoat(modelMatrix);
     
-    // Draw axes
+    // Draw standing rigging
+    drawRigging(modelMatrix);
+    
+    // Draw axes (for orientation debugging)
     drawAxes(modelMatrix);
 }
 
 /**
- * Draw the cube
+ * Draw the boat hull, deck, cabin, cockpit, mast, and boom
  */
-function drawCube(modelMatrix) {
+function drawBoat(modelMatrix) {
     gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
     
     // Bind position buffer
-    gl.bindBuffer(gl.ARRAY_BUFFER, cubeBuffers.position);
+    gl.bindBuffer(gl.ARRAY_BUFFER, boatBuffers.position);
     gl.enableVertexAttribArray(shaderProgram.aPosition);
     gl.vertexAttribPointer(shaderProgram.aPosition, 3, gl.FLOAT, false, 0, 0);
     
     // Bind color buffer
-    gl.bindBuffer(gl.ARRAY_BUFFER, cubeBuffers.color);
+    gl.bindBuffer(gl.ARRAY_BUFFER, boatBuffers.color);
     gl.enableVertexAttribArray(shaderProgram.aColor);
     gl.vertexAttribPointer(shaderProgram.aColor, 3, gl.FLOAT, false, 0, 0);
     
     // Bind index buffer and draw
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeBuffers.indices);
-    gl.drawElements(gl.TRIANGLES, cubeBuffers.numIndices, gl.UNSIGNED_SHORT, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, boatBuffers.indices);
+    gl.drawElements(gl.TRIANGLES, boatBuffers.numIndices, gl.UNSIGNED_SHORT, 0);
+}
+
+/**
+ * Draw standing rigging lines (forestay, backstay, shrouds, spreaders)
+ */
+function drawRigging(modelMatrix) {
+    if (!riggingBuffers) return;
+    
+    gl.uniformMatrix4fv(shaderProgram.uModelMatrix, false, modelMatrix);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, riggingBuffers.position);
+    gl.enableVertexAttribArray(shaderProgram.aPosition);
+    gl.vertexAttribPointer(shaderProgram.aPosition, 3, gl.FLOAT, false, 0, 0);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, riggingBuffers.color);
+    gl.enableVertexAttribArray(shaderProgram.aColor);
+    gl.vertexAttribPointer(shaderProgram.aColor, 3, gl.FLOAT, false, 0, 0);
+    
+    gl.drawArrays(gl.LINES, 0, riggingBuffers.numVertices);
 }
 
 /**
@@ -932,6 +889,19 @@ function init() {
     // Initialize azimuth display
     azimuthValue.textContent = azimuthToCardinal(cameraAzimuth);
     azimuthSlider.value = cameraAzimuth;
+    
+    // View elevation slider (0° = sea level, 90° = directly above)
+    const elevationSlider = document.getElementById('view-elevation');
+    const elevationValue = document.getElementById('view-elevation-value');
+    
+    elevationSlider.addEventListener('input', (e) => {
+        cameraElevation = parseInt(e.target.value);
+        elevationValue.textContent = cameraElevation + '\u00B0';
+    });
+    
+    // Initialize elevation display
+    elevationValue.textContent = cameraElevation + '\u00B0';
+    elevationSlider.value = cameraElevation;
     
     // Load current config
     loadConfig();
