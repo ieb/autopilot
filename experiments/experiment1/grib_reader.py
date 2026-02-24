@@ -7,9 +7,11 @@ Supports bz2 compressed files and multiple resolution grids.
 """
 
 import bz2
+import contextlib
 import logging
 import math
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,9 +33,32 @@ try:
     HAS_CFGRIB = True
     # Opt into new xarray defaults to silence FutureWarning from cfgrib
     xr.set_options(use_new_combine_kwarg_defaults=True)
+    # Silence cfgrib's noisy stderr output for truncated/corrupt files
+    logging.getLogger('cfgrib').setLevel(logging.CRITICAL)
+    logging.getLogger('cfgrib.messages').setLevel(logging.CRITICAL)
 except ImportError:
     HAS_CFGRIB = False
     logger.warning("cfgrib/xarray not available. GRIB reading disabled.")
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Suppress stderr from both Python and the eccodes C library.
+
+    eccodes writes ERROR messages (e.g. "Can't create file") directly to
+    the C-level file descriptor, bypassing Python's sys.stderr.  We dup
+    the fd to /dev/null for the duration of the block.
+    """
+    stderr_fd = sys.stderr.fileno()
+    saved_fd = os.dup(stderr_fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
 
 
 @dataclass
@@ -335,11 +360,10 @@ class GribReader:
         """Load wind data from a GRIB file."""
         found_wind = False
         try:
-            # Try opening with different filter keys
-            datasets = cfgrib.open_datasets(str(filepath))
+            with _suppress_stderr():
+                datasets = cfgrib.open_datasets(str(filepath))
             
             for ds in datasets:
-                # Look for wind components
                 u_var = None
                 v_var = None
                 
@@ -480,7 +504,8 @@ class GribReader:
     def _load_wave_data(self, filepath: Path):
         """Load wave data from a GRIB file."""
         try:
-            datasets = cfgrib.open_datasets(str(filepath))
+            with _suppress_stderr():
+                datasets = cfgrib.open_datasets(str(filepath))
             
             for ds in datasets:
                 # Look for wave parameters

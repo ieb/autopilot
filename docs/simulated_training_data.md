@@ -12,7 +12,7 @@ The simulation module generates realistic sailing sensor data by modeling:
 - **Human helming** - PD control with reaction delays, noise, and fatigue
 
 ```
-Configuration → [Simulator] → JSON Log + Metadata → Training Pipeline
+Configuration → [Simulator] → Binary (.bin) or JSON Log + Metadata → Training Pipeline
 ```
 
 ## Why Simulate?
@@ -75,8 +75,8 @@ print(f'Generated {len(X):,} training records')
 │                    └─────────┬─────────┘                    │
 │                              │                               │
 │                    ┌─────────▼─────────┐                    │
-│                    │   JSON Output     │                    │
-│                    │   + Metadata      │                    │
+│                    │ Binary (.bin) or  │                    │
+│                    │ JSON + Metadata   │                    │
 │                    └───────────────────┘                    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -304,6 +304,7 @@ The scenarios module (`scenarios.py`) provides predefined sailing conditions.
 | `race_upwind` | 10-16 | AWA | Frequent | Aggressive racing upwind |
 | `race_downwind` | 12-18 | TWA | Frequent | Aggressive racing downwind |
 | `delivery` | 10-22 | Compass | None | Long-distance conservative |
+| `error_recovery` | 12-20 | Mixed | None | Large initial heading error, recovery training |
 
 ### Custom Scenarios
 
@@ -351,6 +352,67 @@ uv run python -m src.simulation.data_generator \
 | Helm skill | 0.7-1.0 | Different helm abilities |
 | Sensor noise | ±30% | Sensor quality variation |
 | Wind characteristics | Per-scenario | Condition variety |
+
+## GRIB-Driven Generation
+
+In addition to the scenario-based synthetic generation above, you can generate training data driven by real weather from GRIB files along planned routes. This produces training data grounded in actual wind and wave conditions for specific passages.
+
+### How It Works
+
+The GRIB-driven mode:
+
+1. Parses a route file (.csv or .kml) to get waypoints, timing, and steering modes
+2. Loads GRIB wind/wave data for the area and time period (or falls back to route-predicted conditions)
+3. Runs the same yacht dynamics, helm controller, and wave model as scenario-based generation
+4. Follows the route using the `Navigator`, which determines steering mode (AWA/TWA/compass/motoring) per leg
+5. Outputs `.bin` files by default (or `.jsonlog` + `.meta.json` with `--json`), compatible with `TrainingDataLoader`
+
+### Usage
+
+```bash
+# Single route with GRIB data
+uv run python -m src.simulation.data_generator \
+    --route data/experiment1/route/wr_route_1_20260222_102210.kml \
+    --gribs data/experiment1/gribs/ \
+    --output data/simulated_grib/
+
+# Multiple routes with domain randomization
+uv run python -m src.simulation.data_generator \
+    --route data/experiment1/route/wr_route_1_20260222_102210.kml \
+           data/experiment1/route/wr_route_1_20260222_101805.kml \
+    --gribs data/experiment1/gribs/ \
+    --num-runs 3 \
+    --output data/simulated_grib/
+
+# Route without GRIB (uses route-predicted wind)
+uv run python -m src.simulation.data_generator \
+    --route data/experiment1/route/wr_route_1_20260222_102210.kml \
+    --output data/simulated_grib/
+```
+
+### GRIB-Driven CLI Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--route, -R` | None | Path(s) to route file(s) (.csv or .kml). Activates GRIB mode |
+| `--gribs, -g` | None | Path to GRIB directory (falls back to route wind if omitted) |
+| `--num-runs, -n` | 1 | Runs per route (each with different domain randomization) |
+| `--output, -o` | `data/simulated` | Output directory |
+| `--json` | False | Write legacy .jsonlog output instead of binary .bin |
+| `--seed` | 42 | Random seed |
+| `--warmup` | 90.0 | Warm-up period in seconds |
+| `--no-randomize` | - | Disable domain randomization |
+
+### Differences from Scenario-Based Generation
+
+| Aspect | Scenario-Based | GRIB-Driven |
+|--------|---------------|-------------|
+| Wind source | Synthetic `WindModel` | GRIB files or route predictions |
+| Wave source | Synthetic (wind-scaled) | GRIB files or wind-estimated |
+| Route | No route, fixed position | Real planned passage |
+| Duration | Set via `--hours` | Derived from route timing |
+| Steering modes | From scenario definition | From `Navigator` per leg |
+| Position tracking | Minimal lat/lon drift | Actual route following |
 
 ## Calibration from Real Data
 
@@ -421,6 +483,7 @@ uv run python -m src.simulation.data_generator [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--output, -o` | `data/simulated` | Output directory |
+| `--json` | False | Write legacy .jsonlog output instead of binary .bin |
 | `--hours, -t` | 10.0 | Hours of data per run |
 | `--scenarios, -s` | All | Comma-separated scenario list |
 | `--num-runs, -n` | 1 | Number of separate runs |
@@ -428,6 +491,7 @@ uv run python -m src.simulation.data_generator [OPTIONS]
 | `--no-randomize` | - | Disable randomization |
 | `--calibrate-from, -c` | None | Path to real logs for calibration |
 | `--seed` | 42 | Random seed for reproducibility |
+| `--warmup` | 90.0 | Warm-up period in seconds (skip initial transient) |
 | `--verbose, -v` | False | Verbose output |
 
 ### Examples
@@ -453,14 +517,21 @@ uv run python -m src.simulation.data_generator \
 
 ## Output Format
 
-### JSON Log File
+Output is binary `.bin` by default. Use `--json` for legacy `.jsonlog` format. The `scripts/regenerate_training_data.py` script also produces `.bin` by default.
+
+### Binary Format (default)
+
+Each `.bin` file stores pre-computed feature frames: 26×float32 per frame (25 features + 1 rudder label = 104 bytes/frame) with a 16-byte header. This format is ~7× smaller on disk than JSON and ~20× more memory efficient during training. The training pipeline auto-detects `.bin` files and uses the efficient `FrameDataset` path.
+
+### JSON Log File (`--json`)
 
 Each line is a JSON record compatible with `CANLogParser`:
 
 ```json
 {"timestamp": 0.0, "heading": 245.3, "pitch": 1.2, "roll": -12.5, 
  "yaw_rate": 0.3, "awa": 42.1, "aws": 18.5, "stw": 7.2, "cog": 243.1, 
- "sog": 6.9, "rudder_angle": -3.2, "target_heading": 45.0, "mode": "wind_awa",
+ "sog": 6.9, "rudder_angle": -3.2, "target_heading": 245.0,
+ "target_awa": 42.0, "target_twa": 45.0, "mode": "wind_awa",
  "latitude": 60.0, "longitude": 22.0}
 ```
 
@@ -543,7 +614,9 @@ print(f"Sequence shape: {X.shape}")  # (N, 20, 25)
 
 3. **Validate on real data**
    ```bash
-   uv run python simulate.py --model models/autopilot.tflite --log n2klogs/raw/2018/05/candump.log
+   uv run python -m experiments.experiment1.run_experiment \
+       --route data/experiment1/route/wr_route_1_20260222_102210.kml \
+       --model models/autopilot_best.onnx --output results/validation/
    ```
 
 ### Training CLI Options
@@ -554,6 +627,15 @@ print(f"Sequence shape: {X.shape}")  # (N, 20, 25)
 | `--output, -o` | `models` | Output directory for model files |
 | `--epochs, -e` | 100 | Maximum training epochs |
 | `--max-time, -t` | None | Maximum training time in seconds (for quick testing) |
+| `--fresh, -f` | False | Start fresh, ignoring any existing checkpoint |
+| `--mlflow` | False | Enable MLflow experiment tracking |
+| `--experiment-name` | `autopilot` | MLflow experiment name |
+| `--run-name` | None | MLflow run name (optional) |
+| `--preprocess` | False | Preprocess data to .npy files and exit |
+| `--preprocessed-dir` | None | Directory with preprocessed .npy files (enables streaming) |
+| `--streaming` | False | Use memory-mapped streaming for large datasets |
+
+For large datasets, see the [streaming mode](model_training.md#large-datasets-streaming-mode) documentation.
 
 ## Limitations
 

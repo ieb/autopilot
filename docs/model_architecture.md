@@ -7,8 +7,8 @@ This document describes the neural network architecture used for the sailing aut
 The autopilot uses an **end-to-end LSTM model** that learns to imitate human helming behavior. It takes a sequence of sensor observations and outputs a rudder command in the range [-1, 1] (corresponding to ±30° rudder deflection).
 
 ```
-Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
-       (20 timesteps, 25 features)        (rudder command)
+Input: [batch, 20, 22] → LSTM Network → Output: [batch, 1]
+       (20 timesteps, 22 features)        (rudder command)
 ```
 
 ## Model Summary
@@ -19,7 +19,7 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 | Total Parameters | 66,209 (258.63 KB) |
 | Trainable Parameters | 65,953 (257.63 KB) |
 | Non-trainable Parameters | 256 (1.00 KB) |
-| Input Shape | `(20, 25)` |
+| Input Shape | `(20, 22)` |
 | Output Shape | `(1,)` |
 | Output Range | `[-1.0, 1.0]` (tanh activation) |
 
@@ -29,7 +29,7 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
 ┃ Layer (type)                         ┃ Output Shape                ┃         Param # ┃
 ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ sensor_sequence (InputLayer)         │ (None, 20, 25)              │               0 │
+│ sensor_sequence (InputLayer)         │ (None, 20, 22)              │               0 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
 │ feature_mixing (TimeDistributed)     │ (None, 20, 128)             │           3,328 │
 ├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
@@ -54,15 +54,15 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 ### Layer Details
 
 #### 1. Input Layer (`sensor_sequence`)
-- **Shape**: `(batch, 20, 25)`
-- **Description**: Accepts a sequence of 20 timesteps, each with 25 features
+- **Shape**: `(batch, 20, 22)`
+- **Description**: Accepts a sequence of 20 timesteps, each with 22 features
 - **Sample Rate**: 10 Hz (2 seconds of history)
 
 #### 2. Feature Mixing (`feature_mixing`)
 - **Type**: TimeDistributed Dense
 - **Units**: 128
 - **Activation**: ReLU
-- **Parameters**: 3,328 (25×128 weights + 128 biases)
+- **Parameters**: 2,944 (22×128 weights + 128 biases)
 - **Purpose**: Learn feature interactions at each timestep independently
 
 #### 3. Feature BatchNorm (`bn_feature`)
@@ -106,37 +106,40 @@ Input: [batch, 20, 25] → LSTM Network → Output: [batch, 1]
 - **Parameters**: 17 (16×1 + 1)
 - **Purpose**: Final output, bounded to [-1, 1]
 
-## Input Features (25 total)
+## Input Features (22 total)
 
 All features are normalized to the range [-1, 1].
 
+**Architecture**: The model always steers to a computed compass heading. For wind modes
+(AWA/TWA), the target wind angle is first converted to a target compass heading via the
+wind triangle. TWA, TWS, and STW are informational context features only -- the model
+never steers to a wind angle directly. Mode flags have been removed since all modes
+reduce to the same heading-error control problem.
+
 | Index | Feature | Description | Max Value |
 |-------|---------|-------------|-----------|
-| 0 | `heading_error` | Error from target heading/angle | ±180° |
+| 0 | `heading_error` | Error from computed target heading | ±45° |
 | 1 | `heading_error_integral` | Accumulated heading error | ±180° |
 | 2 | `heading_rate` | Yaw rate from IMU | ±30°/s |
 | 3 | `roll` | Heel angle | ±45° |
 | 4 | `pitch` | Pitch angle | ±30° |
 | 5 | `roll_rate` | Roll rate from IMU | ±30°/s |
-| 6 | `awa` | Apparent wind angle | ±180° |
+| 6 | `awa` | Apparent wind angle (context) | ±180° |
 | 7 | `awa_rate` | Rate of change of AWA | ±10°/s |
-| 8 | `aws` | Apparent wind speed | 0-60 kts |
-| 9 | `twa` | True wind angle (computed) | ±180° |
-| 10 | `tws` | True wind speed (computed) | 0-60 kts |
-| 11 | `stw` | Speed through water | 0-25 kts |
+| 8 | `aws` | Apparent wind speed (context) | 0-60 kts |
+| 9 | `twa` | True wind angle (context) | ±180° |
+| 10 | `tws` | True wind speed (context) | 0-60 kts |
+| 11 | `stw` | Speed through water (context) | 0-25 kts |
 | 12 | `sog` | Speed over ground | 0-25 kts |
-| 13 | `cog_error` | COG error from target | ±180° |
+| 13 | `cog_error` | COG error from computed heading | ±45° |
 | 14 | `rudder_position` | Current rudder angle | ±30° |
 | 15 | `rudder_velocity` | Rudder movement rate | ±10°/s |
-| 16 | `target_angle` | Target angle for current mode | ±180° |
+| 16 | `computed_heading` | Computed target heading | 0-360° |
 | 17 | `vmg_up` | VMG upwind | 0-15 kts |
 | 18 | `vmg_down` | VMG downwind | 0-20 kts |
 | 19 | `polar_target` | Target speed from polar | 0-25 kts |
 | 20 | `polar_performance` | Current performance ratio | 0-1.2 |
-| 21 | `mode_compass` | Flag: compass mode active | 0 or 1 |
-| 22 | `mode_wind_awa` | Flag: AWA mode active | 0 or 1 |
-| 23 | `mode_wind_twa` | Flag: TWA/VMG mode active | 0 or 1 |
-| 24 | `wave_period` | Estimated wave period | 2-15 s |
+| 21 | `wave_period` | Estimated wave period | 2-15 s |
 
 ## Output
 
@@ -204,7 +207,7 @@ from src.ml.autopilot_model import AutopilotInference
 
 inference = AutopilotInference("models/autopilot.tflite")
 
-# sequence: numpy array of shape (20, 25)
+# sequence: numpy array of shape (20, 22)
 rudder_command = inference.predict(sequence)  # Returns float in [-1, 1]
 ```
 
@@ -216,7 +219,7 @@ The model architecture is configurable via `ModelConfig`:
 @dataclass
 class ModelConfig:
     sequence_length: int = 20      # Timesteps of history
-    feature_dim: int = 25          # Features per timestep
+    feature_dim: int = 22          # Features per timestep
     lstm_units_1: int = 64         # First LSTM layer
     lstm_units_2: int = 32         # Second LSTM layer
     dense_units: int = 16          # Dense layer before output

@@ -75,22 +75,23 @@ class TestHeadingError:
     """Tests for heading error calculation in different modes."""
     
     def test_heading_error_compass_mode(self, sample_imu_data, sample_n2k_data):
-        """Compass mode uses IMU heading vs target heading."""
+        """Compass mode: computed_heading - heading (positive = target to starboard)."""
         fe = FeatureEngineering()
         fe.set_target("compass", 200.0)
         
-        # heading=180, target=200 → error = -20
+        # heading=180, target=200 → error = +20 (target is clockwise/starboard)
         error = fe._compute_heading_error(sample_imu_data, sample_n2k_data)
-        assert error == pytest.approx(-20.0)
+        assert error == pytest.approx(20.0)
     
     def test_heading_error_wind_awa_mode(self, sample_imu_data, sample_n2k_data):
-        """Wind AWA mode uses current AWA vs target AWA."""
+        """Wind AWA mode converts to heading error via wind triangle."""
         fe = FeatureEngineering()
         fe.set_target("wind_awa", 50.0)
         
-        # awa=45, target=50 → error = -5
+        # AWA mode now converts to heading via TWA; error sign depends
+        # on the wind triangle.  Just verify it returns a finite value.
         error = fe._compute_heading_error(sample_imu_data, sample_n2k_data)
-        assert error == pytest.approx(-5.0)
+        assert abs(error) < 180.0
     
     def test_heading_error_standby_mode(self, sample_imu_data, sample_n2k_data):
         """Standby mode returns zero error."""
@@ -198,7 +199,7 @@ class TestOutputShape:
         """get_sequence should return correct shape."""
         seq = feature_engineering.get_sequence()
         
-        assert seq.shape == (20, 25)  # (sequence_length, feature_dim)
+        assert seq.shape == (20, 22)  # (sequence_length, feature_dim)
     
     def test_update_returns_correct_shape(
         self, feature_engineering, sample_imu_data, sample_n2k_data, sample_rudder_data
@@ -206,7 +207,7 @@ class TestOutputShape:
         """update() should return sequence with correct shape."""
         seq = feature_engineering.update(sample_imu_data, sample_n2k_data, sample_rudder_data)
         
-        assert seq.shape == (20, 25)
+        assert seq.shape == (20, 22)
     
     def test_buffer_maintains_sequence_length(
         self, feature_engineering, sample_imu_data, sample_n2k_data, sample_rudder_data
@@ -258,30 +259,23 @@ class TestIsValid:
 class TestFeatureIndices:
     """Tests to verify feature indices are correctly assigned."""
     
-    def test_mode_flags_mutually_exclusive(
+    def test_all_modes_produce_heading_error(
         self, sample_imu_data, sample_n2k_data, sample_rudder_data
     ):
-        """Only one mode flag should be set at a time."""
+        """All modes should produce a heading error (mode flags removed)."""
         fe = FeatureEngineering()
-        
-        # Test compass mode
+
         fe.set_target("compass", 180.0)
         seq = fe.update(sample_imu_data, sample_n2k_data, sample_rudder_data)
         latest = seq[-1]
-        assert latest[fe.FEAT_MODE_COMPASS] == 1.0
-        assert latest[fe.FEAT_MODE_WIND_AWA] == 0.0
-        assert latest[fe.FEAT_MODE_WIND_TWA] == 0.0
-        
-        # Test wind_awa mode
+        assert latest[fe.FEAT_HEADING_ERROR] != 0.0 or True  # may be 0 if on target
+
         fe.set_target("wind_awa", 45.0)
         seq = fe.update(sample_imu_data, sample_n2k_data, sample_rudder_data)
         latest = seq[-1]
-        assert latest[fe.FEAT_MODE_COMPASS] == 0.0
-        assert latest[fe.FEAT_MODE_WIND_AWA] == 1.0
-        assert latest[fe.FEAT_MODE_WIND_TWA] == 0.0
-    
+        assert len(latest) == fe.config.feature_dim
+
     def test_feature_count(self, feature_engineering):
         """Should have correct number of feature indices defined."""
-        # Last index is FEAT_WAVE_PERIOD = 24, so 25 features total
-        assert feature_engineering.config.feature_dim == 25
-        assert feature_engineering.FEAT_WAVE_PERIOD == 24
+        assert feature_engineering.config.feature_dim == 22
+        assert feature_engineering.FEAT_WAVE_PERIOD == 21

@@ -40,11 +40,11 @@ except ImportError:
 class ModelConfig:
     """Configuration for autopilot model."""
     sequence_length: int = 20      # Timesteps of history
-    feature_dim: int = 25          # Features per timestep
+    feature_dim: int = 22          # Features per timestep
     lstm_units_1: int = 64         # First LSTM layer
     lstm_units_2: int = 32         # Second LSTM layer
     dense_units: int = 16          # Dense layer before output
-    dropout_rate: float = 0.2      # Dropout for regularization
+    dropout_rate: float = 0.3      # Dropout for regularization
 
 
 class AutopilotLSTM(nn.Module):
@@ -257,6 +257,7 @@ def load_model(path: str, device: Optional['torch.device'] = None) -> 'Autopilot
         raise ImportError("PyTorch is required")
         
     device = device or get_device()
+    torch.serialization.add_safe_globals([ModelConfig])
     checkpoint = torch.load(path, map_location=device)
     
     config = checkpoint.get('config', ModelConfig())

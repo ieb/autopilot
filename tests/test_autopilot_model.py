@@ -29,11 +29,11 @@ class TestModelConfig:
         config = ModelConfig()
         
         assert config.sequence_length == 20
-        assert config.feature_dim == 25
+        assert config.feature_dim == 22
         assert config.lstm_units_1 == 64
         assert config.lstm_units_2 == 32
         assert config.dense_units == 16
-        assert config.dropout_rate == 0.2
+        assert config.dropout_rate == 0.3
     
     def test_custom_config(self):
         """Custom configuration should override defaults."""
@@ -68,7 +68,7 @@ class TestBuildModel:
         
         # Create random input batch
         batch_size = 4
-        input_data = torch.randn(batch_size, 20, 25)
+        input_data = torch.randn(batch_size, 20, 22)
         
         with torch.no_grad():
             output = model(input_data)
@@ -134,7 +134,7 @@ class TestModelInference:
         
         # Create random input batch
         batch_size = 4
-        input_data = torch.randn(batch_size, 20, 25)
+        input_data = torch.randn(batch_size, 20, 22)
         
         with torch.no_grad():
             output = model(input_data)
@@ -147,7 +147,7 @@ class TestModelInference:
         model.eval()
         
         # Create input that might produce extreme output
-        input_data = torch.ones(1, 20, 25) * 10.0
+        input_data = torch.ones(1, 20, 22) * 10.0
         
         with torch.no_grad():
             output = model(input_data)
@@ -158,7 +158,7 @@ class TestModelInference:
         """Model should behave differently in train vs eval mode."""
         model = build_autopilot_model()
         
-        input_data = torch.randn(4, 20, 25)
+        input_data = torch.randn(4, 20, 22)
         
         # Training mode (dropout active)
         model.train()
@@ -188,7 +188,7 @@ class TestMockAutopilotInference:
         mock = MockAutopilotInference()
         
         # Create 2D input: [sequence_length, feature_dim]
-        input_seq = np.random.randn(20, 25).astype(np.float32)
+        input_seq = np.random.randn(20, 22).astype(np.float32)
         
         output = mock.predict(input_seq)
         
@@ -200,7 +200,7 @@ class TestMockAutopilotInference:
         mock = MockAutopilotInference()
         
         # Create 3D input: [batch, sequence_length, feature_dim]
-        input_seq = np.random.randn(1, 20, 25).astype(np.float32)
+        input_seq = np.random.randn(1, 20, 22).astype(np.float32)
         
         output = mock.predict(input_seq)
         
@@ -217,7 +217,7 @@ class TestMockAutopilotInference:
         
         # Create input with positive heading error (feature 0)
         # Positive error means target is to starboard (clockwise from heading)
-        input_seq = np.zeros((20, 25), dtype=np.float32)
+        input_seq = np.zeros((20, 22), dtype=np.float32)
         input_seq[-1, 0] = 0.5  # Positive heading error (target to starboard)
         
         output = mock.predict(input_seq)
@@ -230,7 +230,7 @@ class TestMockAutopilotInference:
         mock = MockAutopilotInference()
         
         # Create input with zero heading error
-        input_seq = np.zeros((20, 25), dtype=np.float32)
+        input_seq = np.zeros((20, 22), dtype=np.float32)
         
         output = mock.predict(input_seq)
         
@@ -241,7 +241,7 @@ class TestMockAutopilotInference:
         mock = MockAutopilotInference()
         
         # Create input with extreme heading error
-        input_seq = np.zeros((20, 25), dtype=np.float32)
+        input_seq = np.zeros((20, 22), dtype=np.float32)
         input_seq[-1, 0] = 10.0  # Very large (unnormalized) error
         
         output = mock.predict(input_seq)
@@ -254,7 +254,7 @@ class TestMockAutopilotInference:
         mock = MockAutopilotInference()
         
         assert mock.config.sequence_length == 20
-        assert mock.config.feature_dim == 25
+        assert mock.config.feature_dim == 22
     
     def test_mock_custom_config(self):
         """Mock inference should accept custom config."""
@@ -294,7 +294,7 @@ class TestONNXExport:
         
         # Load and run inference
         inference = AutopilotInference(onnx_path)
-        input_seq = np.random.randn(20, 25).astype(np.float32)
+        input_seq = np.random.randn(20, 22).astype(np.float32)
         
         output = inference.predict(input_seq)
         

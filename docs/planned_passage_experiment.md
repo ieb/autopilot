@@ -6,8 +6,8 @@ This document describes how to run the planned passage following experiment, whi
 
 The experiment simulates a yacht following a weather-routed passage plan. It uses:
 
-- **Route data**: CSV file with waypoints, timing, and predicted conditions
-- **Weather data**: GRIB files with wind and wave forecasts (optional)
+- **Route data**: CSV or KML file with waypoints, timing, and predicted conditions
+- **Weather data**: GRIB files with wind and wave forecasts (optional) avaiable from https://openskiron.org/en/openwrf
 - **Autopilot**: Either the trained ML model or a baseline PD controller
 
 The simulation tracks performance metrics including arrival time accuracy, cross-track error, polar performance, and course accuracy.
@@ -20,10 +20,7 @@ The experiment requires additional dependencies for GRIB file support:
 
 ```bash
 # Install experiment dependencies
-uv pip install cfgrib xarray eccodes
-
-# Or install the experiment optional group
-uv pip install -e ".[experiment]"
+uv sync --extra experiment
 ```
 
 **Note**: GRIB support is optional. Without it, the experiment falls back to using wind/wave predictions from the route file.
@@ -32,11 +29,11 @@ uv pip install -e ".[experiment]"
 
 The experiment requires:
 
-1. **Route CSV file** - Exported from weather routing software (e.g., Expedition, qtVlm)
+1. **Route file** - CSV (e.g. Expedition, qtVlm) or KML (SailGrib) exported from weather routing software
 2. **GRIB files** (optional) - Wind and wave forecasts covering the route area and time
 
 Example data is provided in:
-- `data/experiment1/route/wr_route_1_20260125_005338.csv`
+- `data/experiment1/route/` (CSV and KML route files)
 - `data/experiment1/gribs/`
 
 ## Running the Experiment
@@ -47,7 +44,7 @@ Run with the baseline PD controller to establish a reference:
 
 ```bash
 uv run python -m experiments.experiment1.run_experiment \
-  --route data/experiment1/route/wr_route_1_20260125_005338.csv \
+  --route data/experiment1/route/wr_route_1_20260222_102210.kml \
   --baseline \
   --output results/experiment1/
 ```
@@ -58,7 +55,7 @@ Include GRIB data for more realistic wind/wave conditions:
 
 ```bash
 uv run python -m experiments.experiment1.run_experiment \
-  --route data/experiment1/route/wr_route_1_20260125_005338.csv \
+  --route data/experiment1/route/wr_route_1_20260222_102210.kml \
   --gribs data/experiment1/gribs/ \
   --baseline \
   --output results/experiment1/
@@ -70,21 +67,22 @@ Test the trained autopilot model:
 
 ```bash
 uv run python -m experiments.experiment1.run_experiment \
-  --route data/experiment1/route/wr_route_1_20260125_005338.csv \
+  --route data/experiment1/route/wr_route_1_20260222_102210.kml \
   --gribs data/experiment1/gribs/ \
   --model models/autopilot_best.onnx \
-  --output results/experiment/
+  --output results/experiment1/
 ```
 
 ### Command Line Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--route`, `-r` | Path to route CSV file | Required |
+| `--route`, `-r` | Path to route file (.csv or .kml) | Required |
 | `--gribs`, `-g` | Path to GRIB directory | None |
-| `--model`, `-m` | Path to trained model | None |
+| `--model`, `-m` | Path to trained model (.onnx) | None |
 | `--output`, `-o` | Output directory for results | `results/experiment1` |
 | `--baseline`, `-b` | Use baseline controller | False |
+| `--mock` | Use mock autopilot (simple P control) for testing | False |
 | `--max-hours` | Maximum simulation duration | 24.0 |
 | `--dt` | Simulation time step (seconds) | 0.1 |
 | `--verbose`, `-v` | Enable verbose logging | False |
@@ -165,9 +163,13 @@ RMS heading error relative to target:
 - Lower is better
 - High values may indicate control instability or challenging conditions
 
-## Route File Format
+## Route File Formats
 
-The experiment expects a CSV file with the following columns:
+The route parser auto-detects the format from the file extension.
+
+### CSV Format
+
+CSV files (e.g. from Expedition, qtVlm) should have the following columns:
 
 ```
 Isochrone start time,From Latitude,From Longitude,To Latitude,To Longitude,
@@ -176,6 +178,10 @@ True Wind Direction,Surface Wind Angle,Distance to Finish,Is motoring,...
 ```
 
 Coordinates can be in decimal degrees or DMS format (e.g., `51°56.578'N`).
+
+### KML Format (SailGrib)
+
+KML files exported from SailGrib are supported. The parser reads waypoints from the `routing` folder and extracts navigation data from the `sg:BoatVariable` and `sg:WeatherVariable` extended data elements (COG, SOG, TWS, TWD, SWA, DTW, ismotoring, etc.).
 
 ## Steering Mode Logic
 
@@ -243,7 +249,7 @@ uv run python -m experiments.experiment1.export_track \
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-o`, `--output` | Output GPX file path | Same as input with .gpx |
-| `--route` | Route CSV to include waypoints | None |
+| `--route` | Route file (.csv or .kml) to include waypoints | None |
 | `--name` | Track name in GPX | "Simulated Passage" |
 | `--start-time` | Start time (ISO format) | Current time |
 | `--sample-interval` | Sample interval in seconds | 60 |
@@ -266,7 +272,7 @@ Alternatively, use any GPX-compatible application like:
 
 Install the experiment dependencies:
 ```bash
-uv pip install cfgrib xarray eccodes
+uv sync --extra experiment
 ```
 
 ### GRIB files not loading
@@ -282,5 +288,5 @@ uv pip install cfgrib xarray eccodes
 
 ### Model not loading
 
-- Verify the model file exists and is a valid `.keras` or `.tflite` file
+- Verify the model file exists and is a valid `.onnx` file
 - The experiment will fall back to baseline controller if model fails to load

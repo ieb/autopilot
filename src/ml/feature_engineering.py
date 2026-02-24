@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 class FeatureConfig:
     """Configuration for feature engineering."""
     sequence_length: int = 20      # Number of timesteps in sequence
-    feature_dim: int = 25          # Number of features per timestep
+    feature_dim: int = 22          # Number of features per timestep
     sample_rate_hz: float = 10.0   # Target sample rate for ML
     
     # Normalization constants
-    max_heading_error: float = 180.0
+    max_heading_error: float = 90.0
     max_heading_rate: float = 30.0   # deg/s
     max_roll: float = 45.0
     max_pitch: float = 30.0
@@ -57,7 +57,7 @@ class TargetState:
 class FeatureFrame:
     """Single frame of features at one timestep."""
     timestamp: float = 0.0
-    features: np.ndarray = field(default_factory=lambda: np.zeros(25))
+    features: np.ndarray = field(default_factory=lambda: np.zeros(22))
     valid: bool = False
 
 
@@ -91,10 +91,7 @@ class FeatureEngineering:
     FEAT_VMG_DOWN = 18
     FEAT_POLAR_TARGET = 19
     FEAT_POLAR_PERFORMANCE = 20
-    FEAT_MODE_COMPASS = 21
-    FEAT_MODE_WIND_AWA = 22
-    FEAT_MODE_WIND_TWA = 23
-    FEAT_WAVE_PERIOD = 24
+    FEAT_WAVE_PERIOD = 21
     
     def __init__(self, config: Optional[FeatureConfig] = None,
                  polar: Optional[Polar] = None):
@@ -110,6 +107,7 @@ class FeatureEngineering:
         self._last_rudder = 0.0
         self._last_rudder_time = 0.0
         self._heading_error_integral = 0.0
+        self._last_computed_heading = 0.0
         
         # Wave estimation from accelerometer
         self._accel_buffer: Deque[float] = deque(maxlen=100)  # 1 second @ 100Hz
@@ -188,14 +186,15 @@ class FeatureEngineering:
         features[self.FEAT_STW] = self._normalize(n2k.stw, self.config.max_boat_speed)
         features[self.FEAT_SOG] = self._normalize(n2k.sog, self.config.max_boat_speed)
         
-        # 14. COG error (if target is magnetic heading)
-        cog_error = self._angle_diff(n2k.cog, self.target.target_heading)
-        features[self.FEAT_COG_ERROR] = self._normalize(cog_error, 180.0)
+        # 14. COG error (relative to computed heading, not raw target)
+        computed_heading = self._compute_target_heading(
+            imu.heading, twa, n2k.aws, n2k.stw)
+        self._last_computed_heading = computed_heading
+        cog_error = self._angle_diff(n2k.cog, computed_heading)
+        features[self.FEAT_COG_ERROR] = self._normalize(cog_error, 45.0)
         
-        # 15. Rudder position
-        features[self.FEAT_RUDDER_POSITION] = self._normalize(
-            rudder.angle_deg, self.config.max_rudder
-        )
+        # 15. Rudder position (zeroed to prevent label leak in training)
+        features[self.FEAT_RUDDER_POSITION] = 0.0
         
         # 16. Rudder velocity (computed)
         if self._last_rudder_time > 0:
@@ -209,9 +208,8 @@ class FeatureEngineering:
         self._last_rudder = rudder.angle_deg
         self._last_rudder_time = now
         
-        # 17. Target angle (mode-dependent)
-        target_angle = self._get_target_angle()
-        features[self.FEAT_TARGET_ANGLE] = self._normalize(target_angle, 180.0)
+        # 17. Target angle (always the computed compass heading)
+        features[self.FEAT_TARGET_ANGLE] = computed_heading / 360.0
         
         # 18-19. VMG
         vmg_up = n2k.stw * math.cos(math.radians(abs(twa))) if n2k.stw > 0 else 0
@@ -227,12 +225,7 @@ class FeatureEngineering:
         )
         features[self.FEAT_POLAR_PERFORMANCE] = np.clip(polar_perf, 0, 1.2)
         
-        # 22-24. Mode flags
-        features[self.FEAT_MODE_COMPASS] = 1.0 if self.target.mode == "compass" else 0.0
-        features[self.FEAT_MODE_WIND_AWA] = 1.0 if self.target.mode == "wind_awa" else 0.0
-        features[self.FEAT_MODE_WIND_TWA] = 1.0 if self.target.mode in ["wind_twa", "vmg_up", "vmg_down"] else 0.0
-        
-        # 25. Wave period estimate (from accelerometer FFT)
+        # 22. Wave period estimate (from accelerometer FFT)
         self._accel_buffer.append(imu.accel_z)
         wave_period = self._estimate_wave_period()
         features[self.FEAT_WAVE_PERIOD] = self._normalize(
@@ -277,25 +270,38 @@ class FeatureEngineering:
         self._heading_error_integral = 0.0
         
     def _compute_heading_error(self, imu: IMUData, n2k: N2KData) -> float:
-        """Compute heading error based on current mode."""
-        if self.target.mode == "compass":
-            return self._angle_diff(imu.heading, self.target.target_heading)
-        elif self.target.mode == "wind_awa":
-            return self._angle_diff(n2k.awa, self.target.target_awa)
-        elif self.target.mode in ["wind_twa", "vmg_up", "vmg_down"]:
-            twa, _ = calculate_true_wind(n2k.awa, n2k.aws, n2k.stw, imu.heading)
-            return self._angle_diff(twa, self.target.target_twa)
-        return 0.0
-        
-    def _get_target_angle(self) -> float:
-        """Get target angle for current mode."""
+        """Compute heading error -- all modes reduce to compass heading.
+
+        Wind modes convert the target wind angle to a heading delta via
+        the TWA-heading relationship.  AWA targets are first converted
+        to TWA using the wind triangle.
+        """
+        twa, _ = calculate_true_wind(n2k.awa, n2k.aws, n2k.stw, imu.heading)
+        computed = self._compute_target_heading(imu.heading, twa, n2k.aws, n2k.stw)
+        return self._angle_diff(computed, imu.heading)
+
+    def _compute_target_heading(self, heading: float, twa: float,
+                                aws: float, stw: float) -> float:
+        """Derive the target compass heading for the current mode."""
         if self.target.mode == "compass":
             return self.target.target_heading
         elif self.target.mode == "wind_awa":
-            return self.target.target_awa
+            awa_rad = math.radians(self.target.target_awa)
+            stw_safe = max(stw, 0.01)
+            aws_safe = max(aws, 0.01)
+            tw_x = aws_safe * math.cos(awa_rad) - stw_safe
+            tw_y = aws_safe * math.sin(awa_rad)
+            target_twa = math.degrees(math.atan2(tw_y, tw_x))
+            twa_delta = twa - target_twa
+            return (heading + twa_delta) % 360.0
         elif self.target.mode in ["wind_twa", "vmg_up", "vmg_down"]:
-            return self.target.target_twa
-        return 0.0
+            twa_delta = twa - self.target.target_twa
+            return (heading + twa_delta) % 360.0
+        return heading
+
+    def _get_target_angle(self) -> float:
+        """Get computed target heading (always a compass heading)."""
+        return self._last_computed_heading
         
     def _angle_diff(self, a: float, b: float) -> float:
         """Compute signed angle difference (a - b), normalized to [-180, 180]."""

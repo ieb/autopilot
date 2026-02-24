@@ -63,8 +63,8 @@ Custom experiment name:
 ```bash
 uv run python -m src.training.train_imitation data/simulated \
     --mlflow \
-    --experiment-name "autopilot-v2" \
-    --run-name "increased-dropout"
+    --experiment-name "autopilot-v3" \
+    --run-name "newrun-g2"
 ```
 
 ## Viewing Results

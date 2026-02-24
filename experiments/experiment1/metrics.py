@@ -316,7 +316,8 @@ class MetricsTracker:
             time_in_motoring_sec=self._mode_times.get('motoring', 0.0),
         )
         
-    def save_results(self, output_dir: str):
+    def save_results(self, output_dir: str,
+                     extra_summary: Optional[Dict[str, Any]] = None):
         """
         Save metrics to files.
         
@@ -327,6 +328,7 @@ class MetricsTracker:
         
         Args:
             output_dir: Directory to save files to
+            extra_summary: Optional dict of extra fields to include in summary
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -335,8 +337,11 @@ class MetricsTracker:
         
         # Save summary JSON
         summary_file = output_path / 'summary.json'
+        summary_dict = asdict(summary)
+        if extra_summary:
+            summary_dict.update(extra_summary)
         with open(summary_file, 'w') as f:
-            json.dump(asdict(summary), f, indent=2)
+            json.dump(summary_dict, f, indent=2)
         logger.info(f"Saved summary to {summary_file}")
         
         # Save time series CSV

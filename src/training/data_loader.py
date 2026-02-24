@@ -18,13 +18,122 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+FEATURE_DIM = 22
+
+# Features whose sign flips when mirroring port ↔ starboard.
+MIRROR_NEGATE_FEATURES = [
+    0,   # heading_error
+    1,   # heading_error_integral
+    2,   # heading_rate
+    3,   # roll (heel flips)
+    5,   # roll_rate
+    6,   # AWA
+    7,   # AWA_rate
+    9,   # TWA
+    13,  # COG_error
+    14,  # rudder_position
+    15,  # rudder_velocity
+]
+
+
+def _angle_diff(a: float, b: float) -> float:
+    """Compute signed angle difference a - b, normalized to [-180, 180]."""
+    diff = a - b
+    while diff > 180:
+        diff -= 360
+    while diff < -180:
+        diff += 360
+    return diff
+
+
+def _compute_true_wind(awa: float, aws: float, stw: float) -> Tuple[float, float]:
+    """Compute true wind angle and speed from apparent wind and boat speed."""
+    awa_rad = np.radians(awa)
+    aw_x = aws * np.cos(awa_rad) - stw
+    aw_y = aws * np.sin(awa_rad)
+    tws = np.sqrt(aw_x**2 + aw_y**2)
+    twa = np.degrees(np.arctan2(aw_y, aw_x))
+    return twa, tws
+
+
+def compute_features(heading: float, pitch: float, roll: float,
+                     yaw_rate: float, awa: float, aws: float,
+                     stw: float, cog: float, sog: float,
+                     rudder_angle: float, target_heading: float,
+                     target_awa: float, target_twa: float,
+                     mode: str) -> np.ndarray:
+    """Compute the 22-element normalized feature vector from raw sensor values.
+
+    ARCHITECTURE: The model always steers to a computed compass heading.
+    For wind modes, the target wind angle is converted to a target TWA
+    (AWA is converted via the wind triangle first), then the heading
+    delta is computed from TWA.  The model never steers to a wind angle
+    directly; TWA/TWS/STW are informational context features only.
+
+    This is the single source of truth for feature computation.  It is called
+    by the binary frame writer, the passage simulator, and the CL validator.
+
+    Returns:
+        np.ndarray of shape (22,) with values clipped to [-1, 1].
+    """
+    features = np.zeros(FEATURE_DIM, dtype=np.float32)
+
+    twa, tws = _compute_true_wind(awa, aws, stw)
+
+    # Compute target heading -- ALL modes reduce to a compass heading.
+    if mode == "compass":
+        computed_heading = target_heading
+    elif mode == "wind_awa":
+        # Convert target AWA → target TWA via the wind triangle, then
+        # compute heading delta from TWA (same as TWA mode below).
+        target_twa_from_awa, _ = _compute_true_wind(target_awa, aws, stw)
+        twa_delta = twa - target_twa_from_awa
+        computed_heading = heading + twa_delta
+    elif mode in ("wind_twa", "vmg"):
+        twa_delta = twa - target_twa
+        computed_heading = heading + twa_delta
+    else:
+        computed_heading = target_heading
+
+    computed_heading %= 360.0
+
+    error = _angle_diff(computed_heading, heading)
+    features[0] = np.clip(error / 90.0, -1.0, 1.0)     # ±90° range (primary signal)
+    features[1] = 0.0   # heading_error_integral placeholder
+    features[2] = np.clip(yaw_rate / 30.0, -1.0, 1.0)
+    features[3] = np.clip(roll / 45.0, -1.0, 1.0)
+    features[4] = np.clip(pitch / 30.0, -1.0, 1.0)
+    features[5] = 0.0   # roll_rate placeholder
+    features[6] = np.clip(awa / 180.0, -1.0, 1.0)
+    features[7] = 0.0   # AWA_rate placeholder
+    features[8] = np.clip(aws / 60.0, 0.0, 1.0)
+    features[9] = np.clip(twa / 180.0, -1.0, 1.0)
+    features[10] = np.clip(tws / 60.0, 0.0, 1.0)
+    features[11] = np.clip(stw / 25.0, 0.0, 1.0)
+    features[12] = np.clip(sog / 25.0, 0.0, 1.0)
+
+    cog_error = _angle_diff(cog, computed_heading)
+    features[13] = np.clip(cog_error / 45.0, -1.0, 1.0) # ±45° range (matches heading_error)
+    features[14] = 0.0   # rudder_position zeroed to prevent label leak
+    features[15] = 0.0   # rudder_velocity placeholder
+    features[16] = computed_heading / 360.0  # [0, 1)
+    vmg_up = stw * np.cos(np.radians(abs(twa))) if stw > 0 else 0.0
+    vmg_down = stw * np.cos(np.radians(180 - abs(twa))) if stw > 0 else 0.0
+    features[17] = np.clip(vmg_up / 15.0, -1.0, 1.0)
+    features[18] = np.clip(vmg_down / 20.0, -1.0, 1.0)
+    features[19] = 0.0   # polar_target placeholder (zero, not informative)
+    features[20] = 0.0   # polar_performance placeholder (zero, not informative)
+    features[21] = 0.0   # wave_period placeholder (zero, not informative)
+
+    return np.clip(features, -1.0, 1.0)
+
 
 @dataclass
 class DataConfig:
     """Configuration for data loading."""
     sequence_length: int = 20      # Timesteps per sequence
-    feature_dim: int = 25          # Features per timestep
-    sample_rate_hz: float = 10.0   # Target sample rate
+    feature_dim: int = 22          # Features per timestep
+    sample_rate_hz: float = 2.0    # Target sample rate (matches recording_rate_hz)
     train_split: float = 0.8       # Train/validation split
     shuffle: bool = True           # Shuffle training data
     normalize: bool = True         # Apply feature normalization
@@ -743,8 +852,21 @@ class TrainingDataLoader:
         
         if skipped_transitions > 0:
             logger.info(f"Filtered {skipped_transitions} sequences in mode transition periods")
-            
-        return np.array(X_list), np.array(y_list)
+
+        X = np.array(X_list)
+        y = np.array(y_list)
+
+        # Port/starboard symmetry augmentation: mirror every sample so the
+        # model sees equal positive and negative rudder commands.  This
+        # prevents directional bias caused by weather helm or predominant
+        # tack in the training data.
+        if len(X) > 0:
+            X_mirror, y_mirror = self._mirror_sequences(X, y)
+            X = np.concatenate([X, X_mirror], axis=0)
+            y = np.concatenate([y, y_mirror], axis=0)
+            logger.info(f"Symmetry augmentation: {len(X_list)} → {len(X)} sequences")
+
+        return X, y
     
     def _compute_transition_mask(self, frames: List[LoggedFrame]) -> List[bool]:
         """
@@ -783,128 +905,35 @@ class TrainingDataLoader:
                 
         return mask
         
-    def _frame_to_features(self, frame: LoggedFrame, 
+    def _mirror_sequences(self, X: np.ndarray, y: np.ndarray
+                          ) -> Tuple[np.ndarray, np.ndarray]:
+        """Create port/starboard mirrored copies of all sequences.
+
+        Negates directional features and rudder labels so the model
+        learns symmetrical behaviour and cannot develop a tack bias.
+        """
+        X_m = X.copy()
+        y_m = -y
+        for idx in MIRROR_NEGATE_FEATURES:
+            X_m[:, :, idx] = -X_m[:, :, idx]
+        return X_m, y_m
+
+    def _frame_to_features(self, frame: LoggedFrame,
                            ref_frame: LoggedFrame) -> np.ndarray:
         """Convert a logged frame to normalized features.
-        
-        ARCHITECTURE: Feature[0] is ALWAYS heading error (HelmController convention).
-        error = computed_heading - heading (target - current)
-        Positive error = target to starboard → positive rudder.
-        In wind modes, computed_heading is derived from the wind target.
+
+        Delegates to the module-level compute_features() function.
         """
-        features = np.zeros(self.config.feature_dim)
-        
-        # Compute TWA for use in wind modes
-        twa, _ = self._compute_true_wind(frame.awa, frame.aws, frame.stw)
-        
-        # ARCHITECTURE: Compute target heading from mode-specific target
-        # Wind targets are converted to heading targets so feature[0] is always heading error.
-        # This matches passage_simulator._compute_features() and ModeManager.update()
-        if frame.mode == "compass":
-            # Direct heading target
-            computed_heading = frame.target_heading
-        elif frame.mode == "wind_awa":
-            # Compute heading that would achieve target AWA
-            # If awa > target_awa: need to head up → increase heading → computed > heading
-            awa_delta = frame.awa - frame.target_awa
-            computed_heading = frame.heading + awa_delta
-        elif frame.mode in ["wind_twa", "vmg"]:
-            # Compute heading that would achieve target TWA
-            twa_delta = twa - frame.target_twa
-            computed_heading = frame.heading + twa_delta
-        else:
-            # Default to compass mode behavior
-            computed_heading = frame.target_heading
-            
-        # Normalize computed_heading to [0, 360)
-        while computed_heading < 0:
-            computed_heading += 360
-        while computed_heading >= 360:
-            computed_heading -= 360
-        
-        # FEAT_ERROR (0): ALWAYS heading error (HelmController convention)
-        # error = computed_heading - heading (target - current)
-        # Positive error = target to starboard → positive rudder
-        error = self._angle_diff(computed_heading, frame.heading)
-        features[0] = error / 180.0
-        
-        # Skip integral for now (would need state tracking)
-        features[1] = 0.0
-        
-        # Heading rate
-        features[2] = frame.yaw_rate / 30.0
-        
-        # Roll, pitch
-        features[3] = frame.roll / 45.0
-        features[4] = frame.pitch / 30.0
-        
-        # Roll rate (would need computation)
-        features[5] = 0.0
-        
-        # AWA, AWS
-        features[6] = frame.awa / 180.0
-        features[7] = 0.0  # AWA rate
-        features[8] = frame.aws / 60.0
-        
-        # TWA, TWS (computed from AWA/AWS/STW)
-        twa, tws = self._compute_true_wind(frame.awa, frame.aws, frame.stw)
-        features[9] = twa / 180.0
-        features[10] = tws / 60.0
-        
-        # Speed
-        features[11] = frame.stw / 25.0
-        features[12] = frame.sog / 25.0
-        
-        # COG error (relative to compass target heading)
-        cog_error = self._angle_diff(frame.cog, frame.target_heading)
-        features[13] = cog_error / 180.0
-        
-        # Rudder position (normalized to 25° max)
-        features[14] = frame.rudder_angle / 25.0
-        features[15] = 0.0  # Rudder velocity
-        
-        # Target angle (16): The computed target heading (always heading-based)
-        features[16] = computed_heading / 180.0
-        
-        # VMG (computed)
-        vmg_up = frame.stw * np.cos(np.radians(abs(twa))) if frame.stw > 0 else 0
-        vmg_down = frame.stw * np.cos(np.radians(180 - abs(twa))) if frame.stw > 0 else 0
-        features[17] = vmg_up / 15.0
-        features[18] = vmg_down / 20.0
-        
-        # Polar target (would need polar lookup)
-        features[19] = 0.5  # Placeholder
-        features[20] = 0.8  # Placeholder performance
-        
-        # Mode flags
-        features[21] = 1.0 if frame.mode == "compass" else 0.0
-        features[22] = 1.0 if frame.mode == "wind_awa" else 0.0
-        features[23] = 1.0 if frame.mode in ["wind_twa", "vmg"] else 0.0
-        
-        # Wave period (placeholder)
-        features[24] = 5.0 / 15.0
-        
-        return np.clip(features, -1.0, 1.0)
-        
-    def _angle_diff(self, a: float, b: float) -> float:
-        """Compute signed angle difference."""
-        diff = a - b
-        while diff > 180:
-            diff -= 360
-        while diff < -180:
-            diff += 360
-        return diff
-        
-    def _compute_true_wind(self, awa: float, aws: float, stw: float) -> Tuple[float, float]:
-        """Compute true wind from apparent wind."""
-        awa_rad = np.radians(awa)
-        aw_x = aws * np.cos(awa_rad) - stw
-        aw_y = aws * np.sin(awa_rad)
-        
-        tws = np.sqrt(aw_x**2 + aw_y**2)
-        twa = np.degrees(np.arctan2(aw_y, aw_x))
-        
-        return twa, tws
+        return compute_features(
+            heading=frame.heading, pitch=frame.pitch, roll=frame.roll,
+            yaw_rate=frame.yaw_rate, awa=frame.awa, aws=frame.aws,
+            stw=frame.stw, cog=frame.cog, sog=frame.sog,
+            rudder_angle=frame.rudder_angle,
+            target_heading=frame.target_heading,
+            target_awa=frame.target_awa,
+            target_twa=frame.target_twa,
+            mode=frame.mode,
+        )
         
     def split_data(self, X: np.ndarray, y: np.ndarray
                    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -919,8 +948,165 @@ class TrainingDataLoader:
         logger.info(f"Train: {len(X_train)}, Validation: {len(X_val)}")
         return X_train, y_train, X_val, y_val
 
+    # -----------------------------------------------------------------
+    # Binary frame file loading
+    # -----------------------------------------------------------------
 
-# PyTorch Dataset wrapper (optional, for custom data loading)
+    @staticmethod
+    def load_binary(filepath: str, mmap: bool = True
+                    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Load a binary .bin feature file.
+
+        Returns:
+            (features, labels, valid_mask)
+            features: (N, 25) float32
+            labels:   (N,)   float32
+            valid_mask: (N,) bool  -- True where frame is NOT in transition
+        """
+        path = Path(filepath)
+        file_size = path.stat().st_size
+        from src.simulation.data_generator import _BIN_HEADER_SIZE, _BIN_COLS, _BIN_MAGIC
+        data_bytes = file_size - _BIN_HEADER_SIZE
+        n_frames = data_bytes // (_BIN_COLS * 4)
+
+        mode = 'r' if mmap else None
+        raw = np.memmap(str(path), dtype=np.float32, mode='r',
+                        offset=_BIN_HEADER_SIZE,
+                        shape=(n_frames, _BIN_COLS)) if mmap else None
+        if not mmap:
+            with open(path, 'rb') as fh:
+                hdr = fh.read(_BIN_HEADER_SIZE)
+                if hdr[:4] != _BIN_MAGIC:
+                    raise ValueError(f"Not a binary frame file: {path}")
+                raw = np.frombuffer(fh.read(), dtype=np.float32).reshape(
+                    n_frames, _BIN_COLS)
+
+        features = raw[:, :FEATURE_DIM]
+        labels = raw[:, FEATURE_DIM]
+
+        # Build valid_mask from transition_times in companion meta
+        valid_mask = np.ones(n_frames, dtype=bool)
+        meta_path = path.with_suffix('.meta.json')
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            transitions = meta.get('transition_times', [])
+            if transitions:
+                sample_rate = 10.0  # default
+                filter_s = 15.0
+                for t_time in transitions:
+                    start_idx = max(0, int(t_time * sample_rate) - 1)
+                    end_idx = min(n_frames,
+                                  int((t_time + filter_s) * sample_rate))
+                    valid_mask[start_idx:end_idx] = False
+
+        logger.info(f"Loaded binary {path.name}: {n_frames:,} frames, "
+                     f"{valid_mask.sum():,} valid")
+        return features, labels, valid_mask
+
+    @staticmethod
+    def load_binary_directory(directory: str, mmap: bool = True
+                              ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Load all .bin files from a directory.
+
+        Returns a list of (features, labels, valid_mask) tuples, one per file.
+        Keeping files separate enables per-file train/val splitting.
+        """
+        path = Path(directory)
+        bin_files = sorted(path.glob('**/*.bin'))
+        if not bin_files:
+            raise FileNotFoundError(f"No .bin files found in {directory}")
+
+        result = []
+        for bf in bin_files:
+            try:
+                result.append(TrainingDataLoader.load_binary(str(bf), mmap=mmap))
+            except Exception as e:
+                logger.warning(f"Failed to load {bf}: {e}")
+
+        total = sum(f.shape[0] for f, _, _ in result)
+        logger.info(f"Loaded {len(result)} binary files, {total:,} total frames")
+        return result
+
+    def preprocess_to_disk(self, directory: str, output_dir: str) -> Dict[str, Any]:
+        """
+        Preprocess log files to memory-mappable .npy files on disk.
+        
+        This avoids loading all training data into RAM at once. Each log file
+        is processed into a pair of .npy files (X_sequences, y_labels) that
+        can be memory-mapped during training.
+        
+        Args:
+            directory: Directory containing log files
+            output_dir: Directory for preprocessed .npy files
+            
+        Returns:
+            Dict with preprocessing stats and manifest info
+        """
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        
+        src_path = Path(directory)
+        log_files = sorted([
+            f for f in src_path.glob('**/*')
+            if f.is_file() and f.suffix in ['.json', '.jsonlog', '.csv', '.log']
+        ])
+        
+        if not log_files:
+            raise ValueError(f"No log files found in {directory}")
+        
+        manifest = {
+            'source_dir': str(directory),
+            'config': {
+                'sequence_length': self.config.sequence_length,
+                'feature_dim': self.config.feature_dim,
+                'sample_rate_hz': self.config.sample_rate_hz,
+                'mode_transition_filter_s': self.config.mode_transition_filter_s,
+            },
+            'files': [],
+            'total_sequences': 0,
+        }
+        
+        for log_file in log_files:
+            try:
+                X, y = self.load_file(str(log_file))
+                if len(X) == 0:
+                    continue
+                    
+                # Save as .npy files
+                stem = log_file.stem
+                x_path = out_path / f"{stem}_X.npy"
+                y_path = out_path / f"{stem}_y.npy"
+                
+                np.save(x_path, X.astype(np.float32))
+                np.save(y_path, y.astype(np.float32))
+                
+                file_info = {
+                    'source': str(log_file),
+                    'x_file': x_path.name,
+                    'y_file': y_path.name,
+                    'num_sequences': len(X),
+                }
+                manifest['files'].append(file_info)
+                manifest['total_sequences'] += len(X)
+                
+                logger.info(f"Preprocessed {log_file.name}: {len(X):,} sequences")
+                
+            except Exception as e:
+                logger.warning(f"Failed to preprocess {log_file}: {e}")
+        
+        # Save manifest
+        manifest_path = out_path / 'manifest.json'
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        
+        logger.info(f"Preprocessed {len(manifest['files'])} files, "
+                     f"{manifest['total_sequences']:,} total sequences -> {output_dir}")
+        
+        return manifest
+
+
+# PyTorch Dataset wrappers
 try:
     import torch
     from torch.utils.data import Dataset
@@ -933,13 +1119,6 @@ try:
         """
         
         def __init__(self, X: np.ndarray, y: np.ndarray):
-            """
-            Initialize dataset.
-            
-            Args:
-                X: Input sequences of shape [n_samples, sequence_length, feature_dim]
-                y: Target labels of shape [n_samples, 1] or [n_samples]
-            """
             self.X = torch.from_numpy(X).float()
             self.y = torch.from_numpy(y).float()
             if self.y.ndim == 1:
@@ -950,8 +1129,220 @@ try:
         
         def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
             return self.X[idx], self.y[idx]
+
+    class MemmapDataset(Dataset):
+        """
+        Memory-mapped dataset for large training data.
+        
+        Loads preprocessed .npy files using memory mapping so that only the
+        active batch occupies RAM. Suitable for datasets that exceed available
+        memory.
+        
+        Usage:
+            dataset = MemmapDataset.from_manifest("data/preprocessed/manifest.json")
+            loader = DataLoader(dataset, batch_size=64, shuffle=True)
+        """
+        
+        def __init__(self, x_arrays: List[np.ndarray], y_arrays: List[np.ndarray],
+                     cumulative_lengths: List[int]):
+            self._x_arrays = x_arrays
+            self._y_arrays = y_arrays
+            self._cumulative = cumulative_lengths
+            self._total = cumulative_lengths[-1] if cumulative_lengths else 0
+        
+        @classmethod
+        def from_manifest(cls, manifest_path: str) -> 'MemmapDataset':
+            """Load dataset from a preprocessing manifest."""
+            manifest_path = Path(manifest_path)
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            
+            base_dir = manifest_path.parent
+            x_arrays = []
+            y_arrays = []
+            cumulative = []
+            running_total = 0
+            
+            for file_info in manifest['files']:
+                x_path = base_dir / file_info['x_file']
+                y_path = base_dir / file_info['y_file']
+                
+                x_mmap = np.load(str(x_path), mmap_mode='r')
+                y_mmap = np.load(str(y_path), mmap_mode='r')
+                
+                x_arrays.append(x_mmap)
+                y_arrays.append(y_mmap)
+                running_total += len(x_mmap)
+                cumulative.append(running_total)
+            
+            logger.info(f"Memory-mapped {len(x_arrays)} files, "
+                         f"{running_total:,} total sequences")
+            
+            return cls(x_arrays, y_arrays, cumulative)
+        
+        @classmethod
+        def from_directory(cls, preprocessed_dir: str) -> 'MemmapDataset':
+            """Load from a preprocessed directory containing manifest.json."""
+            manifest_path = Path(preprocessed_dir) / 'manifest.json'
+            if not manifest_path.exists():
+                raise FileNotFoundError(
+                    f"No manifest.json in {preprocessed_dir}. "
+                    f"Run preprocessing first with --preprocess.")
+            return cls.from_manifest(str(manifest_path))
+        
+        def __len__(self) -> int:
+            return self._total
+        
+        def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+            if idx < 0:
+                idx = self._total + idx
+            
+            # Binary search for the file containing this index
+            file_idx = 0
+            local_idx = idx
+            for i, cum_len in enumerate(self._cumulative):
+                if idx < cum_len:
+                    file_idx = i
+                    local_idx = idx - (self._cumulative[i - 1] if i > 0 else 0)
+                    break
+            
+            x = torch.from_numpy(self._x_arrays[file_idx][local_idx].copy()).float()
+            y = torch.from_numpy(self._y_arrays[file_idx][local_idx].copy()).float()
+            
+            if y.ndim == 0:
+                y = y.unsqueeze(0)
+            
+            return x, y
+        
+        def split(self, train_fraction: float = 0.8
+                  ) -> Tuple['MemmapDataset', 'MemmapDataset']:
+            """
+            Split into train/validation sets by interleaving files.
+            
+            Files are dealt round-robin into train and val sets so that
+            both sets contain data from all routes/conditions. This avoids
+            the overfitting problem where train sees one route and val
+            sees another.
+            """
+            n_files = len(self._x_arrays)
+            if n_files < 2:
+                raise ValueError(
+                    f"Need at least 2 preprocessed files to split, got {n_files}")
+            
+            # Deal files round-robin: every Nth file goes to val
+            # e.g. with 6 files and 80/20 split, val_every=5 means files
+            # 4,5 go to val (indices 4,5 from 0-based) -- but round-robin
+            # is more even: pick every 5th file for val
+            val_every = max(2, round(1.0 / (1.0 - train_fraction)))
+            
+            train_x, train_y = [], []
+            val_x, val_y = [], []
+            
+            for i in range(n_files):
+                if i % val_every == (val_every - 1):
+                    val_x.append(self._x_arrays[i])
+                    val_y.append(self._y_arrays[i])
+                else:
+                    train_x.append(self._x_arrays[i])
+                    train_y.append(self._y_arrays[i])
+            
+            # Ensure val is non-empty
+            if not val_x:
+                val_x.append(train_x.pop())
+                val_y.append(train_y.pop())
+            
+            def _make_cumulative(arrays):
+                cum = []
+                running = 0
+                for a in arrays:
+                    running += len(a)
+                    cum.append(running)
+                return cum
+            
+            logger.info(f"Split: {len(train_x)} train files, "
+                         f"{len(val_x)} val files (interleaved)")
+            
+            return (MemmapDataset(train_x, train_y, _make_cumulative(train_x)),
+                    MemmapDataset(val_x, val_y, _make_cumulative(val_x)))
     
+    class FrameDataset(Dataset):
+        """On-the-fly sequence construction from flat per-frame feature arrays.
+
+        Instead of pre-building all overlapping (seq_len, feature_dim) windows
+        and storing them in RAM, this dataset keeps only the (N, feature_dim)
+        feature array and constructs each window at access time.
+
+        Port/starboard mirror augmentation is applied on-the-fly: the second
+        half of the index space returns sign-flipped copies, doubling the
+        effective dataset size with zero extra memory.
+        """
+
+        def __init__(self, features: np.ndarray, labels: np.ndarray,
+                     valid_mask: np.ndarray, seq_len: int = 20,
+                     mirror: bool = True):
+            self._features = features   # (N, 25)
+            self._labels = labels       # (N,)
+            self._seq_len = seq_len
+            self._mirror = mirror
+            self._indices = self._build_valid_indices(valid_mask, seq_len)
+            self._n_real = len(self._indices)
+
+        @staticmethod
+        def _build_valid_indices(valid_mask: np.ndarray,
+                                 seq_len: int) -> np.ndarray:
+            """Find start positions where all frames in [i, i+seq_len] are valid."""
+            n = len(valid_mask)
+            if n <= seq_len:
+                return np.array([], dtype=np.int64)
+            # Sliding window: a start is valid when all seq_len+1 frames are True
+            window = seq_len + 1
+            cumsum = np.cumsum(np.concatenate(([0], valid_mask.astype(np.int64))))
+            counts = cumsum[window:] - cumsum[:n - window + 1]
+            return np.nonzero(counts == window)[0]
+
+        @classmethod
+        def from_file_list(cls,
+                           file_data: 'List[Tuple[np.ndarray, np.ndarray, np.ndarray]]',
+                           seq_len: int = 20,
+                           mirror: bool = True) -> 'FrameDataset':
+            """Create a FrameDataset from multiple binary files.
+
+            Concatenates features/labels/masks while inserting seq_len invalid
+            frames at file boundaries to prevent cross-file sequences.
+            """
+            all_f, all_l, all_m = [], [], []
+            gap = np.zeros(seq_len, dtype=bool)
+            for i, (f, l, m) in enumerate(file_data):
+                if i > 0:
+                    all_f.append(np.zeros((seq_len, f.shape[1]), dtype=np.float32))
+                    all_l.append(np.zeros(seq_len, dtype=np.float32))
+                    all_m.append(gap)
+                all_f.append(np.asarray(f))
+                all_l.append(np.asarray(l))
+                all_m.append(np.asarray(m))
+            features = np.concatenate(all_f)
+            labels = np.concatenate(all_l)
+            mask = np.concatenate(all_m)
+            return cls(features, labels, mask, seq_len=seq_len, mirror=mirror)
+
+        def __len__(self) -> int:
+            return self._n_real * 2 if self._mirror else self._n_real
+
+        def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+            is_mirror = idx >= self._n_real
+            real_idx = idx - self._n_real if is_mirror else idx
+            start = self._indices[real_idx]
+            x = self._features[start: start + self._seq_len].copy()
+            y_val = float(self._labels[start + self._seq_len])
+            if is_mirror:
+                x[:, MIRROR_NEGATE_FEATURES] *= -1
+                y_val = -y_val
+            return (torch.from_numpy(x).float(),
+                    torch.tensor([y_val], dtype=torch.float32))
+
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
     AutopilotDataset = None
+    MemmapDataset = None
+    FrameDataset = None

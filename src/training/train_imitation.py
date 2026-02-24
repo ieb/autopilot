@@ -13,11 +13,11 @@ import json
 import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 import logging
 
-from .data_loader import TrainingDataLoader, DataConfig
+from .data_loader import TrainingDataLoader, DataConfig, MemmapDataset, FrameDataset
 from ..ml.autopilot_model import (
     AutopilotLSTM,
     build_autopilot_model,
@@ -52,13 +52,16 @@ class TrainingConfig:
     """Training configuration."""
     # Model
     sequence_length: int = 20
-    feature_dim: int = 25
+    feature_dim: int = 22
     
     # Training
     epochs: int = 100
-    batch_size: int = 64
+    batch_size: int = 512
     learning_rate: float = 1e-4  # Lower LR for stability
     
+    # Regularization
+    weight_decay: float = 1e-4
+
     # Early stopping
     patience: int = 8  # Reduced from 10 - stop earlier if no improvement
     min_delta: float = 0.0001
@@ -185,7 +188,7 @@ class ImitationTrainer:
         logger.info(f"Using device: {self._device}")
         
     def load_data(self, data_dir: str) -> tuple:
-        """Load training data from directory."""
+        """Load training data from directory (all in memory)."""
         X, y = self._data_loader.load_directory(data_dir)
         
         if len(X) == 0:
@@ -263,7 +266,7 @@ class ImitationTrainer:
               X_val: np.ndarray, 
               y_val: np.ndarray) -> Dict[str, Any]:
         """
-        Train the model.
+        Train the model from in-memory numpy arrays.
         
         Args:
             X_train: Training sequences [n, seq_len, features]
@@ -276,15 +279,12 @@ class ImitationTrainer:
         """
         if self._model is None:
             resumed = self.build_or_load_model()
-            # Skip warmup if resuming from checkpoint
             if resumed:
                 self.training_config.warmup_epochs = 0
             
-        # Data augmentation
         if self.training_config.add_noise:
             X_train = self._augment_data(X_train)
         
-        # Create data loaders
         train_dataset = TensorDataset(
             torch.from_numpy(X_train).float(),
             torch.from_numpy(y_train).float()
@@ -305,11 +305,42 @@ class ImitationTrainer:
             shuffle=False
         )
         
+        return self._train_loop(train_loader, val_loader,
+                                len(X_train), len(X_val))
+    
+    def train_streaming(self, 
+                        train_loader: DataLoader,
+                        val_loader: DataLoader) -> Dict[str, Any]:
+        """
+        Train the model from DataLoaders (binary mode).
+        
+        Args:
+            train_loader: Training DataLoader 
+            val_loader: Validation DataLoader
+            
+        Returns:
+            Training history dict
+        """
+        if self._model is None:
+            resumed = self.build_or_load_model()
+            if resumed:
+                self.training_config.warmup_epochs = 0
+        
+        n_train = len(train_loader.dataset)
+        n_val = len(val_loader.dataset)
+        
+        return self._train_loop(train_loader, val_loader, n_train, n_val)
+    
+    def _train_loop(self, train_loader: DataLoader, val_loader: DataLoader,
+                    n_train: int, n_val: int) -> Dict[str, Any]:
+        """Core training loop shared by in-memory and streaming modes."""
+        
         # Setup training
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(
             self._model.parameters(),
-            lr=self.training_config.learning_rate
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay,
         )
         
         # Learning rate schedulers
@@ -327,7 +358,6 @@ class ImitationTrainer:
             factor=0.5,
             patience=3,
             min_lr=1e-6,
-            verbose=True
         )
         
         # Early stopping
@@ -349,10 +379,10 @@ class ImitationTrainer:
         if self.training_config.max_time_seconds:
             print(f"Time limit: {self.training_config.max_time_seconds:.0f} seconds")
         print(f"Device: {self._device}")
-        print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
+        print(f"Training samples: {n_train:,}, Validation samples: {n_val:,}")
         print()
         
-        logger.info(f"Training on {len(X_train)} samples, validating on {len(X_val)}")
+        logger.info(f"Training on {n_train} samples, validating on {n_val}")
         
         for epoch in range(self.training_config.epochs):
             epoch_start_time = time.time()
@@ -456,6 +486,16 @@ class ImitationTrainer:
             mae_deg = train_mae * 30.0
             val_mae_deg = val_mae * 30.0
             
+            # Live MLflow logging (if active)
+            if HAS_MLFLOW and mlflow and mlflow.active_run():
+                mlflow.log_metrics({
+                    'loss': train_loss,
+                    'val_loss': val_loss,
+                    'mae_degrees': mae_deg,
+                    'val_mae_degrees': val_mae_deg,
+                    'lr': current_lr,
+                }, step=epoch)
+            
             # Print progress
             print(f"\nEpoch {epoch + 1}/{self.training_config.epochs} "
                   f"({epoch_time:.1f}s, elapsed: {elapsed:.0f}s, ETA: {eta:.0f}s)")
@@ -473,14 +513,20 @@ class ImitationTrainer:
         # Restore best model
         early_stopping.restore_best(self._model)
         
+        # Final closed-loop validation
+        final_cl = closed_loop_validate_pytorch(self._model, self._device)
+        final_cl_score = _cl_mean_error(final_cl)
+        _print_cl_results(final_cl)
+
         # Print summary
         elapsed = time.time() - start_time
-        print("\n" + "=" * 70)
+        print("=" * 70)
         print("TRAINING COMPLETE")
         print("=" * 70)
         print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
         print(f"Final validation loss: {self._history.val_loss[-1]:.6f}")
         print(f"Best validation loss: {best_val_loss:.6f}")
+        print(f"Final CL score: {final_cl_score:.1f}°")
         
         if len(self._history.val_loss) > 1:
             total_improvement = self._history.val_loss[0] - best_val_loss
@@ -505,22 +551,67 @@ class ImitationTrainer:
         """Evaluate model on test data."""
         if self._model is None:
             raise RuntimeError("Model not trained")
-        
+
         self._model.eval()
-        
-        # Convert to tensors
-        X_tensor = torch.from_numpy(X_test).float().to(self._device)
-        y_tensor = torch.from_numpy(y_test).float().to(self._device)
-        
+
+        batch_size = self.training_config.batch_size
+        n = len(X_test)
+        all_preds = []
+        total_loss = 0.0
+        total_mae = 0.0
+
         with torch.no_grad():
-            predictions = self._model(X_tensor)
-            loss = nn.MSELoss()(predictions, y_tensor).item()
-            mae = torch.mean(torch.abs(predictions - y_tensor)).item()
-        
-        # Compute additional metrics
-        predictions_np = predictions.cpu().numpy()
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                xb = torch.from_numpy(X_test[start:end]).float().to(self._device)
+                yb = torch.from_numpy(y_test[start:end]).float().to(self._device)
+                preds = self._model(xb)
+                total_loss += nn.MSELoss(reduction='sum')(preds, yb).item()
+                total_mae += torch.sum(torch.abs(preds - yb)).item()
+                all_preds.append(preds.cpu().numpy())
+
+        loss = total_loss / n
+        mae = total_mae / n
+        predictions_np = np.concatenate(all_preds, axis=0)
         errors = predictions_np.flatten() - y_test.flatten()
-        
+
+        return self._compute_eval_metrics(loss, mae, errors)
+
+    def evaluate_loader(self, data_loader: DataLoader) -> Dict[str, float]:
+        """Evaluate model using a DataLoader (binary / streaming mode)."""
+        if self._model is None:
+            raise RuntimeError("Model not trained")
+
+        self._model.eval()
+
+        n = len(data_loader.dataset)
+        all_preds = []
+        all_targets = []
+        total_loss = 0.0
+        total_mae = 0.0
+
+        with torch.no_grad():
+            for X_batch, y_batch in data_loader:
+                X_batch = X_batch.to(self._device)
+                y_batch = y_batch.to(self._device)
+                preds = self._model(X_batch)
+                total_loss += nn.MSELoss(reduction='sum')(preds, y_batch).item()
+                total_mae += torch.sum(torch.abs(preds - y_batch)).item()
+                all_preds.append(preds.cpu().numpy())
+                all_targets.append(y_batch.cpu().numpy())
+
+        loss = total_loss / n
+        mae = total_mae / n
+        predictions_np = np.concatenate(all_preds, axis=0)
+        targets_np = np.concatenate(all_targets, axis=0)
+        errors = predictions_np.flatten() - targets_np.flatten()
+
+        return self._compute_eval_metrics(loss, mae, errors)
+
+    @staticmethod
+    def _compute_eval_metrics(loss: float, mae: float,
+                              errors: np.ndarray) -> Dict[str, float]:
+        """Compute evaluation metrics from raw loss, MAE, and error vector."""
         metrics = {
             'loss': loss,
             'mae': mae,
@@ -528,15 +619,15 @@ class ImitationTrainer:
             'max_error': float(np.max(np.abs(errors))),
             'std_error': float(np.std(errors)),
         }
-        
+
         # Convert back to degrees for interpretability
         metrics['mae_degrees'] = metrics['mae'] * 30.0
         metrics['rmse_degrees'] = metrics['rmse'] * 30.0
         metrics['max_error_degrees'] = metrics['max_error'] * 30.0
-        
+
         logger.info(f"Evaluation: MAE={metrics['mae_degrees']:.2f}°, "
                    f"RMSE={metrics['rmse_degrees']:.2f}°")
-        
+
         return metrics
         
     def save_model(self, include_onnx: bool = True) -> Dict[str, str]:
@@ -597,6 +688,11 @@ class ImitationTrainer:
         logger.info(f"Loaded model from {model_path}")
 
 
+def _has_binary_files(data_dir: str) -> bool:
+    """Check if a directory contains .bin binary frame files."""
+    return any(Path(data_dir).glob('**/*.bin'))
+
+
 def train_from_logs(data_dir: str, 
                     output_dir: str = "models",
                     epochs: int = 100,
@@ -604,12 +700,17 @@ def train_from_logs(data_dir: str,
                     resume: bool = True,
                     use_mlflow: bool = False,
                     mlflow_experiment_name: str = "autopilot",
-                    mlflow_run_name: Optional[str] = None) -> Dict[str, str]:
+                    mlflow_run_name: Optional[str] = None,
+                    force_json: bool = False) -> Dict[str, str]:
     """
     Convenience function to train model from logged data.
     
+    Auto-detects binary .bin files and uses the efficient FrameDataset
+    path by default.  Falls back to JSON loading if no .bin files are
+    found or if force_json is True.
+    
     Args:
-        data_dir: Directory containing log files
+        data_dir: Directory containing log files (.bin or .jsonlog)
         output_dir: Directory for output models
         epochs: Number of training epochs
         max_time_seconds: Maximum training time in seconds (None = no limit)
@@ -617,6 +718,7 @@ def train_from_logs(data_dir: str,
         use_mlflow: Enable MLflow experiment tracking
         mlflow_experiment_name: MLflow experiment name
         mlflow_run_name: Optional name for this MLflow run
+        force_json: Force legacy JSON loading even when .bin files exist
         
     Returns:
         Dict with paths to saved model files
@@ -632,11 +734,53 @@ def train_from_logs(data_dir: str,
     )
     
     trainer = ImitationTrainer(training_config=config)
-    
-    # Load and split data
-    print(f"Loading training data from: {data_dir}")
-    X_train, y_train, X_val, y_val = trainer.load_data(data_dir)
-    print(f"Loaded {len(X_train)} training samples, {len(X_val)} validation samples")
+
+    # Determine data loading mode:
+    #   1. Binary .bin files (default, most efficient)
+    #   2. Streaming (memory-mapped .npy, legacy)
+    #   3. In-memory JSON (legacy)
+    use_binary = _has_binary_files(data_dir)
+
+    if use_binary:
+        print(f"Loading binary training data from: {data_dir}")
+        file_data = TrainingDataLoader.load_binary_directory(data_dir)
+
+        # Round-robin split files into train / val
+        train_files, val_files = [], []
+        val_every = max(2, round(1.0 / (1.0 - trainer.data_config.train_split)))
+        for i, fd in enumerate(file_data):
+            if i % val_every == (val_every - 1):
+                val_files.append(fd)
+            else:
+                train_files.append(fd)
+        if not val_files:
+            val_files.append(train_files.pop())
+
+
+
+        seq_len = trainer.data_config.sequence_length
+        train_ds = FrameDataset.from_file_list(train_files, seq_len=seq_len)
+        val_ds = FrameDataset.from_file_list(val_files, seq_len=seq_len)
+
+
+        use_pin = trainer._device.type == 'cuda'
+        train_loader = DataLoader(train_ds,
+                                  batch_size=trainer.training_config.batch_size,
+                                  shuffle=True, num_workers=0,
+                                  pin_memory=use_pin)
+        val_loader = DataLoader(val_ds,
+                                batch_size=trainer.training_config.batch_size,
+                                shuffle=False, num_workers=0,
+                                pin_memory=use_pin)
+
+        print(f"Binary mode: {len(train_ds):,} train, "
+              f"{len(val_ds):,} val sequences (on-the-fly, mirror={True})")
+
+    else:
+        print(f"Loading training data (JSON) from: {data_dir}")
+        X_train, y_train, X_val, y_val = trainer.load_data(data_dir)
+        print(f"Loaded {len(X_train):,} training samples, "
+              f"{len(X_val):,} validation samples")
     
     # Setup MLflow if enabled
     if use_mlflow:
@@ -646,34 +790,224 @@ def train_from_logs(data_dir: str,
             mlflow.set_experiment(mlflow_experiment_name)
             print(f"MLflow tracking enabled. Experiment: {mlflow_experiment_name}")
     
+    def _do_train():
+        if use_binary:
+            return trainer.train_streaming(train_loader, val_loader)
+        else:
+            return trainer.train(X_train, y_train, X_val, y_val)
+    
+    def _do_evaluate():
+        if use_binary:
+            return trainer.evaluate_loader(val_loader)
+        else:
+            return trainer.evaluate(X_val, y_val)
+
     # Run training with optional MLflow context
+    uses_loaders = use_binary
     if use_mlflow and HAS_MLFLOW:
+        n_train = len(train_loader.dataset) if uses_loaders else len(X_train)
+        n_val = len(val_loader.dataset) if uses_loaders else len(X_val)
+        
         with mlflow.start_run(run_name=mlflow_run_name):
-            # Log custom parameters
             _log_mlflow_params(config, trainer.model_config, trainer.data_config,
-                             len(X_train), len(X_val))
+                             n_train, n_val)
             
-            # Train
-            history = trainer.train(X_train, y_train, X_val, y_val)
+            history = _do_train()
             
-            # Log training metrics per epoch
-            for epoch, (loss, val_loss) in enumerate(zip(history['loss'], history['val_loss'])):
-                mlflow.log_metrics({'loss': loss, 'val_loss': val_loss}, step=epoch)
+            metrics = _do_evaluate()
+            if metrics:
+                _log_mlflow_metrics(metrics)
             
-            # Evaluate and log metrics
-            metrics = trainer.evaluate(X_val, y_val)
-            _log_mlflow_metrics(metrics)
-            
-            # Save and log artifacts
             paths = trainer.save_model()
             _log_mlflow_artifacts(paths, trainer._model)
-            
             return paths
     else:
-        # Train without MLflow
-        trainer.train(X_train, y_train, X_val, y_val)
-        trainer.evaluate(X_val, y_val)
+        _do_train()
+        _do_evaluate()
         return trainer.save_model()
+
+
+def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
+                     mode, target_heading, target_awa, target_twa,
+                     run_sec, acceptable_error_deg,
+                     physics_dt=0.1, inference_hz=2.0):
+    """Run a single closed-loop steering scenario.
+
+    The physics always runs at 1/physics_dt Hz for stability.
+    Features are recorded and the model is queried at inference_hz,
+    matching the training data rate.
+
+    Args:
+        predict_fn: callable(np.ndarray[20, 22]) -> float in [-1, 1]
+        physics_dt: Physics timestep in seconds (default 0.1 = 10Hz)
+        inference_hz: Rate at which features are recorded and the model
+            is queried (should match training data recording rate)
+    """
+    from src.simulation.yacht_dynamics import YachtDynamics, YachtConfig
+    from src.simulation.wind_model import WindModel, WindConfig
+    from .data_loader import compute_features
+
+    yacht = YachtDynamics(YachtConfig())
+    yacht.state.heading = initial_heading
+    yacht.state.stw = 6.0
+    yacht.state.sog = 6.0
+    wind = WindModel(WindConfig(base_twd=twd,
+                                base_tws_min=tws, base_tws_max=tws,
+                                shift_rate=0.0, oscillation_enabled=False))
+    wind.reset()
+    wind_state = wind.step(0)
+    yacht.set_wind(wind_state.twd, wind_state.tws)
+
+    feature_history: list = []
+    tracking_errors: list = []
+    rudder_cmds: list = []
+
+    # Physics steps per inference step
+    steps_per_inference = max(1, round(1.0 / (inference_hz * physics_dt)))
+    n_steps = int(run_sec / physics_dt)
+    rudder_deg = 0.0
+
+    for step_i in range(n_steps):
+        wind_state = wind.step(physics_dt)
+        yacht.set_wind(wind_state.twd, wind_state.tws)
+        yacht.step(rudder_deg, physics_dt)
+
+        # Record features and query model at inference_hz
+        if step_i % steps_per_inference == 0:
+            features = compute_features(
+                heading=yacht.state.heading,
+                pitch=yacht.state.pitch,
+                roll=yacht.state.roll,
+                yaw_rate=yacht.state.heading_rate,
+                awa=yacht.state.awa,
+                aws=yacht.state.aws,
+                stw=yacht.state.stw,
+                cog=yacht.state.cog,
+                sog=yacht.state.sog,
+                rudder_angle=yacht.state.rudder_angle,
+                target_heading=target_heading,
+                target_awa=target_awa,
+                target_twa=target_twa,
+                mode=mode,
+            )
+            feature_history.append(features)
+            if len(feature_history) > 20:
+                feature_history.pop(0)
+            while len(feature_history) < 20:
+                feature_history.insert(0, feature_history[0])
+
+            seq = np.array(feature_history, dtype=np.float32)
+            rudder_norm = predict_fn(seq)
+            rudder_deg = rudder_norm * 25.0
+            rudder_cmds.append(rudder_deg)
+
+        # Track error every physics step for accurate measurement
+        if mode == "wind_awa":
+            err = yacht.state.awa - target_awa
+        elif mode == "wind_twa":
+            from .data_loader import _compute_true_wind
+            twa, _ = _compute_true_wind(yacht.state.awa, yacht.state.aws,
+                                        yacht.state.stw)
+            err = twa - target_twa
+        else:
+            err = target_heading - yacht.state.heading
+            while err > 180: err -= 360
+            while err < -180: err += 360
+        tracking_errors.append(abs(err))
+
+    errors = np.array(tracking_errors)
+    ss_start = int(0.75 * len(errors))
+    ss_errors = errors[ss_start:]
+    mean_ss = float(ss_errors.mean())
+    max_ss = float(ss_errors.max())
+    passed = mean_ss < acceptable_error_deg
+
+    return {
+        "name": name,
+        "passed": passed,
+        "mean_ss_error_deg": round(mean_ss, 2),
+        "max_ss_error_deg": round(max_ss, 2),
+        "max_transient_error_deg": round(float(errors.max()), 2),
+        "mean_rudder_deg": round(float(np.mean(rudder_cmds)), 2),
+        "acceptable_deg": acceptable_error_deg,
+    }
+
+
+# Standard closed-loop test suite
+_CL_SCENARIOS = [
+    # (name, initial_heading, twd, tws, mode, target_heading, target_awa, target_twa, run_sec, accept_deg)
+    ("compass_small",  90.0, 180.0, 12.0, "compass",  95.0,   0.0,   0.0, 120.0,  5.0),
+    ("compass_large",  45.0, 180.0, 12.0, "compass", 135.0,   0.0,   0.0,  60.0, 10.0),
+    # Wind from 180°, heading 225° → AWA ≈ -45° (port). Start 10° off.
+    ("wind_awa_hold", 215.0, 180.0, 15.0, "wind_awa", 225.0, -45.0,  0.0, 120.0, 10.0),
+]
+
+
+def _run_cl_suite(predict_fn, scenarios=None):
+    """Run the closed-loop test suite and return results dict."""
+    scenarios = scenarios or _CL_SCENARIOS
+    results = []
+    for args in scenarios:
+        r = _run_cl_scenario(predict_fn, *args)
+        results.append(r)
+    return results
+
+
+def _cl_mean_error(results):
+    """Aggregate score from closed-loop results (lower is better)."""
+    return sum(r["mean_ss_error_deg"] for r in results) / max(len(results), 1)
+
+
+def _print_cl_results(results):
+    """Pretty-print closed-loop validation results."""
+    all_passed = all(r["passed"] for r in results)
+    print("\n" + "=" * 60)
+    print("CLOSED-LOOP VALIDATION")
+    print("=" * 60)
+    for r in results:
+        status = "PASS" if r["passed"] else "FAIL"
+        print(f"  [{status}] {r['name']}: "
+              f"SS error {r['mean_ss_error_deg']:.1f}° "
+              f"(max {r['max_ss_error_deg']:.1f}°, "
+              f"accept <{r['acceptable_deg']}°) "
+              f"rudder_mean={r['mean_rudder_deg']:.1f}°")
+    print(f"\nOverall: {'PASS' if all_passed else 'FAIL'}")
+    print("=" * 60 + "\n")
+    return all_passed
+
+
+def closed_loop_validate(model_path: str) -> Dict[str, Any]:
+    """Run closed-loop steering tests against a saved model file.
+
+    Supports .onnx and .pt model files.
+
+    Returns dict with per-test results and an overall PASS/FAIL.
+    """
+    from src.ml.autopilot_model import AutopilotInference
+    autopilot = AutopilotInference(model_path)
+    results = _run_cl_suite(autopilot.predict)
+    all_passed = _print_cl_results(results)
+    return {"passed": all_passed, "tests": results}
+
+
+def closed_loop_validate_pytorch(model, device=None):
+    """Run closed-loop steering tests against an in-memory PyTorch model.
+
+    Used during training to evaluate closed-loop performance without
+    saving/loading from disk.  The model is temporarily moved to CPU
+    to avoid interfering with GPU training memory.
+    """
+    import copy
+    cpu_model = copy.deepcopy(model).cpu().eval()
+
+    def _predict(sequence):
+        t = torch.from_numpy(sequence[np.newaxis]).float()
+        with torch.no_grad():
+            out = cpu_model(t)
+        return float(np.clip(out.numpy()[0, 0], -1.0, 1.0))
+
+    results = _run_cl_suite(_predict)
+    return results
 
 
 def _log_mlflow_params(training_config: TrainingConfig, 
@@ -759,9 +1093,11 @@ def _log_mlflow_artifacts(paths: Dict[str, str], model: 'AutopilotLSTM'):
 
 if __name__ == "__main__":
     import argparse
+    import sys
     
     parser = argparse.ArgumentParser(description="Train autopilot model")
-    parser.add_argument("data_dir", help="Directory containing training logs")
+    parser.add_argument("data_dir", nargs='?', default=None,
+                       help="Directory containing training logs")
     parser.add_argument("--output", "-o", default="models", help="Output directory")
     parser.add_argument("--epochs", "-e", type=int, default=100, help="Training epochs")
     parser.add_argument("--max-time", "-t", type=float, default=None,
@@ -777,9 +1113,45 @@ if __name__ == "__main__":
     parser.add_argument("--run-name", default=None,
                        help="MLflow run name (optional)")
     
+    # Data format options
+    parser.add_argument("--json", action="store_true",
+                       help="Force legacy JSON loading (default: auto-detect .bin)")
+    parser.add_argument("--preprocess", action="store_true",
+                       help="Preprocess data to .npy files and exit (for streaming)")
+    parser.add_argument("--preprocessed-dir", default=None,
+                       help="Directory with preprocessed .npy files (auto-enables streaming)")
+    parser.add_argument("--streaming", action="store_true",
+                       help="Use memory-mapped streaming for large datasets")
+
+    # Standalone validation mode
+    parser.add_argument("--validate", default=None, metavar="MODEL_PATH",
+                       help="Run closed-loop validation on a model (.onnx) and exit")
+    
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
+
+    # Validate-only mode
+    if args.validate:
+        result = closed_loop_validate(args.validate)
+        sys.exit(0 if result["passed"] else 1)
+
+    if not args.data_dir:
+        parser.error("data_dir is required for training")
+
+    # Preprocess-only mode
+    if args.preprocess:
+        from .data_loader import TrainingDataLoader
+        loader = TrainingDataLoader()
+        preprocess_dir = args.preprocessed_dir or (args.data_dir.rstrip('/') + '_preprocessed')
+        manifest = loader.preprocess_to_disk(args.data_dir, preprocess_dir)
+        print(f"\nPreprocessed {manifest['total_sequences']:,} sequences "
+              f"from {len(manifest['files'])} files -> {preprocess_dir}")
+        print(f"\nTo train with streaming:")
+        print(f"  uv run python -m src.training.train_imitation "
+              f"{args.data_dir} --preprocessed-dir {preprocess_dir}")
+        sys.exit(0)
+    
     paths = train_from_logs(
         args.data_dir, 
         args.output, 
@@ -789,6 +1161,7 @@ if __name__ == "__main__":
         use_mlflow=args.mlflow,
         mlflow_experiment_name=args.experiment_name,
         mlflow_run_name=args.run_name,
+        force_json=args.json,
     )
     
     print("\nModel files saved:")

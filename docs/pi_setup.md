@@ -14,7 +14,7 @@ Only for simple testing, no ML, Pi 1 B+1
     # add the usb drive to fstab as optional,
     vi /etc/fstab
     # install required os dependencies
-    sudo apt install python3-dev python3-setuptools
+    sudo apt install python3-dev python3-setuptools g++ cmake build-essential autoconf automake libtool pkg-config
     curl -LsSf https://astral.sh/uv/install.sh | sh    
     # enable overlay file system (no persisted os changes past here)
     sudo raspi-config

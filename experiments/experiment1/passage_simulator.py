@@ -77,7 +77,7 @@ class PassageSimulator:
         Initialize passage simulator.
         
         Args:
-            route_file: Path to route CSV file
+            route_file: Path to route file (.csv or .kml)
             grib_dir: Path to directory containing GRIB files
             config: Simulation configuration
         """
@@ -396,6 +396,7 @@ class PassageSimulator:
             self._inference_times.append(t_elapsed)
             
             # Convert from [-1, 1] to degrees (max 25°)
+            # Yacht dynamics already rate-limits the physical rudder at 4 deg/s
             return rudder_normalized * 25.0
             
         else:
@@ -419,174 +420,53 @@ class PassageSimulator:
         kp = 0.5
         return max(-25, min(25, kp * error))
         
+    @staticmethod
+    def _compute_true_wind(awa: float, aws: float, stw: float):
+        """Compute TWA/TWS from apparent wind using wind triangle.
+        
+        Must match TrainingDataLoader._compute_true_wind exactly so
+        that inference features equal training features.
+        """
+        awa_rad = np.radians(awa)
+        aw_x = aws * np.cos(awa_rad) - stw
+        aw_y = aws * np.sin(awa_rad)
+        tws = np.sqrt(aw_x**2 + aw_y**2)
+        twa = np.degrees(np.arctan2(aw_y, aw_x))
+        return twa, tws
+
     def _compute_features(self, nav_state, twd: float) -> np.ndarray:
+        """Compute feature vector for ML model.
+
+        Delegates to the shared compute_features() function in data_loader.py
+        to guarantee identical feature computation between training and inference.
         """
-        Compute feature vector for ML model.
-        
-        ARCHITECTURE: The model always steers to a computed heading.
-        In wind modes, the target heading is computed from the target wind angle.
-        This matches ModeManager.update() behavior and simplifies the model task.
-        
-        Feature indices:
-        - FEAT_HEADING_ERROR = 0: (heading - computed_heading) / 180 (ALWAYS heading-based)
-        - FEAT_HEADING_ERROR_INTEGRAL = 1
-        - FEAT_HEADING_RATE = 2
-        - FEAT_ROLL = 3
-        - FEAT_PITCH = 4
-        - FEAT_ROLL_RATE = 5
-        - FEAT_AWA = 6 (context: affects boat dynamics)
-        - FEAT_AWA_RATE = 7
-        - FEAT_AWS = 8 (context: affects boat dynamics)
-        - FEAT_TWA = 9
-        - FEAT_TWS = 10
-        - FEAT_STW = 11
-        - FEAT_SOG = 12
-        - FEAT_COG_ERROR = 13
-        - FEAT_RUDDER_POSITION = 14
-        - FEAT_RUDDER_VELOCITY = 15
-        - FEAT_TARGET_ANGLE = 16: The computed target heading (always heading)
-        - FEAT_VMG_UP = 17
-        - FEAT_VMG_DOWN = 18
-        - FEAT_POLAR_TARGET = 19
-        - FEAT_POLAR_PERFORMANCE = 20
-        - FEAT_MODE_COMPASS = 21
-        - FEAT_MODE_WIND_AWA = 22
-        - FEAT_MODE_WIND_TWA = 23
-        - FEAT_WAVE_PERIOD = 24
-        """
-        features = np.zeros(25)
-        
-        heading = self.yacht.state.heading
-        awa = self.yacht.state.awa
-        
-        # Compute TWA
-        twa = twd - heading
-        while twa > 180:
-            twa -= 360
-        while twa < -180:
-            twa += 360
-        
-        # ARCHITECTURE: Compute target heading from mode-specific target
-        # Wind targets are converted to heading targets so the model always steers to heading.
-        # 
-        # Sign convention (HelmController aligned):
-        # - error = computed_heading - heading (positive = target to starboard)
-        # - Positive error → positive rudder → turn starboard
-        # 
-        # For AWA mode: If AWA > target_awa (wind too far aft, need to head up):
-        # - computed_heading = heading + (awa - target_awa) > heading
-        # - error = computed_heading - heading > 0 (positive)
-        # - Positive rudder → turn starboard → heading increases → AWA decreases ✓
-        
-        if nav_state.steering_mode == SteeringMode.COMPASS:
-            # Direct heading target
-            computed_heading = nav_state.target_heading
-        elif nav_state.steering_mode == SteeringMode.WIND_AWA:
-            # Compute heading that would achieve target AWA
-            # If awa > target_awa: need to head up → increase heading → computed > heading
-            awa_delta = awa - nav_state.target_awa
-            computed_heading = heading + awa_delta
-        elif nav_state.steering_mode == SteeringMode.WIND_TWA:
-            # Compute heading that would achieve target TWA
-            twa_delta = twa - nav_state.target_twa
-            computed_heading = heading + twa_delta
-        else:
-            # Default to compass mode (for MOTORING)
-            computed_heading = nav_state.target_heading
-        
-        # Normalize computed_heading to [0, 360)
-        while computed_heading < 0:
-            computed_heading += 360
-        while computed_heading >= 360:
-            computed_heading -= 360
-            
-        # FEAT_ERROR (0): ALWAYS heading error (HelmController convention)
-        # error = computed_heading - heading (target - current)
-        # Positive error = target to starboard → positive rudder → turn starboard
-        error = computed_heading - heading
-        
-        # Normalize error to [-180, 180]
-        while error > 180:
-            error -= 360
-        while error < -180:
-            error += 360
-        features[0] = np.clip(error / 180.0, -1.0, 1.0)
-        
-        # FEAT_HEADING_ERROR_INTEGRAL (1): Skip for now (would need state tracking)
-        features[1] = 0.0
-        
-        # FEAT_HEADING_RATE (2)
-        features[2] = np.clip(self.yacht.state.heading_rate / 30.0, -1.0, 1.0)
-        
-        # FEAT_ROLL (3), FEAT_PITCH (4)
-        features[3] = np.clip(self.yacht.state.roll / 45.0, -1.0, 1.0)
-        features[4] = np.clip(self.yacht.state.pitch / 30.0, -1.0, 1.0)
-        
-        # FEAT_ROLL_RATE (5): Skip (would need state tracking)
-        features[5] = 0.0
-        
-        # FEAT_AWA (6)
-        features[6] = np.clip(awa / 180.0, -1.0, 1.0)
-        
-        # FEAT_AWA_RATE (7): Skip
-        features[7] = 0.0
-        
-        # FEAT_AWS (8)
-        features[8] = np.clip(self.yacht.state.aws / 60.0, -1.0, 1.0)
-        
-        # FEAT_TWA (9), FEAT_TWS (10)
-        features[9] = np.clip(twa / 180.0, -1.0, 1.0)
-        features[10] = np.clip(self.yacht.state.tws / 60.0, 0.0, 1.0)
-        
-        # FEAT_STW (11), FEAT_SOG (12)
-        features[11] = np.clip(self.yacht.state.stw / 25.0, 0.0, 1.0)
-        features[12] = np.clip(self.yacht.state.sog / 25.0, 0.0, 1.0)
-        
-        # FEAT_COG_ERROR (13): cog - target_heading (compass bearing error)
-        cog_error = self.yacht.state.cog - nav_state.target_heading
-        while cog_error > 180:
-            cog_error -= 360
-        while cog_error < -180:
-            cog_error += 360
-        features[13] = np.clip(cog_error / 180.0, -1.0, 1.0)
-        
-        # FEAT_RUDDER_POSITION (14) - normalized to 25° max
-        features[14] = np.clip(self.yacht.state.rudder_angle / 25.0, -1.0, 1.0)
-        
-        # FEAT_RUDDER_VELOCITY (15): Skip
-        features[15] = 0.0
-        
-        # FEAT_TARGET_ANGLE (16): The computed target heading (always heading-based)
-        features[16] = np.clip(computed_heading / 180.0, -1.0, 1.0)
-        
-        # FEAT_VMG_UP (17), FEAT_VMG_DOWN (18)
-        stw = self.yacht.state.stw
-        if stw > 0:
-            vmg_up = stw * math.cos(math.radians(abs(twa)))
-            vmg_down = stw * math.cos(math.radians(180 - abs(twa)))
-        else:
-            vmg_up = vmg_down = 0.0
-        features[17] = np.clip(vmg_up / 15.0, -1.0, 1.0)
-        features[18] = np.clip(vmg_down / 20.0, -1.0, 1.0)
-        
-        # FEAT_POLAR_TARGET (19), FEAT_POLAR_PERFORMANCE (20)
-        polar_target = self.polar.get_target_speed(abs(twa), self.yacht.state.tws)
-        polar_perf = stw / polar_target if polar_target > 0 else 0.0
-        features[19] = np.clip(polar_target / 25.0, 0.0, 1.0)
-        features[20] = np.clip(polar_perf, 0.0, 1.2)
-        
-        # Mode flags (21-23)
-        if nav_state.steering_mode == SteeringMode.COMPASS:
-            features[21] = 1.0
-        elif nav_state.steering_mode == SteeringMode.WIND_AWA:
-            features[22] = 1.0
-        elif nav_state.steering_mode == SteeringMode.WIND_TWA:
-            features[23] = 1.0
-            
-        # FEAT_WAVE_PERIOD (24): Use default
-        features[24] = np.clip(5.0 / 15.0, 0.0, 1.0)
-            
-        return features
+        from src.training.data_loader import compute_features
+
+        # Map navigator's SteeringMode enum to the mode strings used by compute_features
+        mode_map = {
+            SteeringMode.COMPASS: "compass",
+            SteeringMode.WIND_AWA: "wind_awa",
+            SteeringMode.WIND_TWA: "wind_twa",
+            SteeringMode.MOTORING: "compass",
+        }
+        mode_str = mode_map.get(nav_state.steering_mode, "compass")
+
+        return compute_features(
+            heading=self.yacht.state.heading,
+            pitch=self.yacht.state.pitch,
+            roll=self.yacht.state.roll,
+            yaw_rate=self.yacht.state.heading_rate,
+            awa=self.yacht.state.awa,
+            aws=self.yacht.state.aws,
+            stw=self.yacht.state.stw,
+            cog=self.yacht.state.cog,
+            sog=self.yacht.state.sog,
+            rudder_angle=self.yacht.state.rudder_angle,
+            target_heading=nav_state.target_heading,
+            target_awa=nav_state.target_awa,
+            target_twa=nav_state.target_twa,
+            mode=mode_str,
+        )
         
     def _log_progress(self):
         """Log simulation progress."""
@@ -637,4 +517,13 @@ class PassageSimulator:
                    
     def save_results(self, output_dir: str):
         """Save simulation results to files."""
-        self.metrics.save_results(output_dir)
+        extra = {
+            'route_file': self.route_parser.filepath.name
+                if hasattr(self.route_parser, 'filepath') else None,
+            'controller': (
+                'baseline' if self.config.use_baseline
+                else 'mock' if self.config.use_mock
+                else self.config.model_path or 'unknown'
+            ),
+        }
+        self.metrics.save_results(output_dir, extra_summary=extra)

@@ -61,7 +61,7 @@ Examples:
         '--route', '-r',
         type=str,
         required=True,
-        help='Path to route CSV file'
+        help='Path to route file (.csv or .kml)'
     )
     
     # Optional arguments
@@ -76,7 +76,7 @@ Examples:
         '--model', '-m',
         type=str,
         default=None,
-        help='Path to trained autopilot model (.keras or .tflite)'
+        help='Path to trained autopilot model (.onnx)'
     )
     
     parser.add_argument(

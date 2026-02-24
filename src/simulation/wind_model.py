@@ -87,9 +87,10 @@ class WindModel:
         
     def _initialize(self):
         """Initialize wind state."""
-        self.state.twd = self.config.base_twd
+        self._base_twd = self.config.base_twd
+        self.state.twd = self._base_twd
         self.state.base_tws = random.uniform(
-            self.config.base_tws_min, 
+            self.config.base_tws_min,
             self.config.base_tws_max
         )
         self.state.tws = self.state.base_tws
@@ -119,18 +120,18 @@ class WindModel:
         # Add random acceleration to shift velocity
         acceleration = random.gauss(0, self.config.shift_rate * dt / 60.0)
         self.state.shift_velocity += acceleration
-        
+
         # Apply persistence (damping)
         self.state.shift_velocity *= self.config.shift_persistence
-        
+
         # Limit maximum shift rate
         max_rate = self.config.shift_rate * 3 / 60.0  # deg/s
-        self.state.shift_velocity = max(-max_rate, 
+        self.state.shift_velocity = max(-max_rate,
                                         min(max_rate, self.state.shift_velocity))
-        
-        # Update direction
-        self.state.twd += self.state.shift_velocity * dt
-        self.state.twd %= 360
+
+        # Update base direction (oscillation-free)
+        self._base_twd += self.state.shift_velocity * dt
+        self._base_twd %= 360
         
     def _update_oscillation(self, dt: float):
         """Update sinusoidal oscillation component."""
@@ -180,26 +181,27 @@ class WindModel:
                 
     def _compute_final_wind(self):
         """Compute final wind values with all effects."""
-        # Apply oscillation to direction
+        # Apply oscillation as a read-only overlay on the base TWD.
+        # The oscillation is NOT folded back into _base_twd; it only
+        # affects the published state.twd that external code reads.
         if self.config.oscillation_enabled:
             oscillation = self.config.oscillation_amplitude * math.sin(
                 self.state.oscillation_phase
             )
-            effective_twd = self.state.twd + oscillation
+            self.state.twd = (self._base_twd + oscillation) % 360
         else:
-            effective_twd = self.state.twd
-            
-        self.state.twd = effective_twd % 360
-        
+            self.state.twd = self._base_twd % 360
+
         # Apply gust/lull factor to speed
         self.state.tws = self.state.base_tws * self.state.gust_factor
-        
+
         # Clamp to reasonable range
         self.state.tws = max(0, min(60, self.state.tws))
         
     def set_wind(self, twd: float, tws: float):
         """Set wind conditions directly."""
-        self.state.twd = twd % 360
+        self._base_twd = twd % 360
+        self.state.twd = self._base_twd
         self.state.tws = tws
         self.state.base_tws = tws
         
@@ -221,7 +223,8 @@ class WindModel:
         """Reset wind to initial conditions."""
         self._initialize()
         if twd is not None:
-            self.state.twd = twd % 360
+            self._base_twd = twd % 360
+            self.state.twd = self._base_twd
         if tws is not None:
             self.state.tws = tws
             self.state.base_tws = tws

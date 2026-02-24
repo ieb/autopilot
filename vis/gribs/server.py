@@ -610,7 +610,7 @@ def list_routes() -> Dict[str, Any]:
         return jsonify({'routes': [], 'error': 'Routes directory not configured'})
     
     route_files = []
-    for pattern in ['*.csv']:
+    for pattern in ['*.csv', '*.kml']:
         for f in routes_dir.glob(pattern):
             route_files.append(f.name)
     
@@ -687,18 +687,44 @@ def get_route(name: str) -> Dict[str, Any]:
 
 @app.route('/api/results')
 def list_results() -> Dict[str, Any]:
-    """List available result directories."""
+    """
+    List available result directories.
+
+    Query params:
+        route: Optional route filename to filter results by.
+               Only results whose summary.json contains a matching
+               ``route_file`` field are returned.  Results with no
+               ``route_file`` are included when no filter is given.
+    """
     if results_dir is None or not results_dir.exists():
         return jsonify({'results': [], 'error': 'Results directory not configured'})
-    
+
+    route_filter = request.args.get('route', None)
+
     result_dirs = []
     for d in results_dir.iterdir():
-        if d.is_dir():
-            # Check if it has a time_series.csv
-            ts_file = d / 'time_series.csv'
-            if ts_file.exists():
-                result_dirs.append(d.name)
-    
+        if not d.is_dir():
+            continue
+        ts_file = d / 'time_series.csv'
+        if not ts_file.exists():
+            continue
+
+        if route_filter:
+            summary_file = d / 'summary.json'
+            if summary_file.exists():
+                try:
+                    import json as _json
+                    with open(summary_file, 'r') as f:
+                        summary = _json.load(f)
+                    if summary.get('route_file') != route_filter:
+                        continue
+                except Exception:
+                    continue
+            else:
+                continue
+
+        result_dirs.append(d.name)
+
     return jsonify({'results': sorted(result_dirs)})
 
 
@@ -816,7 +842,7 @@ def main():
                         help='Directory containing GRIB files')
     parser.add_argument('--routes-dir', '-r',
                         default='data/experiment1/route',
-                        help='Directory containing route CSV files (default: data/experiment1/route)')
+                        help='Directory containing route files (.csv or .kml) (default: data/experiment1/route)')
     parser.add_argument('--results-dir',
                         default='results',
                         help='Directory containing result folders (default: results)')

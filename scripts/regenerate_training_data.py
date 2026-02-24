@@ -40,11 +40,14 @@ Examples:
   # Quick test (1 hour of data)
   uv run python scripts/regenerate_training_data.py --output data/test --hours 1
 
-  # Full training dataset (50 hours, 5 runs with domain randomization)
-  uv run python scripts/regenerate_training_data.py --output data/simulated --hours 50 --runs 5
+  # Full training dataset (20 hours, 3 runs with domain randomization)
+  uv run python scripts/regenerate_training_data.py --output data/simulated --hours 20 --runs 3
 
   # Specific scenarios only
   uv run python scripts/regenerate_training_data.py --output data/compass --scenarios medium_upwind delivery
+
+  # Larger perturbations for aggressive error recovery training
+  uv run python scripts/regenerate_training_data.py --output data/simulated --hours 20 --runs 3 --perturb-magnitude 60
 """
     )
     
@@ -97,6 +100,29 @@ Examples:
         help='Warm-up seconds before recording (skip transient, default: 90)'
     )
     
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Write legacy .jsonlog output instead of binary .bin (default: binary)'
+    )
+    parser.add_argument(
+        '--no-perturbations',
+        action='store_true',
+        help='Disable heading perturbations (default: enabled)'
+    )
+    parser.add_argument(
+        '--perturb-interval',
+        type=float,
+        default=15.0,
+        help='Mean seconds between heading perturbations (default 15)'
+    )
+    parser.add_argument(
+        '--perturb-magnitude',
+        type=float,
+        default=45.0,
+        help='Max perturbation magnitude in degrees (default 45)'
+    )
+    
     args = parser.parse_args()
     
     # Verify the helm controller fix is in place
@@ -114,7 +140,7 @@ Examples:
         
         # Run for 5 seconds
         for _ in range(50):
-            cmd = helm.compute_rudder(yacht.state.heading, 90, 90, yacht.state.heading_rate, 0.1)
+            cmd = helm.compute_rudder(yacht.state.heading, 90, 90, yacht.state.heading_rate, 0.1, aws=15.0, stw=6.0)
             yacht.step(cmd, 0.1)
         
         final_error = abs(85 - yacht.state.heading)
@@ -139,6 +165,10 @@ Examples:
         logger.info("Scenarios: all standard (medium_upwind, downwind_vmg, mixed_coastal, light_air_reaching, error_recovery)")
     
     logger.info(f"Warm-up period: {args.warmup}s (skip initial transient)")
+    if not args.no_perturbations:
+        logger.info(f"Perturbations: multi-scale (max ±{args.perturb_magnitude:.0f}°) every ~{args.perturb_interval:.0f}s")
+    else:
+        logger.info("Perturbations: disabled")
     
     try:
         files = generate_training_data(
@@ -149,6 +179,10 @@ Examples:
             randomize=not args.no_randomize,
             seed=args.seed,
             warmup_seconds=args.warmup,
+            enable_perturbations=not args.no_perturbations,
+            perturb_interval_sec=args.perturb_interval,
+            perturb_magnitude_deg=args.perturb_magnitude,
+            output_json=args.json,
         )
         
         logger.info(f"Generated {len(files)} data files:")
@@ -157,7 +191,7 @@ Examples:
             
         # Summary
         total_hours = args.hours * args.runs
-        total_samples = int(total_hours * 3600 * 10)  # 10 Hz
+        total_samples = int(total_hours * 3600 * 2)  # 2 Hz recording rate
         logger.info("")
         logger.info("=" * 60)
         logger.info("TRAINING DATA GENERATION COMPLETE")

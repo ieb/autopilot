@@ -2,12 +2,15 @@
 Route Parser
 =============
 
-Parses route CSV files from weather routing software.
+Parses route files from weather routing software.
+Supports CSV (e.g. Expedition, qtVlm) and KML (SailGrib) formats.
 Extracts waypoints with navigation data for passage simulation.
 """
 
 import csv
+import math
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -67,20 +70,23 @@ class Waypoint:
 
 class RouteParser:
     """
-    Parser for weather routing CSV files.
+    Parser for weather routing route files.
     
-    Handles the specific format from weather routing software with:
-    - DMS coordinate format (e.g., 51¡56.578'N)
-    - Multi-line headers
-    - Various navigation parameters
+    Supports:
+    - CSV files (e.g. Expedition, qtVlm) with DMS coordinates and multi-line headers
+    - KML files from SailGrib with sg: namespace extensions
+    
+    File format is auto-detected from the extension.
     """
+    
+    EARTH_RADIUS_NM = 3440.065
     
     def __init__(self, filepath: str):
         """
         Initialize parser with route file path.
         
         Args:
-            filepath: Path to the CSV route file
+            filepath: Path to route file (.csv or .kml)
         """
         self.filepath = Path(filepath)
         self.waypoints: List[Waypoint] = []
@@ -88,6 +94,8 @@ class RouteParser:
     def parse(self) -> List[Waypoint]:
         """
         Parse the route file and return list of waypoints.
+        
+        Auto-detects CSV vs KML based on file extension.
         
         Returns:
             List of Waypoint objects representing the planned route
@@ -97,7 +105,16 @@ class RouteParser:
             
         self.waypoints = []
         
-        # Try different encodings - file may use latin-1 or similar
+        if self.filepath.suffix.lower() == '.kml':
+            self._parse_kml()
+        else:
+            self._parse_csv()
+            
+        logger.info(f"Parsed {len(self.waypoints)} waypoints from {self.filepath.name}")
+        return self.waypoints
+    
+    def _parse_csv(self):
+        """Parse a CSV route file."""
         for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
             try:
                 with open(self.filepath, 'r', encoding=encoding) as f:
@@ -117,18 +134,144 @@ class RouteParser:
                 continue
                 
             try:
-                waypoint = self._parse_line(line)
+                waypoint = self._parse_csv_line(line)
                 if waypoint:
                     self.waypoints.append(waypoint)
             except Exception as e:
                 logger.warning(f"Failed to parse line {line_num}: {e}")
                 continue
-                
-        logger.info(f"Parsed {len(self.waypoints)} waypoints from {self.filepath.name}")
+    
+    def _parse_kml(self):
+        """Parse a SailGrib KML route file."""
+        tree = ET.parse(self.filepath)
+        root = tree.getroot()
         
-        return self.waypoints
+        ns = {'kml': 'http://www.opengis.net/kml/2.2'}
+        sg_ns = 'http://www.sailgrib.com'
         
-    def _parse_line(self, line: str) -> Optional[Waypoint]:
+        # Find the routing folder (contains the isochrone placemarks)
+        routing_folder = None
+        for folder in root.findall('.//kml:Folder', ns):
+            ext_data = folder.find('kml:ExtendedData', ns)
+            if ext_data is not None:
+                for child in ext_data:
+                    if child.tag == f'{{{sg_ns}}}type' and child.text == 'routing':
+                        routing_folder = folder
+                        break
+            if routing_folder is not None:
+                break
+        
+        if routing_folder is None:
+            raise ValueError("No SailGrib routing folder found in KML file")
+        
+        # Collect isochrone placemarks (skip the LineString placemark at the end)
+        raw_points = []
+        for pm in routing_folder.findall('kml:Placemark', ns):
+            coords_elem = pm.find('kml:Point/kml:coordinates', ns)
+            ts_elem = pm.find('kml:TimeStamp/kml:when', ns)
+            if coords_elem is None or ts_elem is None:
+                continue
+            
+            lon_str, lat_str = coords_elem.text.strip().split(',')[:2]
+            lat = float(lat_str)
+            lon = float(lon_str)
+            
+            timestamp = datetime.fromisoformat(ts_elem.text.replace('Z', '+00:00'))
+            # Strip timezone for consistency with CSV parser
+            timestamp = timestamp.replace(tzinfo=None)
+            
+            ext_data = pm.find('kml:ExtendedData', ns)
+            boat_vars = {}
+            weather_vars = {}
+            if ext_data is not None:
+                for child in ext_data:
+                    tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    name = child.get('name', '')
+                    if tag == 'BoatVariable':
+                        boat_vars[name] = child.text
+                    elif tag == 'WeatherVariable':
+                        weather_vars[name] = child.text
+            
+            raw_points.append({
+                'lat': lat, 'lon': lon,
+                'timestamp': timestamp,
+                'cog': float(boat_vars.get('cog', 0)),
+                'sog': float(boat_vars.get('sog', 0)),
+                'dog': float(boat_vars.get('dog', 0)),
+                'stw': float(boat_vars.get('stw', 0)),
+                'swa': float(boat_vars.get('swa', 0)),
+                'dtw': float(boat_vars.get('dtw', 0)),
+                'ismotoring': float(boat_vars.get('ismotoring', 0)) > 0.5,
+                'tws': float(weather_vars.get('tws', 0)),
+                'twd': float(weather_vars.get('twd', 0)),
+                'cs': float(weather_vars.get('cs', 0)),
+                'cd': float(weather_vars.get('cd', 0)),
+            })
+        
+        if len(raw_points) < 2:
+            raise ValueError(f"KML file has fewer than 2 routing placemarks ({len(raw_points)} found)")
+        
+        # Skip the final placemark if it has zero wind/speed (arrival marker)
+        last = raw_points[-1]
+        if last['tws'] == 0 and last['sog'] == 0 and last['cog'] == 0:
+            arrival_point = raw_points.pop()
+        else:
+            arrival_point = None
+        
+        # Build Waypoint objects: consecutive points form from/to pairs
+        for i, pt in enumerate(raw_points):
+            if i < len(raw_points) - 1:
+                next_pt = raw_points[i + 1]
+                to_lat = next_pt['lat']
+                to_lon = next_pt['lon']
+            elif arrival_point is not None:
+                to_lat = arrival_point['lat']
+                to_lon = arrival_point['lon']
+            else:
+                # Last point with no arrival marker - estimate destination from COG/DOG
+                to_lat, to_lon = self._project_position(
+                    pt['lat'], pt['lon'], pt['cog'], pt['dog']
+                )
+            
+            self.waypoints.append(Waypoint(
+                timestamp=pt['timestamp'],
+                from_lat=pt['lat'],
+                from_lon=pt['lon'],
+                to_lat=to_lat,
+                to_lon=to_lon,
+                cog=pt['cog'],
+                sog=pt['sog'],
+                distance=pt['dog'],
+                tws=pt['tws'],
+                twd=pt['twd'],
+                surface_wind_angle=pt['swa'],
+                distance_to_finish=pt['dtw'],
+                is_motoring=pt['ismotoring'],
+                current_speed=pt['cs'],
+                current_direction=pt['cd'],
+            ))
+    
+    @staticmethod
+    def _project_position(lat: float, lon: float, bearing_deg: float, distance_nm: float) -> Tuple[float, float]:
+        """Project a position along a bearing for a given distance."""
+        R = RouteParser.EARTH_RADIUS_NM
+        d = distance_nm / R
+        brng = math.radians(bearing_deg)
+        lat1 = math.radians(lat)
+        lon1 = math.radians(lon)
+        
+        lat2 = math.asin(
+            math.sin(lat1) * math.cos(d) +
+            math.cos(lat1) * math.sin(d) * math.cos(brng)
+        )
+        lon2 = lon1 + math.atan2(
+            math.sin(brng) * math.sin(d) * math.cos(lat1),
+            math.cos(d) - math.sin(lat1) * math.sin(lat2)
+        )
+        
+        return math.degrees(lat2), math.degrees(lon2)
+        
+    def _parse_csv_line(self, line: str) -> Optional[Waypoint]:
         """Parse a single CSV line into a Waypoint."""
         # Split by comma, handling potential edge cases
         parts = line.split(',')
@@ -331,7 +474,7 @@ def parse_route(filepath: str) -> List[Waypoint]:
     Convenience function to parse a route file.
     
     Args:
-        filepath: Path to the CSV route file
+        filepath: Path to route file (.csv or .kml)
         
     Returns:
         List of Waypoint objects

@@ -862,9 +862,12 @@ function setupEventListeners() {
     map.on('mousemove', updateTooltip);
     map.on('mouseout', hideTooltip);
     
-    // Route selector
+    // Route selector – also reload the results list filtered by selected route
     document.getElementById('route-select').addEventListener('change', (e) => {
-        loadRoute(e.target.value);
+        const routeName = e.target.value;
+        loadRoute(routeName);
+        clearAllResults();
+        loadResultList(routeName || null);
     });
     
     // Show/hide route checkbox
@@ -928,17 +931,24 @@ async function loadRouteList() {
 }
 
 /**
- * Load list of available results and populate checkboxes
+ * Load list of available results and populate checkboxes.
+ * @param {string|null} routeFilter – only show results for this route file
  */
-async function loadResultList() {
+async function loadResultList(routeFilter) {
     try {
-        const response = await fetch('/api/results');
+        let url = '/api/results';
+        if (routeFilter) {
+            url += '?route=' + encodeURIComponent(routeFilter);
+        }
+        const response = await fetch(url);
         const data = await response.json();
         
         const container = document.getElementById('result-checkboxes');
         
         if (!data.results || data.results.length === 0) {
-            container.innerHTML = '<em>No results available</em>';
+            container.innerHTML = routeFilter
+                ? '<em>No results for this route</em>'
+                : '<em>Select a route to see results</em>';
             return;
         }
         
@@ -1161,6 +1171,12 @@ function removeResult(name) {
     }
     delete resultData[name];
     updatePassageSlider();
+}
+
+function clearAllResults() {
+    for (const name of Object.keys(resultLayers)) {
+        removeResult(name);
+    }
 }
 
 /**
@@ -1629,7 +1645,7 @@ async function init() {
     setupEventListeners();
     await fetchMetadata();
     await loadRouteList();
-    await loadResultList();
+    await loadResultList(null);
 }
 
 // Start when DOM is ready

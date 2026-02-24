@@ -388,7 +388,10 @@ class TestNMEA2000Conventions:
             f"Negative rudder should increase AWA: {initial_awa:.1f}° → {final_awa:.1f}°"
     
     def test_helm_controller_awa_mode_positive_error(self):
-        """AWA mode: positive error (AWA > target) should produce positive rudder."""
+        """AWA mode: positive error (AWA > target) should produce positive rudder.
+
+        Uses low STW so AWA ≈ TWA, keeping the wind triangle consistent.
+        """
         helm = HelmController(HelmConfig(reaction_delay=0.0))
         helm.set_mode(SteeringMode.WIND_AWA, target=45.0)  # Target AWA +45°
         
@@ -400,14 +403,19 @@ class TestNMEA2000Conventions:
             awa=60.0,  # 15° more than target
             twa=60.0,
             heading_rate=0.0,
-            dt=0.1
+            dt=0.1,
+            aws=15.0,
+            stw=0.1,
         )
         
         assert rudder > 0, \
             f"AWA error +15° (awa > target) should give positive rudder, got {rudder:.2f}°"
     
     def test_helm_controller_awa_mode_negative_error(self):
-        """AWA mode: negative error (AWA < target) should produce negative rudder."""
+        """AWA mode: negative error (AWA < target) should produce negative rudder.
+
+        Uses low STW so AWA ≈ TWA, keeping the wind triangle consistent.
+        """
         helm = HelmController(HelmConfig(reaction_delay=0.0))
         helm.set_mode(SteeringMode.WIND_AWA, target=45.0)  # Target AWA +45°
         
@@ -419,7 +427,9 @@ class TestNMEA2000Conventions:
             awa=30.0,  # 15° less than target
             twa=30.0,
             heading_rate=0.0,
-            dt=0.1
+            dt=0.1,
+            aws=15.0,
+            stw=0.1,
         )
         
         assert rudder < 0, \
@@ -437,7 +447,9 @@ class TestNMEA2000Conventions:
             awa=120.0,
             twa=135.0,  # 15° more than target
             heading_rate=0.0,
-            dt=0.1
+            dt=0.1,
+            aws=15.0,
+            stw=6.0,
         )
         
         assert rudder > 0, \
@@ -601,18 +613,18 @@ class TestWaveModel:
         assert min(yaws) < 0, "Should have negative yaw (falling off) when bow lifts"
         assert max(yaws) > 0, "Yaw should oscillate with wave phase"
         
-    def test_wave_yaw_scales_with_heel(self):
-        """Test wave yaw effect increases with heel angle."""
+    def test_wave_yaw_independent_of_heel(self):
+        """Test wave yaw is driven by swell height, not heel angle."""
         waves = WaveModel(seed=42)
         waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
-        
+
         # Collect max yaw with small heel
-        waves.state.swell_phase = 0  # Reset phase
+        waves.state.swell_phase = 0
         yaws_small_heel = []
         for _ in range(100):
             _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-5.0)
             yaws_small_heel.append(abs(yaw))
-        
+
         # Reset and collect max yaw with large heel
         waves.reset()
         waves.set_sea_state(swell_period=8.0, swell_amplitude=6.0)
@@ -620,10 +632,11 @@ class TestWaveModel:
         for _ in range(100):
             _, _, yaw = waves.step(dt=0.1, tws=15.0, twa=150.0, heel=-20.0)
             yaws_large_heel.append(abs(yaw))
-        
-        # Large heel should produce larger yaw effect
-        assert max(yaws_large_heel) > max(yaws_small_heel), \
-            "Wave yaw should increase with heel angle"
+
+        # Wave yaw should be similar regardless of heel (driven by swell height)
+        ratio = max(yaws_large_heel) / max(yaws_small_heel) if max(yaws_small_heel) > 0 else 1.0
+        assert 0.8 < ratio < 1.2, \
+            f"Wave yaw should not depend strongly on heel (ratio={ratio:.2f})"
             
     def test_wave_yaw_scales_with_swell(self):
         """Test wave yaw effect increases with swell amplitude."""
@@ -723,7 +736,9 @@ class TestHelmController:
             awa=50.0,  # 5 degrees off
             twa=50.0,
             heading_rate=0.0,
-            dt=0.1
+            dt=0.1,
+            aws=15.0,
+            stw=6.0,
         )
         
         # Should command correction
@@ -1024,7 +1039,7 @@ class TestDataGenerator:
         assert len(records) > 0
         
     def test_generate_training_data_creates_files(self):
-        """Test generate_training_data creates output files."""
+        """Test generate_training_data creates binary output files by default."""
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_training_data(
                 output_path=tmpdir,
@@ -1036,19 +1051,42 @@ class TestDataGenerator:
             
             assert len(files) == 1
             
-            # Check log file exists and is valid JSON
+            # Default output is binary .bin
             log_path = Path(files[0])
             assert log_path.exists()
+            assert log_path.suffix == '.bin'
             
-            with open(log_path) as f:
-                first_line = f.readline()
-                record = json.loads(first_line)
-                assert "timestamp" in record
-                
-            # Check metadata file exists
+            # Check companion metadata file exists
             meta_path = log_path.with_suffix('.meta.json')
             assert meta_path.exists()
             
+            with open(meta_path) as f:
+                metadata = json.load(f)
+                assert metadata['format'] == 'binary_frame_v1'
+                assert metadata['frame_count'] > 0
+
+    def test_generate_training_data_json_flag(self):
+        """Test generate_training_data with output_json=True creates JSON."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_training_data(
+                output_path=tmpdir,
+                duration_hours=0.001,
+                scenarios=["medium_upwind"],
+                num_runs=1,
+                seed=42,
+                output_json=True,
+            )
+            
+            assert len(files) == 1
+            log_path = Path(files[0])
+            assert log_path.suffix == '.jsonlog'
+            
+            with open(log_path) as f:
+                record = json.loads(f.readline())
+                assert "timestamp" in record
+                
+            meta_path = log_path.with_suffix('.meta.json')
+            assert meta_path.exists()
             with open(meta_path) as f:
                 metadata = json.load(f)
                 assert "segments" in metadata
@@ -1098,12 +1136,10 @@ class TestIntegration:
             assert record["stw"] >= 0
             
     def test_data_loadable_by_training(self):
-        """Test generated data can be loaded by TrainingDataLoader."""
-        from src.training.data_loader import TrainingDataLoader, CANLogParser
+        """Test generated binary data can be loaded by TrainingDataLoader."""
+        from src.training.data_loader import TrainingDataLoader, FEATURE_DIM
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Generate enough data for training sequences (need at least 21 frames)
-            # 0.01 hours = 36 seconds = 360 frames at 10Hz
             files = generate_training_data(
                 output_path=tmpdir,
                 duration_hours=0.02,  # ~72 seconds, ~720 frames
@@ -1112,24 +1148,229 @@ class TestIntegration:
                 seed=42,
             )
             
-            # Try to parse with CANLogParser
+            # Load binary file
+            features, labels, valid = TrainingDataLoader.load_binary(files[0])
+            
+            assert features.shape[0] > 20, f"Got {features.shape[0]} frames"
+            assert features.shape[1] == FEATURE_DIM
+            assert labels.shape[0] == features.shape[0]
+            assert valid.shape[0] == features.shape[0]
+            
+            # Feature values should be in [-1, 1]
+            assert features.min() >= -1.0
+            assert features.max() <= 1.0
+
+    def test_data_loadable_json_path(self):
+        """Test generated JSON data can still be loaded by the legacy path."""
+        from src.training.data_loader import TrainingDataLoader, CANLogParser, FEATURE_DIM as FD
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_training_data(
+                output_path=tmpdir,
+                duration_hours=0.02,
+                scenarios=["medium_upwind"],
+                num_runs=1,
+                seed=42,
+                output_json=True,
+            )
+            
             parser = CANLogParser()
             frames = list(parser.parse_file(files[0]))
-            
             assert len(frames) > 20, f"Got {len(frames)} frames, need > 20"
             
-            # Check frames have required fields
-            frame = frames[0]
-            assert hasattr(frame, 'heading')
-            assert hasattr(frame, 'rudder_angle')
-            assert hasattr(frame, 'awa')
-            
-            # Try loading with TrainingDataLoader
             loader = TrainingDataLoader()
             X, y = loader.load_file(files[0])
             
-            # Should produce training sequences (need enough frames for sequences)
             assert len(X) > 0, f"Expected training sequences, got X shape {X.shape}"
-            assert len(y) > 0
-            assert X.shape[1] == 20  # sequence_length
-            assert X.shape[2] == 25  # feature_dim
+            assert X.shape[1] == 20
+            assert X.shape[2] == FD
+
+
+class TestBinaryFramePipeline:
+    """Tests for the binary frame data pipeline (Option C)."""
+
+    def _generate_binary(self, tmpdir, hours=0.02, seed=42):
+        files = generate_training_data(
+            output_path=tmpdir,
+            duration_hours=hours,
+            scenarios=["medium_upwind"],
+            num_runs=1,
+            seed=seed,
+        )
+        return files[0]
+
+    def test_binary_write_read_roundtrip(self):
+        """Binary file can be written and loaded back with correct shapes."""
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader, FEATURE_DIM
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._generate_binary(tmpdir)
+            features, labels, valid = TrainingDataLoader.load_binary(path)
+
+            assert features.ndim == 2
+            assert features.shape[1] == FEATURE_DIM
+            assert labels.ndim == 1
+            assert labels.shape[0] == features.shape[0]
+            assert valid.dtype == bool
+            assert valid.shape[0] == features.shape[0]
+            # All features clipped to [-1, 1]
+            assert features.min() >= -1.0
+            assert features.max() <= 1.0
+            # Labels (rudder / 25) also clipped
+            assert labels.min() >= -1.0
+            assert labels.max() <= 1.0
+
+    def test_binary_header_valid(self):
+        """Binary file has correct magic bytes and header fields."""
+        import struct
+        from src.simulation.data_generator import _BIN_MAGIC, _BIN_VERSION
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._generate_binary(tmpdir)
+            with open(path, 'rb') as f:
+                magic = f.read(4)
+                version, feat_dim, reserved = struct.unpack('<III', f.read(12))
+
+            assert magic == _BIN_MAGIC
+            assert version == _BIN_VERSION
+            assert feat_dim == 22
+            assert reserved == 0
+
+    def test_binary_load_directory(self):
+        """load_binary_directory finds and loads all .bin files."""
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_training_data(
+                output_path=tmpdir,
+                duration_hours=0.01,
+                scenarios=["medium_upwind"],
+                num_runs=2,
+                seed=42,
+            )
+            result = TrainingDataLoader.load_binary_directory(tmpdir)
+            assert len(result) == 2
+            for f, l, v in result:
+                assert f.shape[0] > 0
+                assert l.shape[0] == f.shape[0]
+
+    def test_frame_dataset_length_with_mirror(self):
+        """FrameDataset doubles length when mirror=True."""
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader, FrameDataset
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._generate_binary(tmpdir)
+            f, l, v = TrainingDataLoader.load_binary(path, mmap=False)
+
+            ds_mirror = FrameDataset(f, l, v, seq_len=20, mirror=True)
+            ds_no_mirror = FrameDataset(f, l, v, seq_len=20, mirror=False)
+
+            assert len(ds_mirror) == 2 * len(ds_no_mirror)
+
+    def test_frame_dataset_shapes(self):
+        """FrameDataset returns correct tensor shapes."""
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader, FrameDataset, FEATURE_DIM
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._generate_binary(tmpdir)
+            f, l, v = TrainingDataLoader.load_binary(path, mmap=False)
+
+            ds = FrameDataset(f, l, v, seq_len=20, mirror=True)
+            assert len(ds) > 0
+
+            x, y = ds[0]
+            assert x.shape == (20, FEATURE_DIM)
+            assert y.shape == (1,)
+
+    def test_frame_dataset_mirror_negates_correctly(self):
+        """Mirror samples negate the right features and label."""
+        import numpy as np
+        from src.training.data_loader import (
+            TrainingDataLoader, FrameDataset, MIRROR_NEGATE_FEATURES, FEATURE_DIM)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._generate_binary(tmpdir)
+            f, l, v = TrainingDataLoader.load_binary(path, mmap=False)
+
+            ds = FrameDataset(f, l, v, seq_len=20, mirror=True)
+            n_real = len(ds) // 2
+
+            x_orig, y_orig = ds[0]
+            x_mirror, y_mirror = ds[n_real]  # same underlying data, mirrored
+
+            # Label should be negated
+            assert abs(y_orig.item() + y_mirror.item()) < 1e-6
+
+            # Negated features
+            for idx in MIRROR_NEGATE_FEATURES:
+                diff = (x_orig[:, idx] + x_mirror[:, idx]).abs().max().item()
+                assert diff < 1e-6, f"Feature {idx} not negated"
+
+            # Non-negated features should be identical
+            non_neg = [i for i in range(FEATURE_DIM)
+                       if i not in MIRROR_NEGATE_FEATURES]
+            for idx in non_neg:
+                diff = (x_orig[:, idx] - x_mirror[:, idx]).abs().max().item()
+                assert diff < 1e-6, f"Feature {idx} unexpectedly changed"
+
+    def test_binary_vs_json_feature_parity(self):
+        """Binary and JSON paths produce matching features for the same seed.
+
+        Feature 13 (COG error) may differ slightly because the JSON path
+        reads target_heading from segment metadata while the binary path
+        uses the live per-frame helm target.  All other features should
+        be identical.
+        """
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader, FEATURE_DIM
+
+        with tempfile.TemporaryDirectory() as tmpdir_bin, \
+             tempfile.TemporaryDirectory() as tmpdir_json:
+            generate_training_data(
+                output_path=tmpdir_bin, duration_hours=0.01,
+                scenarios=["medium_upwind"], num_runs=1, seed=99,
+                enable_perturbations=False,
+            )
+            generate_training_data(
+                output_path=tmpdir_json, duration_hours=0.01,
+                scenarios=["medium_upwind"], num_runs=1, seed=99,
+                output_json=True,
+                enable_perturbations=False,
+            )
+
+            bin_f, bin_l, _ = TrainingDataLoader.load_binary(
+                str(list(Path(tmpdir_bin).glob('*.bin'))[0]), mmap=False)
+
+            loader = TrainingDataLoader()
+            X_json, _ = loader.load_file(
+                str(list(Path(tmpdir_json).glob('*.jsonlog'))[0]))
+            json_f0 = X_json[0, 0, :]
+            bin_f0 = bin_f[0]
+
+            # Compare all features except 13 (COG error, see docstring)
+            mask = np.ones(FEATURE_DIM, dtype=bool)
+            mask[13] = False
+            np.testing.assert_allclose(
+                bin_f0[mask], json_f0[mask], atol=1e-5,
+                err_msg="Binary and JSON features diverge")
+
+    def test_frame_dataset_from_file_list(self):
+        """from_file_list concatenates files with boundary gaps."""
+        import numpy as np
+        from src.training.data_loader import TrainingDataLoader, FrameDataset, FEATURE_DIM
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_training_data(
+                output_path=tmpdir, duration_hours=0.01,
+                scenarios=["medium_upwind"], num_runs=2, seed=42,
+            )
+            file_data = TrainingDataLoader.load_binary_directory(tmpdir)
+            ds = FrameDataset.from_file_list(file_data, seq_len=20)
+
+            assert len(ds) > 0
+            x, y = ds[0]
+            assert x.shape == (20, FEATURE_DIM)

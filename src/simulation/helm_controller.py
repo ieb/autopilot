@@ -28,16 +28,17 @@ class SteeringMode(Enum):
 class HelmConfig:
     """Configuration for helm controller."""
     # PD gains for compass mode
-    compass_kp: float = 0.3          # Proportional gain
-    compass_kd: float = 0.5          # Derivative gain
-    
+    # Scaled for rudder_effectiveness=0.5 (boat needs more rudder to turn)
+    compass_kp: float = 1.2          # Proportional gain
+    compass_kd: float = 2.0          # Derivative gain
+
     # PD gains for AWA mode (more responsive)
-    awa_kp: float = 0.25
-    awa_kd: float = 0.6
-    
+    awa_kp: float = 1.0
+    awa_kd: float = 2.4
+
     # PD gains for TWA mode (smoother downwind)
-    twa_kp: float = 0.2
-    twa_kd: float = 0.4
+    twa_kp: float = 0.8
+    twa_kd: float = 1.6
     
     # Rudder limits
     max_rudder_angle: float = 25.0   # Maximum rudder deflection (degrees)
@@ -103,14 +104,21 @@ class HelmController:
         if seed is not None:
             random.seed(seed)
             
+        # Wind triangle state for AWA→TWA conversion
+        self._last_aws = 0.0
+        self._last_stw = 0.0
+
         # Input buffer for delay simulation
         self._input_buffer = []
         self._buffer_time = 0.0
         
     def compute_rudder(self, heading: float, awa: float, twa: float,
-                       heading_rate: float, dt: float) -> float:
+                       heading_rate: float, dt: float,
+                       aws: float = 0.0, stw: float = 0.0) -> float:
         """
         Compute rudder command based on current state.
+        
+        All modes reduce to a heading error with compass PD gains.
         
         Args:
             heading: Current magnetic heading (degrees)
@@ -118,37 +126,37 @@ class HelmController:
             twa: Current true wind angle (degrees)
             heading_rate: Current heading rate (deg/s)
             dt: Time step (seconds)
+            aws: Apparent wind speed (knots), needed for AWA→TWA conversion
+            stw: Speed through water (knots), needed for AWA→TWA conversion
             
         Returns:
             Rudder command (degrees)
         """
         if self.state.mode == SteeringMode.STANDBY:
             return 0.0
-            
+
+        # Store for wind-triangle conversion in _compute_error
+        self._last_aws = aws
+        self._last_stw = stw
+
         # Update elapsed time for fatigue
         self.state.elapsed_time += dt
         
         # Apply reaction delay
         delayed = self._apply_delay(heading, awa, twa, dt)
         
-        # Compute error based on mode
+        # Compute heading error (all modes produce a heading error)
         error = self._compute_error(delayed)
         
-        # Get appropriate gains
+        # Compass PD gains for all modes
         kp, kd = self._get_gains()
         
         # Apply skill level
         kp *= self.config.skill_level
         kd *= self.config.skill_level
         
-        # PD control
-        # For compass mode, error = target - heading, so d(error)/dt = -heading_rate
-        # The derivative term should oppose the current motion to provide damping
-        if self.state.mode == SteeringMode.COMPASS:
-            # Negative sign because error derivative = -heading_rate
-            derivative = -heading_rate
-        else:
-            derivative = (error - self.state.last_error) / dt if dt > 0 else 0.0
+        # PD control -- error is always heading-based, so derivative = -heading_rate
+        derivative = -heading_rate
         
         command = kp * error + kd * derivative
         
@@ -209,48 +217,44 @@ class HelmController:
         return (entry[1], entry[2], entry[3])
         
     def _compute_error(self, delayed: Tuple[float, float, float]) -> float:
-        """
-        Compute steering error based on mode.
-        
-        NMEA2000 Sign Conventions:
-        - Compass: bearings increase clockwise (0°=N, 90°=E, 180°=S, 270°=W)
-        - Rudder: positive = starboard, negative = port
-        - AWA/TWA: positive = starboard, negative = port
-        
-        Compass mode:
-        - error = target - heading
-        - Positive error means target is clockwise from heading (to starboard)
-        - Positive error → positive rudder → turn starboard → heading increases
-        
-        Wind modes (AWA/TWA):
-        - error = current - target (note: reversed from compass)
-        - Positive error means wind angle too high (too far aft)
-        - Positive error → positive rudder → turn starboard → AWA decreases
+        """Compute heading error -- ALL modes reduce to a compass heading.
+
+        For wind modes, the target wind angle is converted to a target
+        heading via the TWA-heading relationship (TWA = TWD - heading,
+        so heading_delta = twa_delta).  AWA targets are first converted
+        to TWA using the wind triangle.  The result is always
+        ``computed_heading - heading`` so a single set of compass PD
+        gains steers consistently regardless of mode.
         """
         heading, awa, twa = delayed
-        
+
         if self.state.mode == SteeringMode.COMPASS:
-            # target - heading: positive when target is to starboard (clockwise)
-            # Positive error → positive rudder → turn starboard → heading increases
-            return self._angle_diff(self.state.target_heading, heading)
+            computed_heading = self.state.target_heading
         elif self.state.mode == SteeringMode.WIND_AWA:
-            # awa - target: positive when AWA too high (need to head up)
-            # Positive error → positive rudder → turn starboard → AWA decreases
-            return self._angle_diff(awa, self.state.target_awa)
+            target_twa = self._awa_to_twa(self.state.target_awa)
+            twa_delta = twa - target_twa
+            computed_heading = heading + twa_delta
         elif self.state.mode == SteeringMode.WIND_TWA:
-            # Same logic as AWA mode
-            return self._angle_diff(twa, self.state.target_twa)
-        return 0.0
-        
+            twa_delta = twa - self.state.target_twa
+            computed_heading = heading + twa_delta
+        else:
+            return 0.0
+
+        computed_heading %= 360.0
+        return self._angle_diff(computed_heading, heading)
+
+    def _awa_to_twa(self, target_awa: float) -> float:
+        """Convert an AWA target to TWA using the wind triangle."""
+        awa_rad = math.radians(target_awa)
+        stw = max(self._last_stw, 0.01)
+        aws = max(self._last_aws, 0.01)
+        tw_x = aws * math.cos(awa_rad) - stw
+        tw_y = aws * math.sin(awa_rad)
+        return math.degrees(math.atan2(tw_y, tw_x))
+
     def _get_gains(self) -> Tuple[float, float]:
-        """Get PD gains for current mode."""
-        if self.state.mode == SteeringMode.COMPASS:
-            return (self.config.compass_kp, self.config.compass_kd)
-        elif self.state.mode == SteeringMode.WIND_AWA:
-            return (self.config.awa_kp, self.config.awa_kd)
-        elif self.state.mode == SteeringMode.WIND_TWA:
-            return (self.config.twa_kp, self.config.twa_kd)
-        return (0.0, 0.0)
+        """Compass PD gains for all modes (the model always steers to heading)."""
+        return (self.config.compass_kp, self.config.compass_kd)
         
     def _compute_anticipation(self, error: float, derivative: float) -> float:
         """Compute anticipatory correction."""

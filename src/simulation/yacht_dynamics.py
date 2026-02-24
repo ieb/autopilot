@@ -65,19 +65,19 @@ class YachtConfig:
     max_speed_kts: float = 20.0
     
     # Stability parameters (physics-based heel model)
-    metacentric_height: float = 1.5        # GM in meters (tuned to match real sailing data)
-    max_heel: float = 35.0                 # Absolute maximum heel angle (degrees)
-    max_heel_before_reef: float = 25.0     # Heel threshold to trigger reefing
+    metacentric_height: float = 0.72       # GM in meters – tuned to give ~30° heel upwind in 15kt
+    max_heel: float = 45.0                 # Absolute maximum heel angle (degrees)
+    max_heel_before_reef: float = 35.0     # Heel threshold to trigger reefing
     auto_reef: bool = True                 # Enable automatic reefing
     heel_damping: float = 0.85             # Heel response damping (0-1)
-    
+
     # Rudder response
-    rudder_effectiveness: float = 2.0      # deg/s heading rate per deg rudder
+    rudder_effectiveness: float = 0.5      # deg/s heading rate per deg rudder
     heading_damping: float = 0.8           # First-order response damping
     max_rudder_angle: float = 25.0         # Maximum rudder deflection
     
     # Weather helm
-    weather_helm_factor: float = 0.1       # deg/s yaw rate per deg heel
+    weather_helm_factor: float = 0.05      # deg/s yaw rate per deg heel
     
     # Leeway
     leeway_coefficient: float = 0.15       # Leeway degrees per deg heel
@@ -144,7 +144,8 @@ class YachtDynamics:
         self.polar = polar or Polar.pogo_1250()
         self.state = YachtState()
         self.sail_config = SailConfig()
-        
+        self._reef_cooldown = 0.0  # Seconds remaining before next reef change allowed
+
         # Apply domain randomization
         if variation > 0:
             self._apply_variation(variation)
@@ -179,7 +180,7 @@ class YachtDynamics:
         # Compute forces and moments
         self._update_heading(dt, wave_yaw)
         self._update_heel(dt)
-        self._check_reefing()  # Auto-adjust sails based on heel
+        self._check_reefing(dt)  # Auto-adjust sails based on heel
         self._update_speed(dt)
         self._update_apparent_wind()
         self._update_leeway()
@@ -219,8 +220,10 @@ class YachtDynamics:
         speed_factor = min(1.0, self.state.stw / 3.0) if self.state.stw > 0 else 0.0
         rudder_effect *= speed_factor
         
-        # Weather helm from heel
-        weather_helm = self.config.weather_helm_factor * self.state.roll
+        # Weather helm from heel – heeling to port (negative roll) on starboard
+        # tack pushes the bow toward the wind (starboard = positive heading rate).
+        # Negate so that negative roll → positive weather helm.
+        weather_helm = -self.config.weather_helm_factor * self.state.roll
         
         # Target rate including wave-induced yaw
         target_rate = rudder_effect + weather_helm + wave_yaw
@@ -257,40 +260,41 @@ class YachtDynamics:
         awa_rad = math.radians(abs(self.state.awa))
         
         # Lift coefficient varies with AWA
-        # Peak lift around 30-40° AWA, drops at extremes (head to wind, running)
-        if awa_rad < math.pi / 2:
-            # Upwind: lift increases with AWA up to beam reach
-            cl = 1.2 * math.sin(2 * awa_rad)
+        # Upwind: high side-force from sails generating lift → high heel.
+        # Real sails produce high CL across AWA 25-80°, with a ramp up
+        # from luffing (AWA<20) and a drop past beam reach.
+        # Downwind: mostly drag, low side-force → low heel.
+        # Tuned with GM=0.72 to give ~28° upwind / ~8° downwind at 15kt.
+        awa_deg = math.degrees(awa_rad)
+        if awa_deg < 20:
+            # Close to head-to-wind: sails luffing, low force
+            cl = 1.5 * (awa_deg / 20.0)
+        elif awa_deg < 80:
+            # Upwind plateau: high lift from close-hauled to near beam reach
+            cl = 1.5
+        elif awa_deg < 100:
+            # Transition: lift drops past beam reach
+            cl = 1.5 * (100.0 - awa_deg) / 20.0
         else:
-            # Downwind: reduced heeling force
-            cl = 0.6 * math.sin(math.pi - awa_rad)
+            # Downwind: mostly drag, low side-force
+            cl = 0.2 * math.sin(math.pi - awa_rad)
         
         # Heeling force from sails: F = 0.5 * rho * A * Cl * V^2
         heeling_force = 0.5 * RHO_AIR * sail_area * cl * aws_ms ** 2
-        
+
         # Heeling moment = force * lever arm (center of effort height)
         heeling_moment = heeling_force * center_of_effort
-        
-        # Solve for equilibrium heel angle iteratively
-        # (heel reduces heeling moment via cos factor, increases righting moment via sin)
-        target_heel_rad = 0.01  # Start with small angle
-        
-        for _ in range(10):  # Iterate to converge
-            # Heeling moment reduced as boat heels (sails become less effective)
-            effective_heeling = heeling_moment * math.cos(target_heel_rad)
-            
-            # Righting moment: M_r = m * g * GM * sin(theta)
-            # Solve for theta: sin(theta) = M_h / (m * g * GM)
-            righting_arm_factor = self.config.displacement_kg * G * self.config.metacentric_height
-            
-            if righting_arm_factor > 0:
-                sin_theta = min(1.0, effective_heeling / righting_arm_factor)
-                new_heel_rad = math.asin(sin_theta)
-                
-                # Check convergence
-                if abs(new_heel_rad - target_heel_rad) < 0.001:
-                    break
-                target_heel_rad = new_heel_rad
+
+        # Solve for equilibrium heel angle analytically.
+        # At equilibrium: M_heel * cos(θ) = M_right * sin(θ)
+        # where M_right = displacement * g * GM
+        # This gives: tan(θ) = M_heel / M_right, so θ = atan(M_heel / M_right)
+        righting_arm_factor = self.config.displacement_kg * G * self.config.metacentric_height
+
+        if righting_arm_factor > 0:
+            target_heel_rad = math.atan(heeling_moment / righting_arm_factor)
+        else:
+            target_heel_rad = 0.0
         
         # Convert to degrees and cap at max heel
         target_heel = math.degrees(target_heel_rad)
@@ -313,30 +317,37 @@ class YachtDynamics:
         # Sync reef level to state for logging
         self.state.reef_level = self.sail_config.reef_level
         
-    def _check_reefing(self):
+    def _check_reefing(self, dt: float):
         """
         Automatically adjust reef level based on heel angle.
-        
+
         Reef up (reduce sail) when heel exceeds max_heel_before_reef.
         Shake out reef (more sail) when heel is well below threshold.
+        A cooldown timer prevents chain-reefing during transient spikes.
         """
         if not self.config.auto_reef:
             return
-            
+
+        # Decrement cooldown
+        if self._reef_cooldown > 0:
+            self._reef_cooldown -= dt
+            return
+
         current_heel = abs(self.state.roll)
-        
+
         # Reef up if heel exceeds threshold
         if current_heel > self.config.max_heel_before_reef:
             if self.sail_config.reef_up():
+                self._reef_cooldown = 5.0  # Wait 5s before next change
                 logger.debug(
                     f"Reefing up to level {self.sail_config.reef_level} "
                     f"(heel {current_heel:.1f}° > {self.config.max_heel_before_reef}°)"
                 )
-                
-        # Shake out reef if heel is well under threshold (60% of limit)
-        # Add hysteresis to prevent rapid reef/unreef cycling
-        elif current_heel < self.config.max_heel_before_reef * 0.5:
+
+        # Shake out reef if heel is well under threshold (65% of limit)
+        elif current_heel < self.config.max_heel_before_reef * 0.65:
             if self.sail_config.reef_down():
+                self._reef_cooldown = 10.0  # Longer cooldown for shake-out
                 logger.debug(
                     f"Shaking out to reef level {self.sail_config.reef_level} "
                     f"(heel {current_heel:.1f}°)"
@@ -445,6 +456,7 @@ class YachtDynamics:
         """Reset yacht state to initial conditions."""
         self.state = YachtState()
         self.sail_config = SailConfig()  # Reset sail configuration
+        self._reef_cooldown = 0.0
         self.state.heading = heading % 360
         self.state.cog = heading % 360
         self.state.twd = twd % 360
