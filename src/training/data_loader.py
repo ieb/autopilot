@@ -23,7 +23,7 @@ FEATURE_DIM = 22
 # Features whose sign flips when mirroring port ↔ starboard.
 MIRROR_NEGATE_FEATURES = [
     0,   # heading_error
-    1,   # heading_error_integral
+    # 1 = mode flag (not negated)
     2,   # heading_rate
     3,   # roll (heel flips)
     5,   # roll_rate
@@ -33,6 +33,7 @@ MIRROR_NEGATE_FEATURES = [
     13,  # COG_error
     14,  # rudder_position
     15,  # rudder_velocity
+    19,  # PD suggestion (flips with error and rate)
 ]
 
 
@@ -61,7 +62,11 @@ def compute_features(heading: float, pitch: float, roll: float,
                      stw: float, cog: float, sog: float,
                      rudder_angle: float, target_heading: float,
                      target_awa: float, target_twa: float,
-                     mode: str) -> np.ndarray:
+                     mode: str, *,
+                     roll_rate: float = 0.0,
+                     awa_rate: float = 0.0,
+                     rudder_velocity: float = 0.0,
+                     wave_period: float = 0.0) -> np.ndarray:
     """Compute the 22-element normalized feature vector from raw sensor values.
 
     ARCHITECTURE: The model always steers to a computed compass heading.
@@ -99,13 +104,15 @@ def compute_features(heading: float, pitch: float, roll: float,
 
     error = _angle_diff(computed_heading, heading)
     features[0] = np.clip(error / 90.0, -1.0, 1.0)     # ±90° range (primary signal)
-    features[1] = 0.0   # heading_error_integral placeholder
+    # Mode encoding: compass=0.0, wind_awa=0.5, wind_twa/vmg=1.0
+    _MODE_ENC = {"compass": 0.0, "wind_awa": 0.5, "wind_twa": 1.0, "vmg": 1.0}
+    features[1] = _MODE_ENC.get(mode, 0.0)
     features[2] = np.clip(yaw_rate / 30.0, -1.0, 1.0)
     features[3] = np.clip(roll / 45.0, -1.0, 1.0)
     features[4] = np.clip(pitch / 30.0, -1.0, 1.0)
-    features[5] = 0.0   # roll_rate placeholder
+    features[5] = np.clip(roll_rate / 30.0, -1.0, 1.0)  # deg/s, same scale as heading_rate
     features[6] = np.clip(awa / 180.0, -1.0, 1.0)
-    features[7] = 0.0   # AWA_rate placeholder
+    features[7] = np.clip(awa_rate / 10.0, -1.0, 1.0)   # deg/s
     features[8] = np.clip(aws / 60.0, 0.0, 1.0)
     features[9] = np.clip(twa / 180.0, -1.0, 1.0)
     features[10] = np.clip(tws / 60.0, 0.0, 1.0)
@@ -115,15 +122,20 @@ def compute_features(heading: float, pitch: float, roll: float,
     cog_error = _angle_diff(cog, computed_heading)
     features[13] = np.clip(cog_error / 45.0, -1.0, 1.0) # ±45° range (matches heading_error)
     features[14] = 0.0   # rudder_position zeroed to prevent label leak
-    features[15] = 0.0   # rudder_velocity placeholder
+    features[15] = np.clip(rudder_velocity / 10.0, -1.0, 1.0)  # deg/s
     features[16] = computed_heading / 360.0  # [0, 1)
     vmg_up = stw * np.cos(np.radians(abs(twa))) if stw > 0 else 0.0
     vmg_down = stw * np.cos(np.radians(180 - abs(twa))) if stw > 0 else 0.0
     features[17] = np.clip(vmg_up / 15.0, -1.0, 1.0)
     features[18] = np.clip(vmg_down / 20.0, -1.0, 1.0)
-    features[19] = 0.0   # polar_target placeholder (zero, not informative)
+    # PD suggestion: pre-compute damped control signal from heading error and
+    # heading rate using default compass PD gains (kp=1.6, kd=1.5).
+    # This bakes in the correct error+rate combination so the model doesn't
+    # have to learn the phase relationship from scratch.
+    pd_rudder = 1.6 * error + 1.5 * (-yaw_rate)
+    features[19] = np.clip(pd_rudder / 25.0, -1.0, 1.0)
     features[20] = 0.0   # polar_performance placeholder (zero, not informative)
-    features[21] = 0.0   # wave_period placeholder (zero, not informative)
+    features[21] = np.clip(wave_period / 15.0, 0.0, 1.0)  # seconds, 0-15s range
 
     return np.clip(features, -1.0, 1.0)
 
@@ -916,6 +928,7 @@ class TrainingDataLoader:
         y_m = -y
         for idx in MIRROR_NEGATE_FEATURES:
             X_m[:, :, idx] = -X_m[:, :, idx]
+        X_m[:, :, 16] = 0.0  # zero computed_heading to prevent mirror leak
         return X_m, y_m
 
     def _frame_to_features(self, frame: LoggedFrame,
@@ -1336,6 +1349,8 @@ try:
             y_val = float(self._labels[start + self._seq_len])
             if is_mirror:
                 x[:, MIRROR_NEGATE_FEATURES] *= -1
+                x[:, 16] = 0.0  # computed_heading is a compass bearing; zero it
+                                 # to prevent leaking real-vs-mirrored state
                 y_val = -y_val
             return (torch.from_numpy(x).float(),
                     torch.tensor([y_val], dtype=torch.float32))

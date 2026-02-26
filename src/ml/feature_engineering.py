@@ -71,7 +71,7 @@ class FeatureEngineering:
     
     # Feature indices (for reference)
     FEAT_HEADING_ERROR = 0
-    FEAT_HEADING_ERROR_INTEGRAL = 1
+    FEAT_MODE = 1
     FEAT_HEADING_RATE = 2
     FEAT_ROLL = 3
     FEAT_PITCH = 4
@@ -140,13 +140,10 @@ class FeatureEngineering:
             heading_error, self.config.max_heading_error
         )
         
-        # 2. Heading error integral (for wind-up)
-        dt = now - self._last_rudder_time if self._last_rudder_time > 0 else 0.1
-        self._heading_error_integral += heading_error * dt
-        self._heading_error_integral = np.clip(self._heading_error_integral, -180, 180)
-        features[self.FEAT_HEADING_ERROR_INTEGRAL] = self._normalize(
-            self._heading_error_integral, 180.0
-        )
+        # 2. Mode encoding: compass=0.0, wind_awa=0.5, wind_twa/vmg=1.0
+        _MODE_ENC = {"compass": 0.0, "wind_awa": 0.5, "wind_twa": 1.0,
+                     "vmg_up": 1.0, "vmg_down": 1.0}
+        features[self.FEAT_MODE] = _MODE_ENC.get(self.target.mode, 0.0)
         
         # 3. Heading rate (yaw rate from IMU)
         features[self.FEAT_HEADING_RATE] = self._normalize(
@@ -217,13 +214,12 @@ class FeatureEngineering:
         features[self.FEAT_VMG_UP] = self._normalize(vmg_up, self.config.max_vmg)
         features[self.FEAT_VMG_DOWN] = self._normalize(vmg_down, 20.0)
         
-        # 20-21. Polar performance
-        polar_target = self.polar.get_target_speed(twa, tws)
-        polar_perf = self.polar.get_performance_ratio(twa, tws, n2k.stw)
-        features[self.FEAT_POLAR_TARGET] = self._normalize(
-            polar_target, self.config.max_boat_speed
-        )
-        features[self.FEAT_POLAR_PERFORMANCE] = np.clip(polar_perf, 0, 1.2)
+        # 20. PD suggestion: pre-compute damped control signal
+        pd_rudder = 1.6 * heading_error + 1.5 * (-imu.yaw_rate)
+        features[self.FEAT_POLAR_TARGET] = np.clip(pd_rudder / 25.0, -1.0, 1.0)
+
+        # 21. Polar performance (placeholder)
+        features[self.FEAT_POLAR_PERFORMANCE] = 0.0
         
         # 22. Wave period estimate (from accelerometer FFT)
         self._accel_buffer.append(imu.accel_z)

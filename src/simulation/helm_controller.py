@@ -29,8 +29,9 @@ class HelmConfig:
     """Configuration for helm controller."""
     # PD gains for compass mode
     # Scaled for rudder_effectiveness=0.5 (boat needs more rudder to turn)
-    compass_kp: float = 1.2          # Proportional gain
-    compass_kd: float = 2.0          # Derivative gain
+    # P/D ratio >1 ensures heading_error drives rudder sign in training data
+    compass_kp: float = 1.6          # Proportional gain
+    compass_kd: float = 1.5          # Derivative gain
 
     # PD gains for AWA mode (more responsive)
     awa_kp: float = 1.0

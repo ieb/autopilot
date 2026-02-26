@@ -137,6 +137,10 @@ class BinaryFrameWriter:
             target_awa=record['target_awa'],
             target_twa=record['target_twa'],
             mode=record['mode'],
+            roll_rate=record.get('roll_rate', 0.0),
+            awa_rate=record.get('awa_rate', 0.0),
+            rudder_velocity=record.get('rudder_velocity', 0.0),
+            wave_period=record.get('wave_period', 0.0),
         )
         label = np.clip(record['rudder_angle'] / 25.0, -1.0, 1.0)
         row = np.empty(_BIN_COLS, dtype=np.float32)
@@ -433,7 +437,12 @@ class SailingDataGenerator:
             self.config.perturb_interval_sec * random.uniform(0.5, 1.5)
             if self.config.enable_perturbations else float('inf')
         )
-        
+
+        # Rate tracking for derived features
+        self._prev_awa = self.yacht.state.awa
+        self._prev_rudder = self.yacht.state.rudder_angle
+        self._prev_total_roll = self.yacht.state.roll
+
         for i in range(total_samples):
             self.elapsed_time = i * dt
             self.frame_count = i
@@ -523,7 +532,24 @@ class SailingDataGenerator:
         cfg = self.config
         state = self.yacht.state
         mode_str = self.helm.state.mode.value
-        
+        dt = 1.0 / cfg.sample_rate_hz
+
+        # Compute rates from consecutive frames
+        awa_rate = (state.awa - self._prev_awa) / dt
+        # Handle AWA wrap-around (e.g. -179 to 179)
+        if awa_rate > 180 / dt:
+            awa_rate -= 360 / dt
+        elif awa_rate < -180 / dt:
+            awa_rate += 360 / dt
+
+        rudder_velocity = (state.rudder_angle - self._prev_rudder) / dt
+        roll_rate = (total_roll - self._prev_total_roll) / dt
+
+        # Update previous-frame state
+        self._prev_awa = state.awa
+        self._prev_rudder = state.rudder_angle
+        self._prev_total_roll = total_roll
+
         # Always store all target values separately for proper feature computation
         # target_heading is the compass heading target (used in compass mode)
         # target_awa/target_twa are the wind angle targets (used in wind modes)
@@ -545,6 +571,10 @@ class SailingDataGenerator:
             "mode": mode_str,
             "latitude": state.latitude,
             "longitude": state.longitude,
+            "roll_rate": roll_rate + random.gauss(0, 0.1),
+            "awa_rate": awa_rate + random.gauss(0, 0.2),
+            "rudder_velocity": rudder_velocity + random.gauss(0, 0.1),
+            "wave_period": self.waves.state.swell_period,
         }
         
     def _maybe_change_conditions(self, frame_idx: int, dt: float):
@@ -609,9 +639,14 @@ def generate_training_data(
         calibrated_config = calibrate_from_logs(calibrate_from)
         logger.info("Using calibrated parameters from real data")
         
-    # Default scenarios - includes error_recovery for large error training
+    # Default scenarios — matches run 26-4 which achieved 2/3 CL pass.
+    # 3 wind + 3 compass + 3 error recovery (random mode each).
     if scenarios is None:
-        scenarios = ["medium_upwind", "downwind_vmg", "mixed_coastal", "light_air_reaching", "error_recovery"]
+        scenarios = [
+            "medium_upwind", "downwind_vmg", "light_air_reaching",  # wind modes
+            "calm_compass", "motoring", "mixed_coastal",            # compass modes
+            "error_recovery", "error_recovery", "error_recovery",   # large-error training
+        ]
         
     generated_files = []
     

@@ -336,7 +336,10 @@ class ImitationTrainer:
         """Core training loop shared by in-memory and streaming modes."""
         
         # Setup training
-        criterion = nn.MSELoss()
+        # Use element-wise MSE (no reduction) so we can apply per-sample
+        # weighting based on heading error magnitude.  Large errors get
+        # higher weight so the model learns assertive corrections.
+        criterion = nn.MSELoss(reduction='none')
         optimizer = torch.optim.Adam(
             self._model.parameters(),
             lr=self.training_config.learning_rate,
@@ -396,17 +399,26 @@ class ImitationTrainer:
             for X_batch, y_batch in train_loader:
                 X_batch = X_batch.to(self._device)
                 y_batch = y_batch.to(self._device)
-                
+
                 optimizer.zero_grad()
                 output = self._model(X_batch)
-                loss = criterion(output, y_batch)
+                per_sample_loss = criterion(output, y_batch)
+
+                # Weight by heading error magnitude: samples with large
+                # errors get up to 2x weight so the model learns assertive
+                # rudder commands without overwhelming small-error precision.
+                # heading_error is feature index 0, normalized to [-1,1].
+                heading_err = X_batch[:, -1, 0].abs()  # last timestep
+                weights = torch.clamp(1.0 + heading_err, min=1.0, max=2.0)
+                loss = (per_sample_loss.squeeze() * weights).mean()
+
                 loss.backward()
-                
+
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
-                
+
                 optimizer.step()
-                
+
                 train_loss += loss.item()
                 train_mae += torch.mean(torch.abs(output - y_batch)).item()
                 num_batches += 1
@@ -424,10 +436,11 @@ class ImitationTrainer:
                 for X_batch, y_batch in val_loader:
                     X_batch = X_batch.to(self._device)
                     y_batch = y_batch.to(self._device)
-                    
+
                     output = self._model(X_batch)
-                    loss = criterion(output, y_batch)
-                    
+                    # Unweighted mean for honest validation comparison
+                    loss = criterion(output, y_batch).mean()
+
                     val_loss += loss.item()
                     val_mae += torch.mean(torch.abs(output - y_batch)).item()
                     num_val_batches += 1
@@ -845,6 +858,7 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
     """
     from src.simulation.yacht_dynamics import YachtDynamics, YachtConfig
     from src.simulation.wind_model import WindModel, WindConfig
+    from src.simulation.wave_model import WaveModel, WaveConfig
     from .data_loader import compute_features
 
     yacht = YachtDynamics(YachtConfig())
@@ -858,26 +872,61 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
     wind_state = wind.step(0)
     yacht.set_wind(wind_state.twd, wind_state.tws)
 
+    # Wave model — match training data distribution
+    waves = WaveModel(WaveConfig())
+    waves.reset()
+
     feature_history: list = []
     tracking_errors: list = []
     rudder_cmds: list = []
+    diagnostics: list = []  # (time, heading_error_feat, mode_feat, rudder_norm, awa, heading)
+
+    # Rate tracking for derived features
+    prev_awa = yacht.state.awa
+    prev_rudder = yacht.state.rudder_angle
+    prev_roll = yacht.state.roll
 
     # Physics steps per inference step
     steps_per_inference = max(1, round(1.0 / (inference_hz * physics_dt)))
+    inference_dt = steps_per_inference * physics_dt
     n_steps = int(run_sec / physics_dt)
     rudder_deg = 0.0
 
     for step_i in range(n_steps):
         wind_state = wind.step(physics_dt)
         yacht.set_wind(wind_state.twd, wind_state.tws)
-        yacht.step(rudder_deg, physics_dt)
+
+        # Step wave model
+        twa = wind_state.twd - yacht.state.heading
+        while twa > 180: twa -= 360
+        while twa < -180: twa += 360
+        wave_roll, wave_pitch, wave_yaw = waves.step(
+            physics_dt, tws=wind_state.tws,
+            heading=yacht.state.heading, twa=twa,
+            heel=yacht.state.roll)
+
+        yacht.step(rudder_deg, physics_dt, wave_yaw=wave_yaw)
+        total_roll = yacht.state.roll + wave_roll
+        total_pitch = yacht.state.pitch + wave_pitch
 
         # Record features and query model at inference_hz
         if step_i % steps_per_inference == 0:
+            # Compute rates over the inference interval
+            awa_rate = (yacht.state.awa - prev_awa) / inference_dt
+            if awa_rate > 180 / inference_dt:
+                awa_rate -= 360 / inference_dt
+            elif awa_rate < -180 / inference_dt:
+                awa_rate += 360 / inference_dt
+            rudder_vel = (yacht.state.rudder_angle - prev_rudder) / inference_dt
+            r_rate = (total_roll - prev_roll) / inference_dt
+            prev_awa = yacht.state.awa
+            prev_rudder = yacht.state.rudder_angle
+            prev_roll = total_roll
+
             features = compute_features(
                 heading=yacht.state.heading,
-                pitch=yacht.state.pitch,
-                roll=yacht.state.roll,
+                pitch=total_pitch,
+                roll=total_roll,
                 yaw_rate=yacht.state.heading_rate,
                 awa=yacht.state.awa,
                 aws=yacht.state.aws,
@@ -889,6 +938,10 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
                 target_awa=target_awa,
                 target_twa=target_twa,
                 mode=mode,
+                roll_rate=r_rate,
+                awa_rate=awa_rate,
+                rudder_velocity=rudder_vel,
+                wave_period=waves.state.swell_period,
             )
             feature_history.append(features)
             if len(feature_history) > 20:
@@ -900,6 +953,12 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
             rudder_norm = predict_fn(seq)
             rudder_deg = rudder_norm * 25.0
             rudder_cmds.append(rudder_deg)
+
+            t = step_i * physics_dt
+            diagnostics.append((
+                t, features[0], features[1], features[19], rudder_norm,
+                yacht.state.awa, yacht.state.heading, rudder_deg,
+            ))
 
         # Track error every physics step for accurate measurement
         if mode == "wind_awa":
@@ -921,6 +980,20 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
     mean_ss = float(ss_errors.mean())
     max_ss = float(ss_errors.max())
     passed = mean_ss < acceptable_error_deg
+
+    # Print diagnostic snapshots at key moments
+    if diagnostics:
+        print(f"    CL Diagnostics for {name}:")
+        print(f"    {'time':>6s}  {'h_err_f':>7s}  {'pd_sug':>7s}  {'rud_n':>7s}  "
+              f"{'rud_deg':>7s}  {'AWA':>7s}  {'heading':>7s}")
+        # Print at t=0, 5, 10, 20, 30, 60, 90, and end
+        snap_times = [0, 5, 10, 20, 30, 60, 90, run_sec - 1]
+        for snap_t in snap_times:
+            # Find closest diagnostic entry
+            closest = min(diagnostics, key=lambda d: abs(d[0] - snap_t))
+            t, h_err, mode_f, pd_sug, rud_n, awa, hdg, rud_d = closest
+            print(f"    {t:6.1f}  {h_err:+7.3f}  {pd_sug:+7.3f}  {rud_n:+7.3f}  "
+                  f"{rud_d:+7.1f}  {awa:+7.1f}  {hdg:7.1f}")
 
     return {
         "name": name,

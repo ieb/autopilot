@@ -28,10 +28,12 @@ class ScenarioType(Enum):
     DOWNWIND_VMG = "downwind_vmg"
     MIXED_COASTAL = "mixed_coastal"
     MOTORING = "motoring"
+    CALM_COMPASS = "calm_compass"
     RACE_UPWIND = "race_upwind"
     RACE_DOWNWIND = "race_downwind"
     DELIVERY = "delivery"
     ERROR_RECOVERY = "error_recovery"
+    ERROR_RECOVERY_WIND_AWA = "error_recovery_wind_awa"
     CUSTOM = "custom"
 
 
@@ -95,11 +97,11 @@ class Scenario:
         if self.steering_mode == SteeringMode.COMPASS:
             self.target_angle = self.initial_heading
         elif self.steering_mode == SteeringMode.WIND_AWA:
-            # Keep roughly the same AWA
-            pass
+            # Randomly flip tack so training data is balanced port/starboard
+            self.target_angle = random.choice([-1, 1]) * abs(self.target_angle)
         elif self.steering_mode == SteeringMode.WIND_TWA:
-            # Keep roughly the same TWA
-            pass
+            # Randomly flip tack so training data is balanced port/starboard
+            self.target_angle = random.choice([-1, 1]) * abs(self.target_angle)
 
 
 def get_scenario(scenario_type: ScenarioType) -> Scenario:
@@ -124,6 +126,8 @@ def get_scenario(scenario_type: ScenarioType) -> Scenario:
         return _mixed_coastal()
     elif scenario_type == ScenarioType.MOTORING:
         return _motoring()
+    elif scenario_type == ScenarioType.CALM_COMPASS:
+        return _calm_compass()
     elif scenario_type == ScenarioType.RACE_UPWIND:
         return _race_upwind()
     elif scenario_type == ScenarioType.RACE_DOWNWIND:
@@ -132,6 +136,8 @@ def get_scenario(scenario_type: ScenarioType) -> Scenario:
         return _delivery()
     elif scenario_type == ScenarioType.ERROR_RECOVERY:
         return _error_recovery()
+    elif scenario_type == ScenarioType.ERROR_RECOVERY_WIND_AWA:
+        return _error_recovery_wind_awa()
     else:
         return _mixed_coastal()
 
@@ -145,10 +151,12 @@ def get_all_scenarios() -> List[Scenario]:
         _downwind_vmg(),
         _mixed_coastal(),
         _motoring(),
+        _calm_compass(),
         _race_upwind(),
         _race_downwind(),
         _delivery(),
         _error_recovery(),
+        _error_recovery_wind_awa(),
     ]
 
 
@@ -247,7 +255,6 @@ def _heavy_weather() -> Scenario:
     
     yacht_config = YachtConfig(
         max_heel=35.0,
-        heel_stiffness=0.025,
     )
     
     helm_config = HelmConfig(
@@ -353,19 +360,19 @@ def _motoring() -> Scenario:
         base_tws_max=8.0,
         gust_probability=0.01,
     )
-    
+
     wave_config = WaveConfig(
         swell_amplitude_min=0.5,
         swell_amplitude_max=2.0,
         chop_enabled=False,
     )
-    
+
     helm_config = HelmConfig(
-        compass_kp=0.25,
-        compass_kd=0.4,
+        compass_kp=1.2,
+        compass_kd=1.0,
         noise_std=0.2,
     )
-    
+
     return Scenario(
         name="motoring",
         description="Motoring in light wind, compass steering",
@@ -374,9 +381,44 @@ def _motoring() -> Scenario:
         helm_config=helm_config,
         steering_mode=SteeringMode.COMPASS,
         initial_tws=4.0,
-        target_angle=0.0,  # Heading-based
+        target_angle=0.0,
         enable_maneuvers=False,
         operation_mode="motoring",
+    )
+
+
+def _calm_compass() -> Scenario:
+    """Calm-air compass steering — minimal wind, heading_error drives rudder."""
+    wind_config = WindConfig(
+        base_tws_min=3.0,
+        base_tws_max=8.0,
+        shift_rate=0.5,
+        gust_probability=0.01,
+    )
+
+    wave_config = WaveConfig(
+        swell_amplitude_min=1.0,
+        swell_amplitude_max=3.0,
+        chop_enabled=False,
+        secondary_swell_enabled=False,
+    )
+
+    helm_config = HelmConfig(
+        skill_level=0.9,
+        noise_std=0.25,
+    )
+
+    return Scenario(
+        name="calm_compass",
+        description="Calm-air compass steering, heading_error is primary signal",
+        wind_config=wind_config,
+        wave_config=wave_config,
+        helm_config=helm_config,
+        steering_mode=SteeringMode.COMPASS,
+        initial_tws=5.0,
+        target_angle=0.0,
+        enable_maneuvers=False,
+        operation_mode="sailing",
     )
 
 
@@ -562,6 +604,58 @@ def _error_recovery() -> Scenario:
         skip_warmup=True,  # Capture the recovery transient
         enable_maneuvers=False,  # Focus on recovery, not maneuvers
         duration_hours=0.5,  # Shorter runs, more variety
+        operation_mode="sailing",
+    )
+
+
+def _error_recovery_wind_awa() -> Scenario:
+    """
+    Error recovery specifically for wind_awa mode.
+
+    The generic error_recovery scenario randomly picks a mode, so only ~1/3
+    of its data covers wind_awa.  This dedicated variant always uses wind_awa
+    mode, ensuring the model sees enough large-error wind examples to learn
+    assertive corrections when mode=0.5.
+    """
+    wind_config = WindConfig(
+        base_tws_min=10.0,
+        base_tws_max=22.0,
+        shift_rate=0.5,
+        gust_probability=0.03,
+        gust_intensity_min=1.2,
+        gust_intensity_max=1.5,
+    )
+
+    wave_config = WaveConfig(
+        swell_amplitude_min=3.0,
+        swell_amplitude_max=7.0,
+        chop_enabled=True,
+    )
+
+    helm_config = HelmConfig(
+        skill_level=1.0,
+        noise_std=0.15,
+        reaction_delay=0.1,
+        max_rudder_rate=4.0,
+    )
+
+    # Always wind_awa mode with various target angles
+    target = random.choice([-1, 1]) * random.uniform(35, 90)
+    initial_error = random.choice([-1, 1]) * random.uniform(30, 90)
+
+    return Scenario(
+        name="error_recovery_wind_awa",
+        description="Wind AWA error recovery with large initial disturbances",
+        wind_config=wind_config,
+        wave_config=wave_config,
+        helm_config=helm_config,
+        steering_mode=SteeringMode.WIND_AWA,
+        initial_tws=16.0,
+        target_angle=target,
+        initial_error_deg=initial_error,
+        skip_warmup=True,
+        enable_maneuvers=False,
+        duration_hours=0.5,
         operation_mode="sailing",
     )
 

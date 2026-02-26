@@ -1310,12 +1310,17 @@ class TestBinaryFramePipeline:
                 diff = (x_orig[:, idx] + x_mirror[:, idx]).abs().max().item()
                 assert diff < 1e-6, f"Feature {idx} not negated"
 
-            # Non-negated features should be identical
+            # Non-negated features should be identical (except 16 which is zeroed
+            # in mirror to prevent computed_heading leaking mirror state)
             non_neg = [i for i in range(FEATURE_DIM)
-                       if i not in MIRROR_NEGATE_FEATURES]
+                       if i not in MIRROR_NEGATE_FEATURES and i != 16]
             for idx in non_neg:
                 diff = (x_orig[:, idx] - x_mirror[:, idx]).abs().max().item()
                 assert diff < 1e-6, f"Feature {idx} unexpectedly changed"
+
+            # Feature 16 should be zeroed in mirror
+            assert x_mirror[:, 16].abs().max().item() < 1e-6, \
+                "Feature 16 (computed_heading) should be zeroed in mirror"
 
     def test_binary_vs_json_feature_parity(self):
         """Binary and JSON paths produce matching features for the same seed.
@@ -1351,9 +1356,13 @@ class TestBinaryFramePipeline:
             json_f0 = X_json[0, 0, :]
             bin_f0 = bin_f[0]
 
-            # Compare all features except 13 (COG error, see docstring)
+            # Compare all features except:
+            #  - 13 (COG error, see docstring)
+            #  - 5 (roll_rate), 7 (awa_rate), 15 (rudder_velocity),
+            #    21 (wave_period): derived rates only available in binary path
             mask = np.ones(FEATURE_DIM, dtype=bool)
             mask[13] = False
+            mask[[5, 7, 15, 21]] = False
             np.testing.assert_allclose(
                 bin_f0[mask], json_f0[mask], atol=1e-5,
                 err_msg="Binary and JSON features diverge")

@@ -41,9 +41,9 @@ class ModelConfig:
     """Configuration for autopilot model."""
     sequence_length: int = 20      # Timesteps of history
     feature_dim: int = 22          # Features per timestep
-    lstm_units_1: int = 64         # First LSTM layer
-    lstm_units_2: int = 32         # Second LSTM layer
-    dense_units: int = 16          # Dense layer before output
+    lstm_units_1: int = 128        # First LSTM layer
+    lstm_units_2: int = 64         # Second LSTM layer
+    dense_units: int = 32          # Dense layer before output
     dropout_rate: float = 0.3      # Dropout for regularization
 
 
@@ -78,8 +78,9 @@ class AutopilotLSTM(nn.Module):
         self.config = config or ModelConfig()
         
         # Feature mixing layer (applied to each timestep)
+        feature_mix_dim = self.config.lstm_units_1 * 2  # 256 for default config
         self.feature_mix = nn.Sequential(
-            nn.Linear(self.config.feature_dim, 128),
+            nn.Linear(self.config.feature_dim, feature_mix_dim),
             nn.ReLU(),
         )
         
@@ -88,7 +89,7 @@ class AutopilotLSTM(nn.Module):
         
         # First LSTM layer
         self.lstm1 = nn.LSTM(
-            input_size=128,
+            input_size=feature_mix_dim,
             hidden_size=self.config.lstm_units_1,
             batch_first=True
         )
