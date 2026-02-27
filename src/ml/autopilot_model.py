@@ -389,8 +389,8 @@ class AutopilotInference:
         else:
             raise RuntimeError(f"Unknown model type: {self._model_type}")
         
-        # Return scalar value, clipped to valid range
-        return float(np.clip(output[0, 0], -1.0, 1.0))
+        # Return raw correction value (caller adds PD suggestion for residual model)
+        return float(output[0, 0])
         
     def benchmark(self, iterations: int = 100) -> dict:
         """

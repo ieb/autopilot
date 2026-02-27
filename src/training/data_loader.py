@@ -1352,6 +1352,9 @@ try:
                 x[:, 16] = 0.0  # computed_heading is a compass bearing; zero it
                                  # to prevent leaking real-vs-mirrored state
                 y_val = -y_val
+            # Residual label: model learns correction on top of PD controller.
+            # At inference: rudder = pd_suggestion + model_output
+            y_val = y_val - float(x[-1, 19])
             return (torch.from_numpy(x).float(),
                     torch.tensor([y_val], dtype=torch.float32))
 

@@ -1,4 +1,12 @@
-# Asked Google AI 
+# Model Architecture Evaluation (Archived)
+
+> **Archived**: This document contains early exploratory notes on a smaller model (48k params, 25 features) that failed in closed-loop testing. The current production system uses a 255k parameter model with 22 features, residual labels, and blended PD + ML inference. See **[blended_pd_ml_controller.md](blended_pd_ml_controller.md)** for the current architecture and validated results.
+
+---
+
+*Historical notes below:*
+
+# Asked Google AI
 
 WDYT about ....
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓

@@ -1,5 +1,9 @@
 # Feature Engineering Sign Convention Fix
 
+> **Note**: This fix remains valid and essential. The sign conventions described here are also used by the PD suggestion feature (index 19) which is central to the current **blended PD + ML controller**. See **[blended_pd_ml_controller.md](blended_pd_ml_controller.md)** for how PD suggestion and heading error interact in the blended control law. The authoritative sign convention reference is in [CLAUDE.md](../CLAUDE.md).
+
+---
+
 This document describes the sign convention inconsistency found in the ML feature engineering code and its fix.
 
 ## Summary

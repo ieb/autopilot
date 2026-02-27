@@ -347,12 +347,14 @@ class ImitationTrainer:
         )
         
         # Learning rate schedulers
-        # Warmup scheduler
+        # Warmup scheduler (use start_factor=1.0 when no warmup to avoid
+        # LinearLR silently reducing the initial LR on construction)
+        warmup_epochs = self.training_config.warmup_epochs
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            start_factor=0.1,
+            start_factor=0.1 if warmup_epochs > 0 else 1.0,
             end_factor=1.0,
-            total_iters=self.training_config.warmup_epochs
+            total_iters=max(warmup_epochs, 1),
         )
         # Reduce on plateau scheduler
         plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -840,6 +842,21 @@ def train_from_logs(data_dir: str,
         return trainer.save_model()
 
 
+# Heading error (degrees) above which the model correction fades to zero,
+# leaving the PD controller in full control of large transients.
+BLEND_FADE_DEG = 5.0
+
+
+def _blend_alpha(heading_error_feat: float) -> float:
+    """Compute blending factor for model correction vs PD controller.
+
+    Returns 1.0 (full model influence) when heading error is zero,
+    linearly fading to 0.0 (PD only) at BLEND_FADE_DEG degrees.
+    """
+    h_err_deg = abs(heading_error_feat) * 90.0  # feature 0 is normalised /90
+    return max(0.0, 1.0 - h_err_deg / BLEND_FADE_DEG)
+
+
 def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
                      mode, target_heading, target_awa, target_twa,
                      run_sec, acceptable_error_deg,
@@ -950,14 +967,17 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
                 feature_history.insert(0, feature_history[0])
 
             seq = np.array(feature_history, dtype=np.float32)
-            rudder_norm = predict_fn(seq)
+            correction = predict_fn(seq)
+            alpha = _blend_alpha(features[0])
+            rudder_norm = float(np.clip(
+                features[19] + alpha * correction, -1.0, 1.0))
             rudder_deg = rudder_norm * 25.0
             rudder_cmds.append(rudder_deg)
 
             t = step_i * physics_dt
             diagnostics.append((
                 t, features[0], features[1], features[19], rudder_norm,
-                yacht.state.awa, yacht.state.heading, rudder_deg,
+                yacht.state.awa, yacht.state.heading, rudder_deg, alpha,
             ))
 
         # Track error every physics step for accurate measurement
@@ -983,17 +1003,17 @@ def _run_cl_scenario(predict_fn, name, initial_heading, twd, tws,
 
     # Print diagnostic snapshots at key moments
     if diagnostics:
-        print(f"    CL Diagnostics for {name}:")
-        print(f"    {'time':>6s}  {'h_err_f':>7s}  {'pd_sug':>7s}  {'rud_n':>7s}  "
-              f"{'rud_deg':>7s}  {'AWA':>7s}  {'heading':>7s}")
+        print(f"    CL Diagnostics for {name} (blend_fade={BLEND_FADE_DEG}°):")
+        print(f"    {'time':>6s}  {'h_err_f':>7s}  {'pd_sug':>7s}  {'alpha':>5s}  "
+              f"{'rud_n':>7s}  {'rud_deg':>7s}  {'AWA':>7s}  {'heading':>7s}")
         # Print at t=0, 5, 10, 20, 30, 60, 90, and end
         snap_times = [0, 5, 10, 20, 30, 60, 90, run_sec - 1]
         for snap_t in snap_times:
             # Find closest diagnostic entry
             closest = min(diagnostics, key=lambda d: abs(d[0] - snap_t))
-            t, h_err, mode_f, pd_sug, rud_n, awa, hdg, rud_d = closest
-            print(f"    {t:6.1f}  {h_err:+7.3f}  {pd_sug:+7.3f}  {rud_n:+7.3f}  "
-                  f"{rud_d:+7.1f}  {awa:+7.1f}  {hdg:7.1f}")
+            t, h_err, mode_f, pd_sug, rud_n, awa, hdg, rud_d, alph = closest
+            print(f"    {t:6.1f}  {h_err:+7.3f}  {pd_sug:+7.3f}  {alph:5.2f}  "
+                  f"{rud_n:+7.3f}  {rud_d:+7.1f}  {awa:+7.1f}  {hdg:7.1f}")
 
     return {
         "name": name,
@@ -1049,6 +1069,260 @@ def _print_cl_results(results):
     return all_passed
 
 
+def dagger_collect(model, device, data_dir: str, iteration: int) -> str:
+    """Collect DAgger data by running the model in closed-loop simulation.
+
+    The MODEL steers the boat (capturing distribution-shifted states) while
+    an expert PD controller provides the ideal rudder label for each frame.
+    Frames are written as binary records so they are automatically included
+    in the next training round.
+
+    Args:
+        model: Trained PyTorch model (will be copied to CPU).
+        device: Current training device (unused, model copied to CPU).
+        data_dir: Directory to write the .bin file into.
+        iteration: DAgger iteration number (used in filename).
+
+    Returns:
+        Path to the written .bin file.
+    """
+    import copy
+    import struct
+    import random as _rng
+    from src.simulation.yacht_dynamics import YachtDynamics, YachtConfig, YachtState
+    from src.simulation.wind_model import WindModel, WindConfig
+    from src.simulation.wave_model import WaveModel, WaveConfig
+    from src.simulation.helm_controller import HelmController, HelmConfig, SteeringMode
+    from .data_loader import compute_features
+
+    # Prepare model for inference on CPU
+    cpu_model = copy.deepcopy(model).cpu().eval()
+
+    def _predict(sequence):
+        t = torch.from_numpy(sequence[np.newaxis]).float()
+        with torch.no_grad():
+            out = cpu_model(t)
+        return float(out.numpy()[0, 0])  # raw correction; caller adds pd_sug
+
+    # Expert controller — clean PD, no noise/fatigue/delay
+    expert = HelmController(HelmConfig(
+        compass_kp=1.6, compass_kd=1.5,
+        skill_level=1.0,
+        noise_std=0.0,
+        fatigue_enabled=False,
+        reaction_delay=0.0,
+        max_rudder_rate=4.0,
+    ))
+
+    # Build diverse scenario list
+    # (name, initial_heading, twd, tws, mode, target_heading, target_awa, target_twa, run_sec)
+    scenarios = []
+
+    # ~40 compass scenarios
+    for i in range(40):
+        tws = _rng.uniform(8, 25)
+        twd = _rng.uniform(0, 360)
+        initial_heading = _rng.uniform(0, 360)
+        error_mag = _rng.uniform(5, 90)
+        sign = _rng.choice([-1, 1])
+        target_heading = (initial_heading + sign * error_mag) % 360
+        scenarios.append((
+            f"dagger_compass_{i}", initial_heading, twd, tws,
+            "compass", target_heading, 0.0, 0.0, 120.0,
+        ))
+
+    # ~40 wind_awa scenarios — balanced tack
+    for i in range(40):
+        tws = _rng.uniform(8, 25)
+        twd = _rng.uniform(0, 360)
+        target_awa_mag = _rng.uniform(30, 90)
+        tack = _rng.choice([-1, 1])  # port or starboard
+        target_awa = tack * target_awa_mag
+        # Start heading offset by 10-30° from equilibrium
+        equilibrium_heading = (twd - target_awa) % 360
+        offset = _rng.uniform(10, 30) * _rng.choice([-1, 1])
+        initial_heading = (equilibrium_heading + offset) % 360
+        scenarios.append((
+            f"dagger_awa_{i}", initial_heading, twd, tws,
+            "wind_awa", 0.0, target_awa, 0.0, 120.0,
+        ))
+
+    # ~20 wind_twa scenarios
+    for i in range(20):
+        tws = _rng.uniform(10, 25)
+        twd = _rng.uniform(0, 360)
+        target_twa_mag = _rng.uniform(90, 170)
+        tack = _rng.choice([-1, 1])
+        target_twa = tack * target_twa_mag
+        equilibrium_heading = (twd - target_twa) % 360
+        offset = _rng.uniform(10, 30) * _rng.choice([-1, 1])
+        initial_heading = (equilibrium_heading + offset) % 360
+        scenarios.append((
+            f"dagger_twa_{i}", initial_heading, twd, tws,
+            "wind_twa", 0.0, 0.0, target_twa, 120.0,
+        ))
+
+    # Binary file constants (match data_generator.py)
+    BIN_MAGIC = b'APFD'
+    BIN_VERSION = 1
+    BIN_COLS = 23  # 22 features + 1 label
+
+    # Use timestamp to avoid overwriting DAgger files from previous runs
+    import time as _time
+    ts = _time.strftime('%Y%m%d%H%M%S')
+    out_path = Path(data_dir) / f"dagger_iter{iteration}_{ts}.bin"
+    total_frames = 0
+
+    physics_dt = 0.1
+    inference_hz = 2.0
+    steps_per_inference = max(1, round(1.0 / (inference_hz * physics_dt)))
+    inference_dt = steps_per_inference * physics_dt
+
+    with open(out_path, 'wb') as f:
+        # Write header
+        f.write(BIN_MAGIC)
+        f.write(struct.pack('<III', BIN_VERSION, BIN_COLS - 1, 0))
+
+        for sc in scenarios:
+            (name, initial_heading, twd, tws,
+             mode, target_heading, target_awa, target_twa, run_sec) = sc
+
+            # Setup physics
+            yacht = YachtDynamics(YachtConfig())
+            yacht.state.heading = initial_heading
+            yacht.state.stw = 6.0
+            yacht.state.sog = 6.0
+            wind = WindModel(WindConfig(
+                base_twd=twd,
+                base_tws_min=tws, base_tws_max=tws,
+                shift_rate=0.0, oscillation_enabled=False,
+            ))
+            wind.reset()
+            wind_state = wind.step(0)
+            yacht.set_wind(wind_state.twd, wind_state.tws)
+
+            waves = WaveModel(WaveConfig())
+            waves.reset()
+
+            # Setup expert for this scenario
+            expert.reset()
+            if mode == "compass":
+                expert.set_mode(SteeringMode.COMPASS, target_heading)
+            elif mode == "wind_awa":
+                expert.set_mode(SteeringMode.WIND_AWA, target_awa)
+            elif mode == "wind_twa":
+                expert.set_mode(SteeringMode.WIND_TWA, target_twa)
+
+            feature_history: list = []
+            prev_awa = yacht.state.awa
+            prev_rudder = yacht.state.rudder_angle
+            prev_roll = yacht.state.roll
+
+            n_steps = int(run_sec / physics_dt)
+            rudder_deg = 0.0  # model's rudder command
+
+            for step_i in range(n_steps):
+                wind_state = wind.step(physics_dt)
+                yacht.set_wind(wind_state.twd, wind_state.tws)
+
+                twa_local = wind_state.twd - yacht.state.heading
+                while twa_local > 180: twa_local -= 360
+                while twa_local < -180: twa_local += 360
+                wave_roll, wave_pitch, wave_yaw = waves.step(
+                    physics_dt, tws=wind_state.tws,
+                    heading=yacht.state.heading, twa=twa_local,
+                    heel=yacht.state.roll)
+
+                yacht.step(rudder_deg, physics_dt, wave_yaw=wave_yaw)
+                total_roll = yacht.state.roll + wave_roll
+                total_pitch = yacht.state.pitch + wave_pitch
+
+                # Record features and query model at inference_hz
+                if step_i % steps_per_inference == 0:
+                    awa_rate = (yacht.state.awa - prev_awa) / inference_dt
+                    if awa_rate > 180 / inference_dt:
+                        awa_rate -= 360 / inference_dt
+                    elif awa_rate < -180 / inference_dt:
+                        awa_rate += 360 / inference_dt
+                    rudder_vel = (yacht.state.rudder_angle - prev_rudder) / inference_dt
+                    r_rate = (total_roll - prev_roll) / inference_dt
+                    prev_awa = yacht.state.awa
+                    prev_rudder = yacht.state.rudder_angle
+                    prev_roll = total_roll
+
+                    features = compute_features(
+                        heading=yacht.state.heading,
+                        pitch=total_pitch,
+                        roll=total_roll,
+                        yaw_rate=yacht.state.heading_rate,
+                        awa=yacht.state.awa,
+                        aws=yacht.state.aws,
+                        stw=yacht.state.stw,
+                        cog=yacht.state.cog,
+                        sog=yacht.state.sog,
+                        rudder_angle=yacht.state.rudder_angle,
+                        target_heading=target_heading,
+                        target_awa=target_awa,
+                        target_twa=target_twa,
+                        mode=mode,
+                        roll_rate=r_rate,
+                        awa_rate=awa_rate,
+                        rudder_velocity=rudder_vel,
+                        wave_period=waves.state.swell_period,
+                    )
+                    feature_history.append(features)
+                    if len(feature_history) > 20:
+                        feature_history.pop(0)
+                    while len(feature_history) < 20:
+                        feature_history.insert(0, feature_history[0])
+
+                    # MODEL steers (residual: blended correction + pd_suggestion)
+                    seq = np.array(feature_history, dtype=np.float32)
+                    correction = _predict(seq)
+                    alpha = _blend_alpha(features[0])
+                    rudder_norm = float(np.clip(
+                        features[19] + alpha * correction, -1.0, 1.0))
+                    rudder_deg = rudder_norm * 25.0
+
+                    # EXPERT labels
+                    expert_rudder = expert.compute_rudder(
+                        heading=yacht.state.heading,
+                        awa=yacht.state.awa,
+                        twa=twa_local,
+                        heading_rate=yacht.state.heading_rate,
+                        dt=inference_dt,
+                        aws=yacht.state.aws,
+                        stw=yacht.state.stw,
+                    )
+                    expert_label = np.clip(expert_rudder / 25.0, -1.0, 1.0)
+
+                    # Write binary frame: features + expert label
+                    row = np.empty(BIN_COLS, dtype=np.float32)
+                    row[:BIN_COLS - 1] = features
+                    row[BIN_COLS - 1] = expert_label
+                    f.write(row.tobytes())
+                    total_frames += 1
+
+    # Write companion .meta.json
+    import json as _json
+    meta = {
+        'format': 'binary_frame_v1',
+        'frame_count': total_frames,
+        'feature_dim': 22,
+        'columns': 23,
+        'transition_times': [],
+        'dagger_iteration': iteration,
+        'num_scenarios': len(scenarios),
+    }
+    meta_path = out_path.with_suffix('.meta.json')
+    with open(meta_path, 'w') as mf:
+        _json.dump(meta, mf, indent=2)
+
+    print(f"\nDAgger iteration {iteration}: wrote {total_frames:,} frames "
+          f"from {len(scenarios)} scenarios -> {out_path}")
+    return str(out_path)
+
+
 def closed_loop_validate(model_path: str) -> Dict[str, Any]:
     """Run closed-loop steering tests against a saved model file.
 
@@ -1077,7 +1351,7 @@ def closed_loop_validate_pytorch(model, device=None):
         t = torch.from_numpy(sequence[np.newaxis]).float()
         with torch.no_grad():
             out = cpu_model(t)
-        return float(np.clip(out.numpy()[0, 0], -1.0, 1.0))
+        return float(out.numpy()[0, 0])  # raw correction; _run_cl_scenario adds pd_sug
 
     results = _run_cl_suite(_predict)
     return results
@@ -1196,6 +1470,10 @@ if __name__ == "__main__":
     parser.add_argument("--streaming", action="store_true",
                        help="Use memory-mapped streaming for large datasets")
 
+    # DAgger
+    parser.add_argument("--dagger", type=int, default=0, metavar="N",
+                       help="Number of DAgger iterations after initial training (default: 0)")
+
     # Standalone validation mode
     parser.add_argument("--validate", default=None, metavar="MODEL_PATH",
                        help="Run closed-loop validation on a model (.onnx) and exit")
@@ -1226,9 +1504,9 @@ if __name__ == "__main__":
         sys.exit(0)
     
     paths = train_from_logs(
-        args.data_dir, 
-        args.output, 
-        args.epochs, 
+        args.data_dir,
+        args.output,
+        args.epochs,
         args.max_time,
         resume=not args.fresh,
         use_mlflow=args.mlflow,
@@ -1236,7 +1514,40 @@ if __name__ == "__main__":
         mlflow_run_name=args.run_name,
         force_json=args.json,
     )
-    
+
     print("\nModel files saved:")
     for name, path in paths.items():
         print(f"  {name}: {path}")
+
+    # DAgger iterations
+    if args.dagger > 0:
+        device = get_device()
+        for dag_iter in range(1, args.dagger + 1):
+            print("\n" + "=" * 70)
+            print(f"DAGGER ITERATION {dag_iter}/{args.dagger}")
+            print("=" * 70)
+
+            # Load the best model from the previous round
+            checkpoint_path = os.path.join(args.output, "autopilot_best.pt")
+            model = load_pytorch_model(checkpoint_path, device)
+
+            # Collect DAgger data (model steers, expert labels)
+            dagger_collect(model, device, args.data_dir, dag_iter)
+
+            # Retrain on ALL .bin files (original + DAgger)
+            paths = train_from_logs(
+                args.data_dir,
+                args.output,
+                args.epochs,
+                args.max_time,
+                resume=True,  # resume from checkpoint
+                use_mlflow=args.mlflow,
+                mlflow_experiment_name=args.experiment_name,
+                mlflow_run_name=f"dagger_iter{dag_iter}" if not args.run_name
+                    else f"{args.run_name}_dagger{dag_iter}",
+                force_json=args.json,
+            )
+
+            print(f"\nDAgger iteration {dag_iter} complete. Model files:")
+            for name, path in paths.items():
+                print(f"  {name}: {path}")

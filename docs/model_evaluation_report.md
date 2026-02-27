@@ -1,9 +1,15 @@
 # Model Evaluation Report
 
+> **Superseded**: This report evaluated an early model (66k params, 25 features, absolute rudder labels) from January 2026. The current production model uses 255k parameters, 22 features, residual labels, and blended PD + ML inference. See **[blended_pd_ml_controller.md](blended_pd_ml_controller.md)** for current architecture and validated results.
+
+---
+
+*Historical report below:*
+
 This document describes the current state of the ML autopilot model and its performance in passage simulation experiments.
 
-**Report Date**: January 2026  
-**Model Version**: `aligned-conventions-v1`  
+**Report Date**: January 2026
+**Model Version**: `aligned-conventions-v1`
 **MLflow Run**: `autopilot/aligned-conventions-v1`
 
 ## Executive Summary

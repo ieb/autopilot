@@ -251,9 +251,17 @@ class Autopilot:
         # Compute features
         sequence = self._features.update(imu_data, n2k_data, rudder_data)
         
-        # Run inference
+        # Run inference (residual model: PD handles large errors,
+        # model contributes small corrections when heading is near target)
         if self._features.is_valid:
-            raw_output = self._model.predict(sequence)
+            correction = self._model.predict(sequence)
+            pd_sug = float(sequence[-1, 19])   # feature 19 = PD suggestion
+            h_err = float(sequence[-1, 0])      # feature 0 = heading error
+            # Blend: model influence fades to zero above BLEND_FADE_DEG
+            BLEND_FADE_DEG = 10.0
+            h_err_deg = abs(h_err) * 90.0
+            alpha = max(0.0, 1.0 - h_err_deg / BLEND_FADE_DEG)
+            raw_output = max(-1.0, min(1.0, pd_sug + alpha * correction))
         else:
             raw_output = 0.0
             logger.warning("Invalid feature data, outputting zero")

@@ -1,5 +1,11 @@
 # Autopilot Model Architecture
 
+> **Superseded**: This document describes an earlier iteration of the model that predicted absolute rudder commands. The current production system uses a **blended PD + ML controller** where the model predicts residual corrections on top of a PD controller, with error-magnitude blending. See **[blended_pd_ml_controller.md](blended_pd_ml_controller.md)** for the current architecture, control law, and validated results. The feature vector, model capacity (255k params), and ONNX deployment described in that document are authoritative.
+
+---
+
+*Historical content below (January 2026):*
+
 This document describes the neural network architecture used for the sailing autopilot, including input features, model layers, and training configuration.
 
 ## Overview
