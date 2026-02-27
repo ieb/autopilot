@@ -91,6 +91,10 @@ let boatBuffers = null;
 let riggingBuffers = null;
 let rudderBuffers = null;
 let axisBuffers = null;
+let waveBuffers = null;
+
+// Wave animation
+let waveTime = 0;
 
 // Camera
 let cameraAzimuth = 315;
@@ -413,6 +417,106 @@ function createAxisBuffers() {
 }
 
 // =============================================================================
+// Wave Crest Geometry
+// =============================================================================
+
+const WAVE_NUM_CRESTS = 10;
+const WAVE_CREST_SPACING = 1.2;
+const WAVE_CREST_HALF_LEN = 4.0;
+const WAVE_Z = -0.02;  // just below waterline to avoid z-fighting
+
+function createWaveBuffers(gl) {
+    // 10 crest lines, 2 vertices each, 3 floats per vertex
+    const numVertices = WAVE_NUM_CRESTS * 2;
+    const positions = new Float32Array(numVertices * 3);
+    const colors = new Float32Array(numVertices * 3);
+
+    // Teal/cyan color for all vertices
+    for (let i = 0; i < numVertices; i++) {
+        colors[i * 3]     = 0.2;
+        colors[i * 3 + 1] = 0.6;
+        colors[i * 3 + 2] = 0.8;
+    }
+
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+
+    const colorBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+
+    return {
+        position: positionBuffer,
+        color: colorBuffer,
+        numVertices: numVertices,
+        positions: positions,  // keep reference for updates
+    };
+}
+
+function updateWavePositions() {
+    if (!waveBuffers) return;
+
+    const headingDeg = getDenorm(F.HEADING);
+    const twaDeg = getDenorm(F.TWA);
+    const wavePeriod = getDenorm(F.WAVE_PERIOD);
+    const stw = getDenorm(F.STW);
+
+    // Wave propagation direction = downwind (compass bearing)
+    // TWA is where wind comes FROM relative to bow, so heading + TWA = wind source bearing
+    // Waves propagate opposite = heading + TWA + 180
+    const waveBearing = headingDeg + twaDeg + 180;
+    const waveBearingRad = degToRad(waveBearing);
+
+    // Compass bearing to world XY: scene uses X=East, Y=North
+    const nx = Math.sin(waveBearingRad);
+    const ny = Math.cos(waveBearingRad);
+
+    // Crest-parallel unit vector (perpendicular to propagation)
+    const cx = -ny;
+    const cy = nx;
+
+    // Deep water wave physics: speed = gT/2pi, wavelength = gT^2/2pi
+    const G = 9.81;
+    const safePeriod = Math.max(wavePeriod, 0.5);
+    const waveSpeed = G * safePeriod / (2 * Math.PI);             // m/s
+    const wavelength = G * safePeriod * safePeriod / (2 * Math.PI); // m
+
+    // Encounter speed: wave phase speed + boat component along wave direction
+    // Angle between heading and wave propagation = TWA + 180
+    // cos(TWA + 180) = -cos(TWA), so encounter = waveSpeed + STW*cos(TWA)
+    const stwMs = stw * 0.5144;  // knots to m/s
+    const twaRad = degToRad(twaDeg);
+    const encounterSpeed = waveSpeed + stwMs * Math.cos(twaRad);  // m/s
+
+    // Convert encounter speed to viz scroll rate via encounter frequency
+    const encounterFreq = encounterSpeed / wavelength;  // Hz
+    const vizSpeed = WAVE_CREST_SPACING * encounterFreq; // viz units/s
+
+    // Offset with wrapping (negative = crests scroll in propagation direction past boat)
+    const offset = ((-waveTime * vizSpeed) % WAVE_CREST_SPACING
+                   + WAVE_CREST_SPACING) % WAVE_CREST_SPACING;
+
+    const pos = waveBuffers.positions;
+    for (let i = 0; i < WAVE_NUM_CRESTS; i++) {
+        const d = (i - 4.5) * WAVE_CREST_SPACING + offset;
+        const centerX = nx * d;
+        const centerY = ny * d;
+
+        const idx = i * 2 * 3;
+        pos[idx]     = centerX + cx * WAVE_CREST_HALF_LEN;
+        pos[idx + 1] = centerY + cy * WAVE_CREST_HALF_LEN;
+        pos[idx + 2] = WAVE_Z;
+        pos[idx + 3] = centerX - cx * WAVE_CREST_HALF_LEN;
+        pos[idx + 4] = centerY - cy * WAVE_CREST_HALF_LEN;
+        pos[idx + 5] = WAVE_Z;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, waveBuffers.position);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
+}
+
+// =============================================================================
 // 3D Rendering
 // =============================================================================
 
@@ -465,7 +569,7 @@ function drawScene() {
     // Build model matrix: pitch -> roll -> heading (same order as IMU tool)
     let modelMatrix = mat4Identity();
     modelMatrix = mat4Multiply(mat4RotateX(degToRad(-pitch)), modelMatrix);
-    modelMatrix = mat4Multiply(mat4RotateY(degToRad(roll)), modelMatrix);
+    modelMatrix = mat4Multiply(mat4RotateY(degToRad(-roll)), modelMatrix);
     modelMatrix = mat4Multiply(mat4RotateZ(degToRad(-heading)), modelMatrix);
 
     // Draw boat hull
@@ -491,6 +595,11 @@ function drawScene() {
     // Draw axes
     if (!axisBuffers) axisBuffers = createAxisBuffers();
     drawLines(axisBuffers, modelMatrix);
+
+    // Draw wave crests (world space, not rotated with boat)
+    if (!waveBuffers) waveBuffers = createWaveBuffers(gl);
+    updateWavePositions();
+    drawLines(waveBuffers, mat4Identity());
 }
 
 function drawMesh(buffers, modelMatrix) {
@@ -678,6 +787,7 @@ async function loadFile(filename) {
         playback.currentFrame = 0;
         playback.playing = false;
         playback.accumulator = 0;
+        waveTime = 0;
         updatePlayButton();
 
         // Update scrub bar
@@ -708,6 +818,7 @@ function animate(timestamp) {
         if (playback.lastTimestamp > 0) {
             const dt = timestamp - playback.lastTimestamp;
             playback.accumulator += dt * playback.speed;
+            waveTime += dt * playback.speed / 1000;  // real seconds at playback speed
 
             while (playback.accumulator >= playback.frameDuration) {
                 playback.accumulator -= playback.frameDuration;
@@ -792,6 +903,7 @@ function updatePlayButton() {
 }
 
 function syncUI() {
+    waveTime = playback.currentFrame / 2.0;  // sync wave phase to frame time
     document.getElementById('scrub').value = playback.currentFrame;
     updateFrameInfo();
     updateDataPanels();
@@ -910,6 +1022,7 @@ function init() {
     scrub.addEventListener('input', (e) => {
         playback.currentFrame = parseInt(e.target.value);
         playback.playing = false;
+        waveTime = playback.currentFrame / 2.0;  // frame index to seconds at 2Hz
         updatePlayButton();
         updateFrameInfo();
         updateDataPanels();

@@ -386,8 +386,10 @@ class YachtDynamics:
         tw_x = self.state.tws * math.cos(twa_rad)
         tw_y = self.state.tws * math.sin(twa_rad)
         
-        # Subtract boat velocity (boat moves into the wind)
-        aw_x = tw_x - self.state.stw
+        # Add boat velocity effect: boat moving forward makes apparent wind
+        # shift toward the bow (tw_x,tw_y is "coming from" convention, so
+        # adding STW increases the headwind component).
+        aw_x = tw_x + self.state.stw
         aw_y = tw_y
         
         # Apparent wind
