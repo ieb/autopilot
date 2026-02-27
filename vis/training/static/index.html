@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Training Data Viewer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Training Data Viewer</h1>
+            <div class="file-selector">
+                <label for="file-select">File:</label>
+                <select id="file-select">
+                    <option value="">-- Loading... --</option>
+                </select>
+            </div>
+        </header>
+
+        <main>
+            <!-- Left column: 3D + playback -->
+            <div class="viz-column">
+                <section>
+                    <div class="canvas-container">
+                        <canvas id="boat-canvas" width="600" height="450"></canvas>
+                        <canvas id="compass-canvas" width="90" height="90"></canvas>
+                    </div>
+                    <div class="view-controls">
+                        <div class="view-control">
+                            <label>Az:</label>
+                            <input type="range" id="view-azimuth" min="0" max="360" value="315">
+                            <span id="view-azimuth-value">NW</span>
+                        </div>
+                        <div class="view-control">
+                            <label>El:</label>
+                            <input type="range" id="view-elevation" min="0" max="90" value="25">
+                            <span id="view-elevation-value">25</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="playback-section">
+                    <div class="transport-row">
+                        <button class="transport-btn" id="btn-start" title="Jump to start (Home)">|&lt;</button>
+                        <button class="transport-btn" id="btn-back" title="Step back (Left)">&lt;</button>
+                        <button class="transport-btn" id="btn-play" title="Play/Pause (Space)">&#9654;</button>
+                        <button class="transport-btn" id="btn-fwd" title="Step forward (Right)">&gt;</button>
+                        <button class="transport-btn" id="btn-end" title="Jump to end (End)">&gt;|</button>
+                        <input type="range" class="scrub-bar" id="scrub" min="0" max="0" value="0">
+                    </div>
+                    <div class="playback-info">
+                        <span class="frame-info" id="frame-info">Frame 0 / 0</span>
+                        <span class="frame-info" id="time-info">0:00.0</span>
+                        <div class="speed-buttons">
+                            <button class="speed-btn" data-speed="0.5">0.5x</button>
+                            <button class="speed-btn active" data-speed="1">1x</button>
+                            <button class="speed-btn" data-speed="2">2x</button>
+                            <button class="speed-btn" data-speed="5">5x</button>
+                            <button class="speed-btn" data-speed="10">10x</button>
+                            <button class="speed-btn" data-speed="20">20x</button>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right column: data panels -->
+            <div class="data-column">
+                <section class="data-panel">
+                    <h2>Navigation</h2>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>Heading</label>
+                            <span id="val-heading" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Heading Error</label>
+                            <span id="val-heading-error" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Heading Rate</label>
+                            <span id="val-heading-rate" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Mode</label>
+                            <span id="val-mode" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>COG Error</label>
+                            <span id="val-cog-error" class="value">---</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="data-panel">
+                    <h2>Wind</h2>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>AWA</label>
+                            <span id="val-awa" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>AWS</label>
+                            <span id="val-aws" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>TWA</label>
+                            <span id="val-twa" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>TWS</label>
+                            <span id="val-tws" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>AWA Rate</label>
+                            <span id="val-awa-rate" class="value">---</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="data-panel">
+                    <h2>Speed</h2>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>STW</label>
+                            <span id="val-stw" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>SOG</label>
+                            <span id="val-sog" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>VMG Up</label>
+                            <span id="val-vmg-up" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>VMG Down</label>
+                            <span id="val-vmg-down" class="value">---</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="data-panel">
+                    <h2>Steering</h2>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>Expert Rudder</label>
+                            <span id="val-rudder" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>PD Suggestion</label>
+                            <span id="val-pd" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Rudder Velocity</label>
+                            <span id="val-rudder-vel" class="value">---</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="data-panel">
+                    <h2>Environment</h2>
+                    <div class="data-grid">
+                        <div class="data-item">
+                            <label>Roll</label>
+                            <span id="val-roll" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Pitch</label>
+                            <span id="val-pitch" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Roll Rate</label>
+                            <span id="val-roll-rate" class="value">---</span>
+                        </div>
+                        <div class="data-item">
+                            <label>Wave Period</label>
+                            <span id="val-wave-period" class="value">---</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <div class="status-bar" id="status-bar">Select a file to begin</div>
+    </div>
+
+    <script src="/static/pogo1250.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
