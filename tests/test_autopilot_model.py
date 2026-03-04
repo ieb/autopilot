@@ -27,12 +27,12 @@ class TestModelConfig:
     def test_default_config_values(self):
         """Default configuration should match expected values."""
         config = ModelConfig()
-        
+
         assert config.sequence_length == 20
         assert config.feature_dim == 22
-        assert config.lstm_units_1 == 64
-        assert config.lstm_units_2 == 32
-        assert config.dense_units == 16
+        assert config.lstm_units_1 == 128
+        assert config.lstm_units_2 == 64
+        assert config.dense_units == 32
         assert config.dropout_rate == 0.3
     
     def test_custom_config(self):
@@ -40,14 +40,14 @@ class TestModelConfig:
         config = ModelConfig(
             sequence_length=30,
             feature_dim=32,
-            lstm_units_1=128
+            lstm_units_1=256
         )
-        
+
         assert config.sequence_length == 30
         assert config.feature_dim == 32
-        assert config.lstm_units_1 == 128
+        assert config.lstm_units_1 == 256
         # Others remain default
-        assert config.lstm_units_2 == 32
+        assert config.lstm_units_2 == 64
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
@@ -111,8 +111,8 @@ class TestBuildModel:
         
         # Should have parameters (not empty)
         assert num_params > 0
-        # Should be under 100k for efficient inference
-        assert num_params < 100000
+        # Should be under 300k for efficient inference on RPi4
+        assert num_params < 300000
     
     def test_model_count_params_method(self):
         """Model should have count_parameters method."""

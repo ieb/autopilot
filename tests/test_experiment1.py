@@ -232,10 +232,10 @@ class TestNavigator:
     
     def test_leg_advance_on_arrival(self, navigator):
         """Test that leg advances when waypoint is reached."""
-        # Position at the to_waypoint (second waypoint's to_lat/to_lon)
+        # Position at the to_waypoint of leg 0 (first waypoint's to_lat/to_lon)
         nav_state = navigator.update(
-            lat=51.7,  # to_lat of second waypoint
-            lon=-0.8,  # to_lon of second waypoint
+            lat=51.6,  # to_lat of first waypoint
+            lon=-0.9,  # to_lon of first waypoint
             twd=180.0,
             heading=45.0,
             stw=6.0,
