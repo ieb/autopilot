@@ -1,0 +1,16 @@
+{
+    "channel": "can0",
+    "log_dir": "/mnt/usbdrive/logs/can",
+    "max_file_size_mb": 20,
+    "max_disk_mb": 500,
+    "include": [],
+    "exclude": [
+        {"pgn": 127488},
+        {"pgn": 127489}
+    ],
+    "rate_limits": [],
+    "gps_time_sync": true,
+    "web_enabled": true,
+    "web_port": 8082,
+    "web_host": "0.0.0.0"
+}

@@ -1,0 +1,4 @@
+# udev rule for USB-CAN adapters (gs_usb driver — CandleLite, CANable, etc.)
+# When the adapter is plugged in, bring up can0 at NMEA2000 bitrate.
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="gs_usb", ATTR{type}=="280", \
+    RUN+="/usr/local/bin/can0-up.sh %k"

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from .passage_simulator import PassageSimulator, SimulationConfig
+from src.pilots import get_pilot, list_pilots
 
 
 def setup_logging(verbose: bool = False):
@@ -37,6 +38,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Run with PD pilot
+  uv run python -m experiments.experiment1.run_experiment \\
+    --route data/experiment1/route/wr_route_1_20260125_005338.csv \\
+    --pilot pd
+
+  # Run with PID pilot and custom gains
+  uv run python -m experiments.experiment1.run_experiment \\
+    --route data/experiment1/route/wr_route_1_20260125_005338.csv \\
+    --pilot pid --ki 0.2 --kp 1.8
+
   # Run with baseline controller
   uv run python -m experiments.experiment1.run_experiment \\
     --route data/experiment1/route/wr_route_1_20260125_005338.csv \\
@@ -97,7 +108,22 @@ Examples:
         action='store_true',
         help='Use mock autopilot (simple P control) for hypothesis testing'
     )
-    
+
+    # Pilot controller options
+    parser.add_argument(
+        '--pilot',
+        type=str,
+        default=None,
+        help=f'Use a pilot controller (available: {", ".join(list_pilots())})'
+    )
+    parser.add_argument('--kp', type=float, default=None, help='Override pilot kp gain')
+    parser.add_argument('--kd', type=float, default=None, help='Override pilot kd gain')
+    parser.add_argument('--ki', type=float, default=None, help='Override pilot ki gain (PID only)')
+    parser.add_argument('--integrator-limit', type=float, default=None,
+                        help='Override PID integrator limit (degrees)')
+    parser.add_argument('--max-rudder', type=float, default=None,
+                        help='Override pilot max rudder (normalised, 1.0 = 25°)')
+
     parser.add_argument(
         '--max-hours',
         type=float,
@@ -142,6 +168,24 @@ Examples:
             logger.warning(f"Model file not found: {model_path}. Will use baseline.")
             args.baseline = True
             
+    # Build pilot if requested
+    pilot = None
+    if args.pilot:
+        pilot = get_pilot(args.pilot)
+        overrides = {}
+        if args.kp is not None:
+            overrides["kp"] = args.kp
+        if args.kd is not None:
+            overrides["kd"] = args.kd
+        if args.ki is not None:
+            overrides["ki"] = args.ki
+        if args.integrator_limit is not None:
+            overrides["integrator_limit"] = args.integrator_limit
+        if args.max_rudder is not None:
+            overrides["max_rudder"] = args.max_rudder
+        if overrides:
+            pilot.configure(**overrides)
+
     # Create configuration
     config = SimulationConfig(
         dt=args.dt,
@@ -150,6 +194,7 @@ Examples:
         use_mock=args.mock,
         model_path=args.model,
         verbose=args.verbose,
+        pilot=pilot,
     )
     
     # Print configuration
@@ -158,7 +203,12 @@ Examples:
     logger.info("=" * 60)
     logger.info(f"Route: {args.route}")
     logger.info(f"GRIB data: {args.gribs or 'None (using route predictions)'}")
-    if args.baseline:
+    if args.pilot:
+        pilot_config = {k: getattr(pilot, k) for k in
+                        ["kp", "kd", "ki", "max_rudder", "integrator_limit", "dt"]
+                        if hasattr(pilot, k)}
+        controller_str = f"Pilot: {pilot.name} {pilot_config}"
+    elif args.baseline:
         controller_str = "Baseline helm controller"
     elif args.mock:
         controller_str = "Mock autopilot (P control)"

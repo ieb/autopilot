@@ -1,0 +1,30 @@
+[Unit]
+Description=CAN Bus Raw Frame Datalogger
+After=network.target mnt-usbdrive.mount
+Requires=mnt-usbdrive.mount
+# Wait for CAN interface — udev rule brings it up when adapter is plugged in
+After=sys-subsystem-net-devices-can0.device
+Wants=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/usbdrive/autopilot
+ExecStart=/home/pi/usbdrive/autopilot/.venv/bin/python -m src.n2k.can_logger \
+    --config /mnt/usbdrive/config/can_logger.json \
+    --log-dir /mnt/usbdrive/logs/can \
+    --web --web-port 8082
+Restart=always
+RestartSec=5
+
+# Give the process time to fsync and close files on stop
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=can-logger
+
+[Install]
+WantedBy=multi-user.target

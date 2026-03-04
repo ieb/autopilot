@@ -72,7 +72,10 @@ class YachtConfig:
     heel_damping: float = 0.85             # Heel response damping (0-1)
 
     # Rudder response
-    rudder_effectiveness: float = 0.5      # deg/s heading rate per deg rudder
+    rudder_effectiveness: float = 1.0      # deg/s heading rate per deg rudder at reference speed
+    reference_speed: float = 3.0           # knots - speed at which rudder_effectiveness is calibrated
+    max_rudder_speed_factor: float = 2.0   # Limits the max deg/s to this rudder_effectiveness*max_rudder_speed_factor
+
     heading_damping: float = 0.8           # First-order response damping
     max_rudder_angle: float = 25.0         # Maximum rudder deflection
     
@@ -216,8 +219,11 @@ class YachtDynamics:
         # Target heading rate from rudder
         rudder_effect = self.config.rudder_effectiveness * self.state.rudder_angle
         
-        # Speed factor - rudder is less effective at low speed
-        speed_factor = min(1.0, self.state.stw / 3.0) if self.state.stw > 0 else 0.0
+        # Speed factor, a set rudder 
+        speed_factor = self.state.stw / self.config.reference_speed if self.state.stw > 0 else 0.0
+        if speed_factor > self.config.max_rudder_speed_factor:
+            speed_factor = self.config.max_rudder_speed_factor
+
         rudder_effect *= speed_factor
         
         # Weather helm from heel – heeling to port (negative roll) on starboard

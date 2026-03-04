@@ -8,15 +8,17 @@ Supports bz2 compressed files and multiple resolution grids.
 
 import bz2
 import contextlib
+import json
 import logging
 import math
 import os
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -102,6 +104,7 @@ class WindData:
     valid_time: datetime
     u10: GribField  # U-component of 10m wind (m/s)
     v10: GribField  # V-component of 10m wind (m/s)
+    source_file: Optional[str] = None
     
     def get_wind_at(self, lat: float, lon: float) -> Tuple[float, float]:
         """
@@ -137,6 +140,7 @@ class WaveData:
     swh: Optional[GribField] = None    # Significant wave height (m)
     mwp: Optional[GribField] = None    # Mean wave period (s)
     mwd: Optional[GribField] = None    # Mean wave direction (degrees)
+    source_file: Optional[str] = None
     
     def get_waves_at(self, lat: float, lon: float) -> Tuple[float, float, float]:
         """
@@ -255,10 +259,13 @@ class GribReader:
     WAVE_PERIOD_NAMES = ['mwp', 'pp1d', 'PERPW', 'mpww']
     WAVE_DIR_NAMES = ['mwd', 'DIRPW', 'mdww']
     
+    METADATA_FILENAME = 'grib_metadata.json'
+    METADATA_VERSION = 1
+
     def __init__(self, grib_dir: Optional[str] = None):
         """
         Initialize GRIB reader.
-        
+
         Args:
             grib_dir: Directory containing GRIB files
         """
@@ -266,68 +273,87 @@ class GribReader:
         self.wind_data: Dict[datetime, List[WindData]] = {}
         self.wave_data: Dict[datetime, List[WaveData]] = {}
         self._temp_files: List[Path] = []
+        self._metadata: Dict[str, Any] = {'version': self.METADATA_VERSION, 'files': {}}
+        self._lazy: bool = False
+        self._loaded_files: Set[str] = set()
+        self._lock = threading.Lock()
         
-    def load_directory(self, grib_dir: Optional[str] = None) -> int:
+    def load_directory(self, grib_dir: Optional[str] = None,
+                       lazy: bool = False) -> int:
         """
-        Load all GRIB files from a directory.
-        
+        Load GRIB files from a directory.
+
         Args:
             grib_dir: Directory to load from (uses init dir if not specified)
-            
+            lazy: If True, only scan metadata — files are loaded on demand
+                  via ensure_time_loaded(). If False, load all files eagerly.
+
         Returns:
-            Number of files loaded
+            Number of files found (lazy) or loaded (eager)
         """
         if not HAS_CFGRIB:
             raise ImportError("cfgrib is required to read GRIB files. "
                             "Install with: pip install cfgrib xarray eccodes")
-            
+
         grib_path = Path(grib_dir) if grib_dir else self.grib_dir
         if not grib_path:
             raise ValueError("No GRIB directory specified")
-            
+
         if not grib_path.exists():
             raise FileNotFoundError(f"GRIB directory not found: {grib_path}")
-            
+
+        self.grib_dir = grib_path
+        self._lazy = lazy
+
+        # Build / load the metadata cache
+        self._metadata = self._load_metadata_cache(grib_path)
+
+        if lazy:
+            n_files = len(self._metadata['files'])
+            logger.info(f"Lazy mode: indexed {n_files} GRIB files from metadata cache")
+            return n_files
+
+        # Eager mode — load all files
         files_loaded = 0
-        
-        # Find all GRIB files (including compressed)
         for pattern in ['*.grb', '*.grib', '*.grb2', '*.grb.bz2', '*.grib.bz2']:
             for grib_file in grib_path.glob(pattern):
                 try:
                     self.load_file(grib_file)
+                    self._loaded_files.add(grib_file.name)
                     files_loaded += 1
                 except Exception as e:
                     logger.warning(f"Failed to load {grib_file.name}: {e}")
-                    
+
         logger.info(f"Loaded {files_loaded} GRIB files with "
                    f"{len(self.wind_data)} wind times, {len(self.wave_data)} wave times")
-        
+
         return files_loaded
         
     def load_file(self, filepath: Path):
         """
         Load a single GRIB file.
-        
+
         Args:
             filepath: Path to GRIB file (may be bz2 compressed)
         """
         if not HAS_CFGRIB:
             raise ImportError("cfgrib is required")
-            
+
         filepath = Path(filepath)
-        
+        source_file = filepath.name
+
         # Handle bz2 compression
         if filepath.suffix == '.bz2':
             actual_file = self._decompress_bz2(filepath)
         else:
             actual_file = filepath
-            
+
         try:
             # Open with xarray/cfgrib
             # Try different filter combinations for wind and wave data
-            self._load_wind_data(actual_file)
-            self._load_wave_data(actual_file)
-            
+            self._load_wind_data(actual_file, source_file=source_file)
+            self._load_wave_data(actual_file, source_file=source_file)
+
         finally:
             # Clean up temp file if we decompressed
             if filepath.suffix == '.bz2' and actual_file in self._temp_files:
@@ -356,37 +382,37 @@ class GribReader:
             
         return temp_file
         
-    def _load_wind_data(self, filepath: Path):
+    def _load_wind_data(self, filepath: Path, source_file: str = None):
         """Load wind data from a GRIB file."""
         found_wind = False
         try:
             with _suppress_stderr():
                 datasets = cfgrib.open_datasets(str(filepath))
-            
+
             for ds in datasets:
                 u_var = None
                 v_var = None
-                
+
                 for var in ds.data_vars:
                     var_lower = var.lower()
                     if any(name.lower() in var_lower for name in self.WIND_U_NAMES):
                         u_var = var
                     elif any(name.lower() in var_lower for name in self.WIND_V_NAMES):
                         v_var = var
-                        
+
                 if u_var and v_var:
-                    self._extract_wind_fields(ds, u_var, v_var)
+                    self._extract_wind_fields(ds, u_var, v_var, source_file=source_file)
                     found_wind = True
-                    
+
         except Exception as e:
             logger.debug(f"cfgrib wind loading failed: {e}")
-        
+
         # Fallback: use eccodes directly for unrecognized GRIB1 parameters
         # indicatorOfParameter 33 = U wind, 34 = V wind
         if not found_wind:
-            self._load_wind_data_eccodes(filepath)
+            self._load_wind_data_eccodes(filepath, source_file=source_file)
     
-    def _load_wind_data_eccodes(self, filepath: Path):
+    def _load_wind_data_eccodes(self, filepath: Path, source_file: str = None):
         """
         Load wind data using eccodes directly.
         
@@ -489,30 +515,31 @@ class GribReader:
                     valid_time=valid_time, data=v_data, lats=lats, lons=lons,
                 )
                 
-                wind = WindData(valid_time=valid_time, u10=u_field, v10=v_field)
-                
+                wind = WindData(valid_time=valid_time, u10=u_field, v10=v_field,
+                               source_file=source_file)
+
                 if valid_time not in self.wind_data:
                     self.wind_data[valid_time] = []
                 self.wind_data[valid_time].append(wind)
-            
+
             if u_messages:
                 logger.debug(f"Loaded {len(u_messages)} wind times from {filepath.name} via eccodes")
                 
         except Exception as e:
             logger.debug(f"eccodes wind loading failed: {e}")
             
-    def _load_wave_data(self, filepath: Path):
+    def _load_wave_data(self, filepath: Path, source_file: str = None):
         """Load wave data from a GRIB file."""
         try:
             with _suppress_stderr():
                 datasets = cfgrib.open_datasets(str(filepath))
-            
+
             for ds in datasets:
                 # Look for wave parameters
                 swh_var = None
                 mwp_var = None
                 mwd_var = None
-                
+
                 for var in ds.data_vars:
                     var_lower = var.lower()
                     if any(name.lower() in var_lower for name in self.WAVE_HEIGHT_NAMES):
@@ -521,21 +548,25 @@ class GribReader:
                         mwp_var = var
                     elif any(name.lower() in var_lower for name in self.WAVE_DIR_NAMES):
                         mwd_var = var
-                        
+
                 if swh_var or mwp_var:
-                    self._extract_wave_fields(ds, swh_var, mwp_var, mwd_var)
-                    
+                    self._extract_wave_fields(ds, swh_var, mwp_var, mwd_var,
+                                              source_file=source_file)
+
         except Exception as e:
             logger.debug(f"No wave data in {filepath.name}: {e}")
             
-    def _extract_wind_fields(self, ds: 'xr.Dataset', u_var: str, v_var: str):
+    def _extract_wind_fields(self, ds: 'xr.Dataset', u_var: str, v_var: str,
+                              source_file: str = None):
         """Extract wind fields from dataset."""
         u_da = ds[u_var]
         v_da = ds[v_var]
-        
+
         # Get coordinates
         lats = u_da.latitude.values if 'latitude' in u_da.coords else u_da.lat.values
         lons = u_da.longitude.values if 'longitude' in u_da.coords else u_da.lon.values
+        # Normalise longitudes from 0-360 to -180/180
+        lons = np.where(lons > 180, lons - 360, lons)
         
         # Get valid times
         if 'valid_time' in u_da.coords:
@@ -549,20 +580,35 @@ class GribReader:
         if np.ndim(times) == 0:
             times = [times]
             
+        # Find the actual time dimension name (may be 'time', 'valid_time', 'step', etc.)
+        time_dim = None
+        for dim in u_da.dims:
+            if dim not in ('latitude', 'longitude', 'lat', 'lon', 'x', 'y'):
+                time_dim = dim
+                break
+
         for i, t in enumerate(times):
             valid_time = self._numpy_to_datetime(t)
-            
+
             # Extract data for this time
-            if len(times) > 1:
-                u_data = u_da.isel(time=i).values if 'time' in u_da.dims else u_da.values
-                v_data = v_da.isel(time=i).values if 'time' in v_da.dims else v_da.values
+            if len(times) > 1 and time_dim and time_dim in u_da.dims:
+                u_data = u_da.isel({time_dim: i}).values
+                v_data = v_da.isel({time_dim: i}).values
             else:
                 u_data = u_da.values
                 v_data = v_da.values
-                
+
             # Remove extra dimensions
             u_data = np.squeeze(u_data)
             v_data = np.squeeze(v_data)
+
+            # Validate shape — must be 2D (lat, lon)
+            if u_data.ndim != 2 or v_data.ndim != 2:
+                logger.warning(
+                    f"Skipping wind field at {valid_time}: "
+                    f"expected 2D data, got u={u_data.shape} v={v_data.shape}"
+                )
+                continue
             
             # Create GribFields
             u_field = GribField(
@@ -584,27 +630,31 @@ class GribReader:
                 lons=lons,
             )
             
-            wind = WindData(valid_time=valid_time, u10=u_field, v10=v_field)
-            
+            wind = WindData(valid_time=valid_time, u10=u_field, v10=v_field,
+                           source_file=source_file)
+
             if valid_time not in self.wind_data:
                 self.wind_data[valid_time] = []
             self.wind_data[valid_time].append(wind)
             
-    def _extract_wave_fields(self, ds: 'xr.Dataset', 
+    def _extract_wave_fields(self, ds: 'xr.Dataset',
                             swh_var: Optional[str],
                             mwp_var: Optional[str],
-                            mwd_var: Optional[str]):
+                            mwd_var: Optional[str],
+                            source_file: str = None):
         """Extract wave fields from dataset."""
         # Get reference variable for coords
         ref_var = swh_var or mwp_var or mwd_var
         if not ref_var:
             return
-            
+
         ref_da = ds[ref_var]
-        
+
         # Get coordinates
         lats = ref_da.latitude.values if 'latitude' in ref_da.coords else ref_da.lat.values
         lons = ref_da.longitude.values if 'longitude' in ref_da.coords else ref_da.lon.values
+        # Normalise longitudes from 0-360 to -180/180
+        lons = np.where(lons > 180, lons - 360, lons)
         
         # Get valid times
         if 'valid_time' in ref_da.coords:
@@ -617,52 +667,392 @@ class GribReader:
         if np.ndim(times) == 0:
             times = [times]
             
+        # Find the actual time dimension name
+        time_dim = None
+        for dim in ref_da.dims:
+            if dim not in ('latitude', 'longitude', 'lat', 'lon', 'x', 'y'):
+                time_dim = dim
+                break
+
         for i, t in enumerate(times):
             valid_time = self._numpy_to_datetime(t)
-            
+
             # Extract fields
             swh_field = None
             mwp_field = None
             mwd_field = None
-            
+
             if swh_var:
                 da = ds[swh_var]
-                data = da.isel(time=i).values if 'time' in da.dims and len(times) > 1 else da.values
-                swh_field = GribField(
-                    name=swh_var, short_name='swh', units='m',
-                    valid_time=valid_time, data=np.squeeze(data),
-                    lats=lats, lons=lons,
-                )
-                
+                data = self._extract_time_slice(da, i, len(times), time_dim)
+                if data.ndim == 2:
+                    swh_field = GribField(
+                        name=swh_var, short_name='swh', units='m',
+                        valid_time=valid_time, data=data,
+                        lats=lats, lons=lons,
+                    )
+
             if mwp_var:
                 da = ds[mwp_var]
-                data = da.isel(time=i).values if 'time' in da.dims and len(times) > 1 else da.values
-                mwp_field = GribField(
-                    name=mwp_var, short_name='mwp', units='s',
-                    valid_time=valid_time, data=np.squeeze(data),
-                    lats=lats, lons=lons,
-                )
-                
+                data = self._extract_time_slice(da, i, len(times), time_dim)
+                if data.ndim == 2:
+                    mwp_field = GribField(
+                        name=mwp_var, short_name='mwp', units='s',
+                        valid_time=valid_time, data=data,
+                        lats=lats, lons=lons,
+                    )
+
             if mwd_var:
                 da = ds[mwd_var]
-                data = da.isel(time=i).values if 'time' in da.dims and len(times) > 1 else da.values
-                mwd_field = GribField(
-                    name=mwd_var, short_name='mwd', units='degrees',
-                    valid_time=valid_time, data=np.squeeze(data),
-                    lats=lats, lons=lons,
-                )
+                data = self._extract_time_slice(da, i, len(times), time_dim)
+                if data.ndim == 2:
+                    mwd_field = GribField(
+                        name=mwd_var, short_name='mwd', units='degrees',
+                        valid_time=valid_time, data=data,
+                        lats=lats, lons=lons,
+                    )
                 
             wave = WaveData(
                 valid_time=valid_time,
                 swh=swh_field,
                 mwp=mwp_field,
                 mwd=mwd_field,
+                source_file=source_file,
             )
-            
+
             if valid_time not in self.wave_data:
                 self.wave_data[valid_time] = []
             self.wave_data[valid_time].append(wave)
             
+    @staticmethod
+    def _extract_time_slice(da, time_index: int, n_times: int,
+                            time_dim: Optional[str]) -> np.ndarray:
+        """Extract a 2D (lat, lon) slice from a data array.
+
+        Handles datasets where the time dimension may be named 'time',
+        'valid_time', 'step', etc.
+        """
+        if n_times > 1 and time_dim and time_dim in da.dims:
+            data = da.isel({time_dim: time_index}).values
+        else:
+            data = da.values
+        return np.squeeze(data)
+
+    # ------------------------------------------------------------------
+    # Metadata scanning and lazy loading
+    # ------------------------------------------------------------------
+
+    def _load_metadata_cache(self, grib_dir: Path) -> Dict[str, Any]:
+        """Load or build the metadata cache for *grib_dir*."""
+        cache_path = grib_dir / self.METADATA_FILENAME
+        metadata: Dict[str, Any] = {'version': self.METADATA_VERSION, 'files': {}}
+
+        # Try loading existing cache
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'r') as f:
+                    cached = json.load(f)
+                if cached.get('version') == self.METADATA_VERSION:
+                    metadata = cached
+            except Exception as e:
+                logger.warning(f"Failed to read metadata cache: {e}")
+
+        # Enumerate current GRIB files on disk
+        grib_files: List[Path] = []
+        for pattern in ['*.grb', '*.grib', '*.grb2', '*.grb.bz2', '*.grib.bz2']:
+            grib_files.extend(grib_dir.glob(pattern))
+
+        current_names = {f.name for f in grib_files}
+        file_map = {f.name: f for f in grib_files}
+
+        # Remove entries for files that no longer exist
+        stale_keys = [k for k in metadata['files'] if k not in current_names]
+        for k in stale_keys:
+            del metadata['files'][k]
+
+        # Validate / rescan each file
+        changed = bool(stale_keys)
+        for name, filepath in file_map.items():
+            stat = filepath.stat()
+            entry = metadata['files'].get(name)
+            if (entry
+                    and entry.get('size_bytes') == stat.st_size
+                    and entry.get('mtime') == stat.st_mtime):
+                continue  # still fresh
+            # Scan this file
+            try:
+                new_entry = self._scan_file_metadata(filepath)
+                new_entry['size_bytes'] = stat.st_size
+                new_entry['mtime'] = stat.st_mtime
+                metadata['files'][name] = new_entry
+                changed = True
+                logger.debug(f"Scanned metadata for {name}")
+            except Exception as e:
+                logger.warning(f"Failed to scan metadata for {name}: {e}")
+
+        if changed:
+            self._save_metadata_cache(grib_dir, metadata)
+
+        return metadata
+
+    @staticmethod
+    def _save_metadata_cache(grib_dir: Path, metadata: Dict[str, Any]):
+        """Persist *metadata* to grib_metadata.json."""
+        cache_path = grib_dir / GribReader.METADATA_FILENAME
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(metadata, f, indent=2, default=str)
+            logger.debug(f"Saved metadata cache to {cache_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save metadata cache: {e}")
+
+    @staticmethod
+    def _scan_file_metadata(filepath: Path) -> Dict[str, Any]:
+        """Scan GRIB headers with eccodes — no data values loaded."""
+        try:
+            import eccodes
+        except ImportError:
+            raise ImportError("eccodes is required for metadata scanning")
+
+        params: set = set()
+        valid_times: list = []
+        lat_min = float('inf')
+        lat_max = float('-inf')
+        lon_min = float('inf')
+        lon_max = float('-inf')
+        resolution_deg: Optional[float] = None
+        has_wind = False
+        has_waves = False
+
+        # Wind & wave parameter short names (lowercase)
+        wind_names = {'u10', '10u', 'ugrd', 'v10', '10v', 'vgrd'}
+        wave_names = {'swh', 'hs', 'htsgw', 'shww', 'mwp', 'pp1d', 'perpw',
+                      'mpww', 'mwd', 'dirpw', 'mdww', 'shts', 'mpts', 'mdts', 'mp2'}
+
+        # Decompress bz2 if needed (to a temp file)
+        if filepath.suffix == '.bz2':
+            tmp = Path(tempfile.gettempdir()) / filepath.stem
+            if not tmp.exists():
+                with bz2.open(filepath, 'rb') as fin:
+                    with open(tmp, 'wb') as fout:
+                        fout.write(fin.read())
+            scan_path = tmp
+        else:
+            scan_path = filepath
+
+        with open(scan_path, 'rb') as f:
+            while True:
+                gid = eccodes.codes_grib_new_from_file(f)
+                if gid is None:
+                    break
+                try:
+                    # Parameter short name
+                    try:
+                        sn = eccodes.codes_get(gid, 'shortName')
+                        params.add(sn)
+                        if sn.lower() in wind_names:
+                            has_wind = True
+                        if sn.lower() in wave_names:
+                            has_waves = True
+                        # Fallback for GRIB1 files where shortName is
+                        # 'unknown': check indicatorOfParameter at 10m
+                        # (33 = U wind, 34 = V wind)
+                        if sn == 'unknown' and not has_wind:
+                            try:
+                                indicator = eccodes.codes_get(gid, 'indicatorOfParameter')
+                                level_type = eccodes.codes_get(gid, 'typeOfLevel')
+                                level = eccodes.codes_get(gid, 'level')
+                                if indicator in (33, 34) and level_type == 'heightAboveGround' and level == 10:
+                                    has_wind = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    # Valid time
+                    try:
+                        data_date = eccodes.codes_get(gid, 'dataDate')
+                        data_time = eccodes.codes_get(gid, 'dataTime')
+                        step = eccodes.codes_get(gid, 'step')
+                        year = data_date // 10000
+                        month = (data_date % 10000) // 100
+                        day = data_date % 100
+                        hour = data_time // 100
+                        minute = data_time % 100
+                        base = datetime(year, month, day, hour, minute)
+                        vt = base + timedelta(hours=step)
+                        vt_iso = vt.isoformat()
+                        if vt_iso not in valid_times:
+                            valid_times.append(vt_iso)
+                    except Exception:
+                        pass
+
+                    # Spatial bounds
+                    try:
+                        lf = eccodes.codes_get(gid, 'latitudeOfFirstGridPointInDegrees')
+                        ll = eccodes.codes_get(gid, 'latitudeOfLastGridPointInDegrees')
+                        of = eccodes.codes_get(gid, 'longitudeOfFirstGridPointInDegrees')
+                        ol = eccodes.codes_get(gid, 'longitudeOfLastGridPointInDegrees')
+                        if of > 180:
+                            of -= 360
+                        if ol > 180:
+                            ol -= 360
+                        lat_min = min(lat_min, lf, ll)
+                        lat_max = max(lat_max, lf, ll)
+                        lon_min = min(lon_min, of, ol)
+                        lon_max = max(lon_max, of, ol)
+                    except Exception:
+                        pass
+
+                    # Resolution
+                    if resolution_deg is None:
+                        try:
+                            ni = eccodes.codes_get(gid, 'Ni')
+                            nj = eccodes.codes_get(gid, 'Nj')
+                            if ni > 1 and nj > 1:
+                                resolution_deg = abs(lat_max - lat_min) / (nj - 1)
+                        except Exception:
+                            pass
+                finally:
+                    eccodes.codes_release(gid)
+
+        time_min = min(valid_times) if valid_times else None
+        time_max = max(valid_times) if valid_times else None
+
+        return {
+            'parameters': sorted(params),
+            'valid_times': sorted(valid_times),
+            'time_min': time_min,
+            'time_max': time_max,
+            'lat_min': lat_min if lat_min != float('inf') else None,
+            'lat_max': lat_max if lat_max != float('-inf') else None,
+            'lon_min': lon_min if lon_min != float('inf') else None,
+            'lon_max': lon_max if lon_max != float('-inf') else None,
+            'resolution_deg': resolution_deg,
+            'has_wind': has_wind,
+            'has_waves': has_waves,
+        }
+
+    # ------------------------------------------------------------------
+    # Lazy-load helpers
+    # ------------------------------------------------------------------
+
+    def get_file_metadata(self) -> Dict[str, Any]:
+        """Return per-file metadata for the frontend file selector."""
+        files = {}
+        for name, entry in self._metadata.get('files', {}).items():
+            files[name] = {
+                'valid_times': entry.get('valid_times', []),
+                'time_min': entry.get('time_min'),
+                'time_max': entry.get('time_max'),
+                'has_wind': entry.get('has_wind', False),
+                'has_waves': entry.get('has_waves', False),
+                'resolution_deg': entry.get('resolution_deg'),
+            }
+        return files
+
+    def ensure_time_loaded(self, query_time: datetime, filename: str = None):
+        """Ensure data covering *query_time* is loaded.
+
+        In eager mode this is a no-op.  In lazy mode it finds matching
+        files from metadata and loads them on demand.
+
+        If *filename* is given, only that specific file is loaded.
+        """
+        if not self._lazy:
+            return
+
+        if filename:
+            self._ensure_file_loaded(filename)
+        else:
+            filenames = self._files_for_time(query_time)
+            for name in filenames:
+                self._ensure_file_loaded(name)
+
+    def _files_for_time(self, query_time: datetime) -> List[str]:
+        """Return filenames from metadata whose time range covers *query_time*."""
+        iso = query_time.isoformat()
+        result = []
+        for name, entry in self._metadata.get('files', {}).items():
+            t_min = entry.get('time_min')
+            t_max = entry.get('time_max')
+            if t_min is None or t_max is None:
+                # Unknown time range — include to be safe
+                result.append(name)
+                continue
+            if t_min <= iso <= t_max:
+                result.append(name)
+        return result
+
+    def _ensure_file_loaded(self, filename: str):
+        """Decompress + load a single file if not already loaded."""
+        if filename in self._loaded_files:
+            return
+
+        with self._lock:
+            # Double-check after acquiring lock
+            if filename in self._loaded_files:
+                return
+
+            filepath = self.grib_dir / filename
+            if not filepath.exists():
+                logger.warning(f"GRIB file not found: {filepath}")
+                return
+
+            try:
+                logger.info(f"Lazy-loading {filename}")
+                self.load_file(filepath)
+                self._loaded_files.add(filename)
+            except Exception as e:
+                logger.warning(f"Failed to lazy-load {filename}: {e}")
+
+    def get_bounds_from_metadata(self) -> Dict[str, Any]:
+        """Return spatial/temporal bounds from metadata without loading data."""
+        wind_times: List[str] = []
+        wave_times: List[str] = []
+        lat_min = float('inf')
+        lat_max = float('-inf')
+        lon_min = float('inf')
+        lon_max = float('-inf')
+        has_wind = False
+        has_waves = False
+
+        for entry in self._metadata.get('files', {}).values():
+            times = entry.get('valid_times', [])
+            if entry.get('lat_min') is not None:
+                lat_min = min(lat_min, entry['lat_min'])
+            if entry.get('lat_max') is not None:
+                lat_max = max(lat_max, entry['lat_max'])
+            if entry.get('lon_min') is not None:
+                lon_min = min(lon_min, entry['lon_min'])
+            if entry.get('lon_max') is not None:
+                lon_max = max(lon_max, entry['lon_max'])
+            if entry.get('has_wind'):
+                has_wind = True
+                wind_times.extend(times)
+            if entry.get('has_waves'):
+                has_waves = True
+                wave_times.extend(times)
+
+        # Separate time lists so the frontend only offers wave overlay
+        # for times that actually have wave data (and likewise for wind).
+        # The time slider uses the union so it covers the full range.
+        unique_wind = sorted(set(wind_times))
+        unique_wave = sorted(set(wave_times))
+
+        return {
+            'wind_times': unique_wind,
+            'wave_times': unique_wave,
+            'bounds': {
+                'lat_min': lat_min if lat_min != float('inf') else None,
+                'lat_max': lat_max if lat_max != float('-inf') else None,
+                'lon_min': lon_min if lon_min != float('inf') else None,
+                'lon_max': lon_max if lon_max != float('-inf') else None,
+            },
+            'has_wind': has_wind,
+            'has_waves': has_waves,
+        }
+
     def _numpy_to_datetime(self, np_time) -> datetime:
         """Convert numpy datetime64 to Python datetime."""
         if isinstance(np_time, datetime):

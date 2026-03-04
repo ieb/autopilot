@@ -7,3 +7,4 @@ from .data_logger import (
     HelmSource,
     LogRecord,
 )
+from .can_logger import CANLogger, CANLoggerConfig

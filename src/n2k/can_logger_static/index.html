@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAN Logger</title>
+<style>
+  :root { --bg: #1a1a2e; --surface: #16213e; --border: #0f3460; --text: #e0e0e0; --muted: #888; --accent: #e94560; --green: #4ecca3; --yellow: #ffc93c; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: var(--bg); color: var(--text); font-size: 14px; }
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .status-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .status-running { background: var(--green); color: #000; }
+  .status-stopped { background: var(--accent); color: #fff; }
+  .tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .tab { padding: 10px 20px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel { display: none; padding: 20px; max-width: 1200px; margin: 0 auto; }
+  .panel.active { display: block; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .card h3 { font-size: 14px; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+  .stat { text-align: center; }
+  .stat .value { font-size: 28px; font-weight: 700; color: var(--green); }
+  .stat .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .disk-bar { height: 20px; background: #222; border-radius: 10px; overflow: hidden; margin-top: 8px; }
+  .disk-bar-fill { height: 100%; background: var(--green); transition: width 0.5s; border-radius: 10px; }
+  .disk-bar-fill.warn { background: var(--yellow); }
+  .disk-bar-fill.danger { background: var(--accent); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  td { font-family: monospace; font-size: 13px; }
+  .pgn-name { color: var(--green); }
+  .hex-data { color: var(--yellow); letter-spacing: 1px; }
+  button { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: var(--border); }
+  input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+  .filter-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .filter-row input { width: 120px; }
+  .remove-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 16px; padding: 2px 6px; }
+  .sync-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .sync-yes { background: var(--green); }
+  .sync-no { background: var(--yellow); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .live-container { max-height: 500px; overflow-y: auto; }
+  .download-link { color: var(--accent); text-decoration: none; }
+  .download-link:hover { text-decoration: underline; }
+  .msg { padding: 8px 12px; margin: 8px 0; border-radius: 4px; font-size: 13px; }
+  .msg-ok { background: rgba(78, 204, 163, 0.15); border: 1px solid var(--green); }
+  .msg-err { background: rgba(233, 69, 96, 0.15); border: 1px solid var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CAN Logger</h1>
+  <span id="statusBadge" class="status-badge status-stopped">--</span>
+  <span style="color:var(--muted); margin-left:auto">Uptime: <span id="uptime">--</span></span>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="config">Config</div>
+  <div class="tab" data-tab="files">Log Files</div>
+  <div class="tab" data-tab="live">Live Monitor</div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="panel active">
+  <div class="grid" style="margin-bottom:16px">
+    <div class="card"><div class="stat"><div class="value" id="msgRate">--</div><div class="label">Messages/sec</div></div></div>
+    <div class="card"><div class="stat"><div class="value" id="framesLogged">--</div><div class="label">Frames Logged</div></div></div>
+    <div class="card"><div class="stat"><div class="value" id="framesFiltered">--</div><div class="label">Frames Filtered</div></div></div>
+    <div class="card"><div class="stat"><div class="value" id="totalReceived">--</div><div class="label">Total Received</div></div></div>
+  </div>
+
+  <div class="card">
+    <h3>Current File</h3>
+    <p>File: <span id="currentFile">--</span></p>
+    <p>Size: <span id="currentFileSize">--</span> | Frames: <span id="currentFileFrames">--</span></p>
+  </div>
+
+  <div class="card">
+    <h3>Disk Usage</h3>
+    <p><span id="diskUsed">--</span> / <span id="diskLimit">--</span></p>
+    <div class="disk-bar"><div id="diskBarFill" class="disk-bar-fill" style="width:0%"></div></div>
+  </div>
+
+  <div class="card">
+    <h3>GPS Time Sync</h3>
+    <p><span id="gpsSyncDot" class="sync-indicator sync-no"></span><span id="gpsSyncText">Not synced</span></p>
+  </div>
+
+  <div class="card">
+    <h3>PGN Breakdown</h3>
+    <table>
+      <thead><tr><th>PGN</th><th>Name</th><th>Count</th></tr></thead>
+      <tbody id="pgnTable"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Config -->
+<div id="config" class="panel">
+  <div class="card">
+    <h3>Include Filters</h3>
+    <div id="includeList"></div>
+    <button class="secondary" onclick="addFilterRow('include')">+ Add</button>
+  </div>
+
+  <div class="card">
+    <h3>Exclude Filters</h3>
+    <div id="excludeList"></div>
+    <button class="secondary" onclick="addFilterRow('exclude')">+ Add</button>
+  </div>
+
+  <div class="card">
+    <h3>Rate Limits</h3>
+    <div id="rateLimitList"></div>
+    <button class="secondary" onclick="addRateLimitRow()">+ Add</button>
+  </div>
+
+  <div style="margin-top:16px">
+    <button onclick="saveConfig()">Save Config</button>
+    <span id="configMsg"></span>
+  </div>
+</div>
+
+<!-- Log Files -->
+<div id="files" class="panel">
+  <div class="card">
+    <h3>Log Files</h3>
+    <button class="secondary" onclick="loadFiles()" style="margin-bottom:12px">Refresh</button>
+    <table>
+      <thead><tr><th>Name</th><th>Size</th><th>Frames</th><th>Date</th><th></th></tr></thead>
+      <tbody id="filesTable"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Live Monitor -->
+<div id="live" class="panel">
+  <div class="card">
+    <h3>Live CAN Frames</h3>
+    <div class="live-container">
+      <table>
+        <thead><tr><th>Time</th><th>PGN</th><th>Name</th><th>Src</th><th>Pri</th><th>DLC</th><th>Data</th></tr></thead>
+        <tbody id="liveTable"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+let pgnNames = {};
+let evtSource = null;
+
+// Tabs
+$$('.tab').forEach(t => t.addEventListener('click', () => {
+  $$('.tab').forEach(x => x.classList.remove('active'));
+  $$('.panel').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#' + t.dataset.tab).classList.add('active');
+  if (t.dataset.tab === 'files') loadFiles();
+  if (t.dataset.tab === 'config') loadConfig();
+  if (t.dataset.tab === 'live') startSSE();
+  else stopSSE();
+}));
+
+function fmt(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function fmtTime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function fmtTs(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+// Dashboard refresh
+async function refreshDashboard() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const badge = $('#statusBadge');
+    badge.textContent = d.running ? 'Running' : 'Stopped';
+    badge.className = 'status-badge ' + (d.running ? 'status-running' : 'status-stopped');
+    $('#uptime').textContent = fmtTime(d.uptime || 0);
+    $('#msgRate').textContent = d.msg_rate.toFixed(1);
+    $('#framesLogged').textContent = (d.filter?.passed || 0).toLocaleString();
+    $('#framesFiltered').textContent = ((d.filter?.excluded || 0) + (d.filter?.rate_limited || 0) + (d.filter?.no_include_match || 0)).toLocaleString();
+    $('#totalReceived').textContent = (d.total_received || 0).toLocaleString();
+    $('#currentFile').textContent = d.writer?.current_file || '--';
+    $('#currentFileSize').textContent = fmt(d.writer?.current_file_size || 0);
+    $('#currentFileFrames').textContent = (d.writer?.current_file_frames || 0).toLocaleString();
+    const used = d.disk_used_bytes || 0, limit = d.disk_limit_bytes || 1;
+    const pct = Math.min(100, (used / limit * 100));
+    $('#diskUsed').textContent = fmt(used);
+    $('#diskLimit').textContent = fmt(limit);
+    const bar = $('#diskBarFill');
+    bar.style.width = pct + '%';
+    bar.className = 'disk-bar-fill' + (pct > 90 ? ' danger' : pct > 70 ? ' warn' : '');
+    const gs = d.gps_sync || {};
+    $('#gpsSyncDot').className = 'sync-indicator ' + (gs.synced ? 'sync-yes' : 'sync-no');
+    $('#gpsSyncText').textContent = gs.synced ? 'Synced' : (gs.enabled ? 'Waiting for GPS' : 'Disabled');
+    // PGN table
+    const counts = d.pgn_counts || {};
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    $('#pgnTable').innerHTML = sorted.map(([pgn, cnt]) =>
+      `<tr><td>${pgn}</td><td class="pgn-name">${pgnNames[pgn] || 'Unknown'}</td><td>${cnt.toLocaleString()}</td></tr>`
+    ).join('');
+  } catch (e) { console.error('Dashboard refresh failed:', e); }
+}
+
+// Config
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    const c = await r.json();
+    renderFilters('include', c.include || []);
+    renderFilters('exclude', c.exclude || []);
+    renderRateLimits(c.rate_limits || []);
+  } catch (e) { console.error('Config load failed:', e); }
+}
+
+function renderFilters(type, list) {
+  const el = $(`#${type}List`);
+  el.innerHTML = '';
+  list.forEach((f, i) => {
+    const row = document.createElement('div');
+    row.className = 'filter-row';
+    row.innerHTML = `<label>PGN:</label><input type="number" value="${f.pgn || ''}" data-field="pgn">` +
+      `<label>Source:</label><input type="number" value="${f.source !== undefined ? f.source : ''}" data-field="source" placeholder="any">` +
+      `<span class="remove-btn" onclick="this.parentElement.remove()">&times;</span>`;
+    el.appendChild(row);
+  });
+}
+
+function renderRateLimits(list) {
+  const el = $('#rateLimitList');
+  el.innerHTML = '';
+  list.forEach(f => {
+    const row = document.createElement('div');
+    row.className = 'filter-row';
+    row.innerHTML = `<label>PGN:</label><input type="number" value="${f.pgn || ''}" data-field="pgn">` +
+      `<label>Source:</label><input type="number" value="${f.source !== undefined ? f.source : ''}" data-field="source" placeholder="any">` +
+      `<label>Max Hz:</label><input type="number" step="0.1" value="${f.max_hz || ''}" data-field="max_hz">` +
+      `<span class="remove-btn" onclick="this.parentElement.remove()">&times;</span>`;
+    el.appendChild(row);
+  });
+}
+
+function addFilterRow(type) {
+  const el = $(`#${type}List`);
+  const row = document.createElement('div');
+  row.className = 'filter-row';
+  row.innerHTML = `<label>PGN:</label><input type="number" data-field="pgn">` +
+    `<label>Source:</label><input type="number" data-field="source" placeholder="any">` +
+    `<span class="remove-btn" onclick="this.parentElement.remove()">&times;</span>`;
+  el.appendChild(row);
+}
+
+function addRateLimitRow() {
+  const el = $('#rateLimitList');
+  const row = document.createElement('div');
+  row.className = 'filter-row';
+  row.innerHTML = `<label>PGN:</label><input type="number" data-field="pgn">` +
+    `<label>Source:</label><input type="number" data-field="source" placeholder="any">` +
+    `<label>Max Hz:</label><input type="number" step="0.1" data-field="max_hz">` +
+    `<span class="remove-btn" onclick="this.parentElement.remove()">&times;</span>`;
+  el.appendChild(row);
+}
+
+function collectFilters(type) {
+  const rows = $$(`#${type}List .filter-row`);
+  const result = [];
+  rows.forEach(row => {
+    const pgn = row.querySelector('[data-field="pgn"]').value;
+    if (!pgn) return;
+    const entry = { pgn: parseInt(pgn) };
+    const src = row.querySelector('[data-field="source"]').value;
+    if (src) entry.source = parseInt(src);
+    result.push(entry);
+  });
+  return result;
+}
+
+function collectRateLimits() {
+  const rows = $$('#rateLimitList .filter-row');
+  const result = [];
+  rows.forEach(row => {
+    const pgn = row.querySelector('[data-field="pgn"]').value;
+    const hz = row.querySelector('[data-field="max_hz"]').value;
+    if (!pgn || !hz) return;
+    const entry = { pgn: parseInt(pgn), max_hz: parseFloat(hz) };
+    const src = row.querySelector('[data-field="source"]').value;
+    if (src) entry.source = parseInt(src);
+    result.push(entry);
+  });
+  return result;
+}
+
+async function saveConfig() {
+  const body = {
+    include: collectFilters('include'),
+    exclude: collectFilters('exclude'),
+    rate_limits: collectRateLimits(),
+  };
+  try {
+    const r = await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    const msg = $('#configMsg');
+    if (r.ok) { msg.className = 'msg msg-ok'; msg.textContent = 'Saved'; }
+    else { msg.className = 'msg msg-err'; msg.textContent = d.error || 'Failed'; }
+    setTimeout(() => msg.textContent = '', 3000);
+  } catch (e) { console.error('Save failed:', e); }
+}
+
+// Files
+async function loadFiles() {
+  try {
+    const r = await fetch('/api/files');
+    const files = await r.json();
+    $('#filesTable').innerHTML = files.map(f =>
+      `<tr><td>${f.name}</td><td>${fmt(f.size)}</td><td>${f.frames.toLocaleString()}</td>` +
+      `<td>${new Date(f.modified * 1000).toLocaleString()}</td>` +
+      `<td><a class="download-link" href="/api/files/${f.name}" download>Download</a></td></tr>`
+    ).join('') || '<tr><td colspan="5" style="color:var(--muted)">No files</td></tr>';
+  } catch (e) { console.error('Files load failed:', e); }
+}
+
+// Live monitor SSE
+function startSSE() {
+  if (evtSource) return;
+  evtSource = new EventSource('/stream');
+  evtSource.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      const frames = d.frames || [];
+      const tbody = $('#liveTable');
+      // Prepend new frames
+      const html = frames.map(f =>
+        `<tr><td>${fmtTs(f.timestamp)}</td><td>${f.pgn}</td><td class="pgn-name">${f.pgn_name}</td>` +
+        `<td>${f.source}</td><td>${f.priority}</td><td>${f.dlc}</td><td class="hex-data">${f.data}</td></tr>`
+      ).join('');
+      tbody.innerHTML = html;
+    } catch (err) { console.error('SSE parse error:', err); }
+  };
+  evtSource.onerror = () => { stopSSE(); setTimeout(startSSE, 2000); };
+}
+
+function stopSSE() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+}
+
+// Init
+(async () => {
+  try { const r = await fetch('/api/pgn_names'); pgnNames = await r.json(); } catch (e) {}
+  refreshDashboard();
+  setInterval(refreshDashboard, 2000);
+})();
+</script>
+</body>
+</html>

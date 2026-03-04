@@ -22,9 +22,10 @@ from src.simulation.yacht_dynamics import YachtDynamics, YachtConfig
 from src.simulation.wave_model import WaveModel, WaveConfig
 from src.simulation.helm_controller import HelmController, HelmConfig, SteeringMode as HelmSteeringMode
 from src.ml.polar import Polar
+from src.pilots.base import BasePilot
 
 # Import experiment modules
-from .route_parser import RouteParser, Waypoint
+from .route_parser import RouteParser, Waypoint, parse_route
 from .grib_reader import GribReader
 from .wind_provider import WindProvider
 from .wave_provider import WaveProvider
@@ -49,6 +50,7 @@ class SimulationConfig:
     use_baseline: bool = False         # Use helm controller instead of ML model
     use_mock: bool = False             # Use mock autopilot (simple P control) for testing
     model_path: Optional[str] = None   # Path to trained model
+    pilot: Optional[BasePilot] = None  # Pilot controller (from src.pilots)
     
     # Options
     verbose: bool = False
@@ -83,15 +85,17 @@ class PassageSimulator:
         """
         self.config = config or SimulationConfig()
         
-        # Parse route
+        # Parse route (with consolidation of collinear legs)
         logger.info(f"Loading route from {route_file}")
         self.route_parser = RouteParser(route_file)
-        self.waypoints = self.route_parser.parse()
-        
-        if not self.waypoints:
+        raw_waypoints = self.route_parser.parse()
+
+        if not raw_waypoints:
             raise ValueError("No waypoints found in route file")
-            
-        logger.info(f"Loaded {len(self.waypoints)} waypoints")
+
+        self.waypoints = parse_route(route_file, consolidate=True)
+        logger.info(f"Loaded {len(raw_waypoints)} waypoints, "
+                    f"consolidated to {len(self.waypoints)} legs")
         
         # Load GRIB data if available
         self.grib_reader: Optional[GribReader] = None
@@ -120,7 +124,11 @@ class PassageSimulator:
         self.helm_controller: Optional[HelmController] = None
         self.autopilot = None
         
-        if self.config.use_baseline:
+        self.pilot: Optional[BasePilot] = self.config.pilot
+
+        if self.pilot:
+            logger.info(f"Using pilot controller: {self.pilot.name}")
+        elif self.config.use_baseline:
             self.helm_controller = HelmController.expert()
             logger.info("Using baseline helm controller")
         elif self.config.use_mock:
@@ -293,7 +301,7 @@ class PassageSimulator:
         )
         
         # Update navigator
-        nav_state = self.navigator.update(lat, lon, twd, heading, stw)
+        nav_state = self.navigator.update(lat, lon, twd, heading, stw, tws)
         
         # Determine control input
         if nav_state.is_motoring:
@@ -318,6 +326,15 @@ class PassageSimulator:
         
         # Record metrics (subsample to reduce data)
         if int(self.elapsed_time * self.config.sample_rate) > int((self.elapsed_time - dt) * self.config.sample_rate):
+            # Waypoint target position: the end of the current leg.
+            # from_waypoint is the current leg (from → to), so to_lat/to_lon
+            # is the turn point we're steering toward.
+            wp_lat = 0.0
+            wp_lon = 0.0
+            if nav_state.from_waypoint is not None:
+                wp_lat = nav_state.from_waypoint.to_lat
+                wp_lon = nav_state.from_waypoint.to_lon
+
             self.metrics.record(
                 elapsed_time=self.elapsed_time,
                 lat=lat, lon=lon,
@@ -332,6 +349,8 @@ class PassageSimulator:
                 rudder_angle=self.yacht.state.rudder_angle,
                 steering_mode=nav_state.steering_mode.value,
                 leg_index=nav_state.current_leg_index,
+                waypoint_lat=wp_lat,
+                waypoint_lon=wp_lon,
             )
             
         # Advance time
@@ -352,27 +371,33 @@ class PassageSimulator:
         while twa < -180:
             twa += 360
             
-        if self.helm_controller:
+        if self.pilot:
+            # Use pilot controller (PD, PID, etc.) via feature vector
+            features = self._compute_features(nav_state, twd)
+            rudder_norm = self.pilot.steer(features)
+            return float(np.clip(rudder_norm, -1.0, 1.0)) * 25.0
+
+        elif self.helm_controller:
             # Use simple PD controller for route following
             # Target heading computed by navigator
             target_heading = nav_state.bearing_to_waypoint
-            
+
             # Heading error
             error = target_heading - heading
             while error > 180:
                 error -= 360
             while error < -180:
                 error += 360
-                
+
             # PD control
             kp = 0.5   # Proportional gain
             kd = 0.3   # Derivative gain
-            
+
             command = kp * error - kd * heading_rate
-            
+
             # Limit rudder angle
             return max(-25, min(25, command))
-            
+
         elif self.autopilot:
             # Use ML autopilot model
             features = self._compute_features(nav_state, twd)
@@ -389,15 +414,22 @@ class PassageSimulator:
             # Stack into sequence
             sequence = np.array(self._feature_history)
             
-            # Get model prediction with timing
+            # Get model correction with timing
             t_start = time.perf_counter()
-            rudder_normalized = self.autopilot.predict(sequence)
+            correction = self.autopilot.predict(sequence)
             t_elapsed = time.perf_counter() - t_start
             self._inference_times.append(t_elapsed)
-            
-            # Convert from [-1, 1] to degrees (max 25°)
-            # Yacht dynamics already rate-limits the physical rudder at 4 deg/s
-            return rudder_normalized * 25.0
+
+            # Blended PD + ML controller (must match train_imitation.py)
+            # Model outputs a residual correction, not an absolute rudder command.
+            # PD suggestion (feature 19) provides the base signal; the model
+            # correction fades in only when heading error is small.
+            BLEND_FADE_DEG = 5.0
+            heading_error_deg = abs(features[0]) * 90.0
+            alpha = max(0.0, 1.0 - heading_error_deg / BLEND_FADE_DEG)
+            rudder_norm = float(np.clip(
+                features[19] + alpha * correction, -1.0, 1.0))
+            return rudder_norm * 25.0
             
         else:
             # Fallback - simple proportional control
@@ -517,13 +549,18 @@ class PassageSimulator:
                    
     def save_results(self, output_dir: str):
         """Save simulation results to files."""
+        if self.pilot:
+            controller_name = f"pilot:{self.pilot.name}"
+        elif self.config.use_baseline:
+            controller_name = "baseline"
+        elif self.config.use_mock:
+            controller_name = "mock"
+        else:
+            controller_name = self.config.model_path or "unknown"
         extra = {
             'route_file': self.route_parser.filepath.name
                 if hasattr(self.route_parser, 'filepath') else None,
-            'controller': (
-                'baseline' if self.config.use_baseline
-                else 'mock' if self.config.use_mock
-                else self.config.model_path or 'unknown'
-            ),
+            'controller': controller_name,
+            'start_time': self.metrics.planned_start_time.isoformat(),
         }
         self.metrics.save_results(output_dir, extra_summary=extra)

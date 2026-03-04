@@ -469,15 +469,162 @@ class RouteParser:
         return (min(lats), max(lats), min(lons), max(lons))
 
 
-def parse_route(filepath: str) -> List[Waypoint]:
+def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compute initial bearing from (lat1, lon1) to (lat2, lon2) in degrees [0, 360)."""
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    dlon_rad = math.radians(lon2 - lon1)
+
+    x = math.sin(dlon_rad) * math.cos(lat2_rad)
+    y = (math.cos(lat1_rad) * math.sin(lat2_rad) -
+         math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dlon_rad))
+
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def _distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compute great-circle distance in nautical miles."""
+    EARTH_RADIUS_NM = 3440.065
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    dlat_rad = math.radians(lat2 - lat1)
+    dlon_rad = math.radians(lon2 - lon1)
+
+    a = (math.sin(dlat_rad / 2) ** 2 +
+         math.cos(lat1_rad) * math.cos(lat2_rad) *
+         math.sin(dlon_rad / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return EARTH_RADIUS_NM * c
+
+
+def _bearing_diff(a: float, b: float) -> float:
+    """Absolute angular difference between two bearings in degrees."""
+    d = abs(a - b) % 360
+    return d if d <= 180 else 360 - d
+
+
+def consolidate_legs(waypoints: List[Waypoint], threshold_deg: float = 10.0) -> List[Waypoint]:
+    """
+    Merge consecutive waypoints with similar bearings into single longer legs.
+
+    Two checks prevent over-merging:
+    1. Consecutive leg-to-leg bearing change must be within threshold (catches zigzags)
+    2. Overall bearing from group start to candidate endpoint must stay within
+       threshold of the initial group bearing (catches gradual curves)
+
+    Merging never crosses a motoring/sailing boundary.
+
+    Args:
+        waypoints: List of Waypoint objects from route parser
+        threshold_deg: Maximum bearing change to allow merging
+
+    Returns:
+        Consolidated list of Waypoint objects
+    """
+    if len(waypoints) <= 1:
+        return list(waypoints)
+
+    result: List[Waypoint] = []
+
+    group_start = 0
+    group_end = 0  # inclusive
+    # Fixed reference: bearing of the first leg in the current group
+    initial_bearing = _bearing(
+        waypoints[0].from_lat, waypoints[0].from_lon,
+        waypoints[0].to_lat, waypoints[0].to_lon,
+    )
+
+    for i in range(1, len(waypoints)):
+        wp = waypoints[i]
+        first = waypoints[group_start]
+        prev = waypoints[group_end]
+
+        # Never merge across motoring/sailing boundary
+        if wp.is_motoring != first.is_motoring:
+            result.append(_merge_group(waypoints, group_start, group_end))
+            group_start = i
+            group_end = i
+            initial_bearing = _bearing(wp.from_lat, wp.from_lon, wp.to_lat, wp.to_lon)
+            continue
+
+        # Check 1: Consecutive leg bearing change (catches zigzag patterns)
+        leg_bearing = _bearing(wp.from_lat, wp.from_lon, wp.to_lat, wp.to_lon)
+        prev_bearing = _bearing(prev.from_lat, prev.from_lon, prev.to_lat, prev.to_lon)
+        if _bearing_diff(prev_bearing, leg_bearing) > threshold_deg:
+            result.append(_merge_group(waypoints, group_start, group_end))
+            group_start = i
+            group_end = i
+            initial_bearing = leg_bearing
+            continue
+
+        # Check 2: Overall bearing drift from initial group bearing
+        candidate_bearing = _bearing(
+            first.from_lat, first.from_lon,
+            wp.to_lat, wp.to_lon,
+        )
+        if _bearing_diff(initial_bearing, candidate_bearing) > threshold_deg:
+            result.append(_merge_group(waypoints, group_start, group_end))
+            group_start = i
+            group_end = i
+            initial_bearing = leg_bearing
+            continue
+
+        # Extend group
+        group_end = i
+
+    # Emit final group
+    result.append(_merge_group(waypoints, group_start, group_end))
+
+    logger.info(f"Consolidated {len(waypoints)} legs -> {len(result)} legs (threshold={threshold_deg}°)")
+    return result
+
+
+def _merge_group(waypoints: List[Waypoint], start: int, end: int) -> Waypoint:
+    """Merge waypoints[start..end] into a single waypoint."""
+    first = waypoints[start]
+    last = waypoints[end]
+
+    if start == end:
+        return first
+
+    from_lat = first.from_lat
+    from_lon = first.from_lon
+    to_lat = last.to_lat
+    to_lon = last.to_lon
+
+    return Waypoint(
+        timestamp=first.timestamp,
+        from_lat=from_lat,
+        from_lon=from_lon,
+        to_lat=to_lat,
+        to_lon=to_lon,
+        cog=_bearing(from_lat, from_lon, to_lat, to_lon),
+        sog=first.sog,
+        distance=_distance(from_lat, from_lon, to_lat, to_lon),
+        tws=first.tws,
+        twd=first.twd,
+        surface_wind_angle=first.surface_wind_angle,
+        distance_to_finish=last.distance_to_finish,
+        is_motoring=first.is_motoring,
+        current_speed=first.current_speed,
+        current_direction=first.current_direction,
+    )
+
+
+def parse_route(filepath: str, consolidate: bool = True) -> List[Waypoint]:
     """
     Convenience function to parse a route file.
-    
+
     Args:
         filepath: Path to route file (.csv or .kml)
-        
+        consolidate: If True, merge collinear legs (default True)
+
     Returns:
         List of Waypoint objects
     """
     parser = RouteParser(filepath)
-    return parser.parse()
+    waypoints = parser.parse()
+    if consolidate and waypoints:
+        waypoints = consolidate_legs(waypoints)
+    return waypoints

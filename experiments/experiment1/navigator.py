@@ -122,53 +122,55 @@ class Navigator:
         logger.debug(f"Started leg {leg_index}: {self.state.from_waypoint.cog}° -> "
                     f"{self.state.to_waypoint.to_lat:.4f}, {self.state.to_waypoint.to_lon:.4f}")
         
-    def update(self, lat: float, lon: float, twd: float, 
-               heading: float, stw: float) -> NavigationState:
+    def update(self, lat: float, lon: float, twd: float,
+               heading: float, stw: float,
+               tws: float = 15.0) -> NavigationState:
         """
         Update navigation state based on current position and conditions.
-        
+
         Args:
             lat: Current latitude
             lon: Current longitude
             twd: True wind direction (degrees)
             heading: Current heading (degrees)
             stw: Speed through water (knots)
-            
+            tws: True wind speed (knots)
+
         Returns:
             Updated NavigationState
         """
         if self.state.arrived_at_destination:
             return self.state
-            
+
         # Compute bearing and distance to waypoint
         self._update_bearing_distance(lat, lon)
-        
+
         # Check if we've arrived at the waypoint
         if self.state.distance_to_waypoint < self.ARRIVAL_THRESHOLD_NM:
             self._advance_to_next_leg()
             if not self.state.arrived_at_destination:
                 self._update_bearing_distance(lat, lon)
-                
+
         # Compute cross-track error
         self._update_cross_track_error(lat, lon)
-        
+
         # Determine steering mode and target
         if self.state.is_motoring:
             self._set_motoring_mode()
         else:
-            self._determine_steering_mode(twd, heading)
-            
+            self._determine_steering_mode(twd, heading, tws, stw)
+
         return self.state
         
     def _update_bearing_distance(self, lat: float, lon: float):
         """Update bearing and distance to next waypoint."""
-        if self.state.to_waypoint is None:
+        if self.state.from_waypoint is None:
             return
-            
-        # Target is the 'to' position of current waypoint
-        target_lat = self.state.to_waypoint.to_lat
-        target_lon = self.state.to_waypoint.to_lon
-        
+
+        # Target is the end of the current leg (from_waypoint: A→B, target = B)
+        target_lat = self.state.from_waypoint.to_lat
+        target_lon = self.state.from_waypoint.to_lon
+
         self.state.bearing_to_waypoint = self._compute_bearing(
             lat, lon, target_lat, target_lon
         )
@@ -179,17 +181,17 @@ class Navigator:
     def _update_cross_track_error(self, lat: float, lon: float):
         """
         Compute cross-track error from the planned track line.
-        
+
         Positive XTE means boat is to the right of track.
         """
-        if self.state.from_waypoint is None or self.state.to_waypoint is None:
+        if self.state.from_waypoint is None:
             return
-            
-        # Track line: from -> to
+
+        # Track line: start → end of current leg
         from_lat = self.state.from_waypoint.from_lat
         from_lon = self.state.from_waypoint.from_lon
-        to_lat = self.state.to_waypoint.to_lat
-        to_lon = self.state.to_waypoint.to_lon
+        to_lat = self.state.from_waypoint.to_lat
+        to_lon = self.state.from_waypoint.to_lon
         
         # Use cross-track distance formula
         self.state.cross_track_error = self._compute_cross_track(
@@ -208,50 +210,44 @@ class Navigator:
             self._start_leg(next_leg)
             logger.debug(f"Advanced to leg {next_leg}")
             
-    def _determine_steering_mode(self, twd: float, heading: float):
+    def _determine_steering_mode(self, twd: float, heading: float,
+                                 tws: float, stw: float):
         """
         Determine the appropriate steering mode based on wind angle.
-        
-        Conventional logic:
-        - AWA mode for upwind/reaching (30-120 degrees)
-        - TWA mode for running/broad reaching (>120 degrees)
+
+        Logic:
+        - If we can lay the course (target TWA >= AWA_MODE_MIN): COMPASS
+          mode, steer bearing_to_waypoint directly.
+        - If too close to wind (target TWA < AWA_MODE_MIN): AWA mode at
+          minimum close-hauled angle, maintaining current tack.
         """
-        # Compute true wind angle
+        # Current true wind angle (for tack detection)
         twa = self._compute_twa(twd, heading)
-        abs_twa = abs(twa)
-        
+
         # Target bearing (what we want to sail)
         target_cog = self.state.bearing_to_waypoint
-        
+
         # Compute what wind angle we would have on the target course
         target_twa = self._compute_twa(twd, target_cog)
         abs_target_twa = abs(target_twa)
-        
+
         if abs_target_twa < self.AWA_MODE_MIN:
-            # Too close to wind - need to tack
-            # For now, use AWA mode at the minimum angle
+            # Too close to wind — sail close-hauled on current tack
             self.state.steering_mode = SteeringMode.WIND_AWA
-            # Maintain the current tack (sign of TWA)
-            if twa >= 0:
-                self.state.target_awa = self._twa_to_awa(self.AWA_MODE_MIN, twd, heading)
-            else:
-                self.state.target_awa = self._twa_to_awa(-self.AWA_MODE_MIN, twd, heading)
-            self.state.target_twa = self.AWA_MODE_MIN if twa >= 0 else -self.AWA_MODE_MIN
-                
-        elif abs_target_twa <= self.AWA_MODE_MAX:
-            # Upwind or reaching - use AWA mode
-            self.state.steering_mode = SteeringMode.WIND_AWA
-            # Target AWA that gives us the right heading
-            self.state.target_awa = self._heading_to_target_awa(target_cog, twd)
-            self.state.target_twa = target_twa
-            
+            sign = 1.0 if twa >= 0 else -1.0
+            close_hauled_twa = sign * self.AWA_MODE_MIN
+            self.state.target_awa = self._twa_to_awa(
+                close_hauled_twa, tws, stw)
+            self.state.target_twa = close_hauled_twa
+            # Compute resulting heading for feature vector
+            self.state.target_heading = (twd - close_hauled_twa) % 360
         else:
-            # Running - use TWA mode
-            self.state.steering_mode = SteeringMode.WIND_TWA
+            # Can lay the course — steer compass toward waypoint
+            self.state.steering_mode = SteeringMode.COMPASS
+            self.state.target_heading = target_cog
             self.state.target_twa = target_twa
-            self.state.target_awa = self._twa_to_awa(target_twa, twd, heading)
-            
-        self.state.target_heading = target_cog
+            self.state.target_awa = self._twa_to_awa(
+                target_twa, tws, stw)
         
     def _set_motoring_mode(self):
         """Set up motoring mode."""
@@ -267,21 +263,24 @@ class Navigator:
             twa += 360
         return twa
         
-    def _twa_to_awa(self, twa: float, twd: float, heading: float) -> float:
+    @staticmethod
+    def _twa_to_awa(twa: float, tws: float, stw: float) -> float:
+        """Convert TWA to AWA using the wind triangle.
+
+        Args:
+            twa: True wind angle (degrees, signed)
+            tws: True wind speed (knots)
+            stw: Speed through water (knots)
+
+        Returns:
+            Apparent wind angle (degrees, same sign convention as twa)
         """
-        Convert TWA to approximate AWA.
-        
-        This is a simplification - actual AWA depends on boat speed.
-        """
-        # For rough estimation, AWA ≈ TWA * 0.8-0.9 depending on conditions
-        # More accurate would use the wind triangle
-        return twa * 0.85
-        
-    def _heading_to_target_awa(self, target_heading: float, twd: float) -> float:
-        """Compute the AWA needed to achieve a target heading."""
-        target_twa = self._compute_twa(twd, target_heading)
-        # Approximate AWA from TWA
-        return target_twa * 0.85
+        twa_rad = math.radians(twa)
+        awa_rad = math.atan2(
+            tws * math.sin(twa_rad),
+            tws * math.cos(twa_rad) + stw,
+        )
+        return math.degrees(awa_rad)
         
     def _compute_bearing(self, lat1: float, lon1: float, 
                         lat2: float, lon2: float) -> float:

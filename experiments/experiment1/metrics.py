@@ -40,6 +40,8 @@ class TimeSeriesPoint:
     rudder_angle: float
     steering_mode: str
     leg_index: int
+    waypoint_lat: float = 0.0      # Target waypoint latitude
+    waypoint_lon: float = 0.0      # Target waypoint longitude
 
 
 @dataclass
@@ -129,8 +131,8 @@ class MetricsTracker:
         # Leg tracking
         self.leg_metrics: List[LegMetrics] = []
         self._current_leg_index = 0
-        self._leg_start_time: Optional[float] = None
-        self._leg_start_actual: Optional[datetime] = None
+        self._leg_start_time: float = 0.0
+        self._leg_start_actual: Optional[datetime] = planned_start_time
         self._leg_points: List[TimeSeriesPoint] = []
         
         # Steering mode time tracking
@@ -147,7 +149,7 @@ class MetricsTracker:
         self._last_lat: Optional[float] = None
         self._last_lon: Optional[float] = None
         
-    def record(self, 
+    def record(self,
                elapsed_time: float,
                lat: float, lon: float,
                heading: float, target_heading: float,
@@ -158,10 +160,12 @@ class MetricsTracker:
                polar_performance: float,
                rudder_angle: float,
                steering_mode: str,
-               leg_index: int):
+               leg_index: int,
+               waypoint_lat: float = 0.0,
+               waypoint_lon: float = 0.0):
         """
         Record a single measurement point.
-        
+
         Args:
             elapsed_time: Elapsed time in seconds
             lat, lon: Current position
@@ -178,6 +182,8 @@ class MetricsTracker:
             rudder_angle: Current rudder angle (degrees)
             steering_mode: Current steering mode
             leg_index: Current leg index
+            waypoint_lat: Target waypoint latitude
+            waypoint_lon: Target waypoint longitude
         """
         # Compute derived values
         twa = self._compute_twa(twd, heading)
@@ -202,6 +208,8 @@ class MetricsTracker:
             rudder_angle=rudder_angle,
             steering_mode=steering_mode,
             leg_index=leg_index,
+            waypoint_lat=waypoint_lat,
+            waypoint_lon=waypoint_lon,
         )
         
         self.time_series.append(point)
@@ -369,7 +377,7 @@ class MetricsTracker:
                 'timestamp', 'latitude', 'longitude', 'heading', 'target_heading',
                 'heading_error', 'stw', 'sog', 'tws', 'twd', 'twa', 'awa', 'aws',
                 'cross_track_error', 'polar_performance', 'rudder_angle',
-                'steering_mode', 'leg_index'
+                'steering_mode', 'leg_index', 'waypoint_lat', 'waypoint_lon'
             ])
             
             # Data - subsample for large datasets
@@ -395,6 +403,8 @@ class MetricsTracker:
                     f"{p.rudder_angle:.1f}",
                     p.steering_mode,
                     p.leg_index,
+                    f"{p.waypoint_lat:.6f}",
+                    f"{p.waypoint_lon:.6f}",
                 ])
                 
     def _save_report(self, filepath: Path, summary: SummaryMetrics):

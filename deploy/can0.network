@@ -1,0 +1,10 @@
+# systemd-networkd config for CAN interface.
+# Installed to /etc/systemd/network/can0.network
+# This is a fallback if the udev rule doesn't fire (e.g. adapter present at boot).
+
+[Match]
+Name=can0
+Type=can
+
+[CAN]
+BitRate=250000

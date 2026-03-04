@@ -13,6 +13,7 @@ let windData = null;
 let waveData = null;
 let metadata = null;
 let currentTimeIndex = 0;
+let selectedGribFile = '';
 
 // Route and result state
 let routeData = null;
@@ -20,7 +21,7 @@ let routeLayer = null;
 let routeMarkers = [];
 let routeBoatMarker = null;
 let resultData = {};  // name -> data
-let resultLayers = {};  // name -> polyline
+let resultLayers = {};  // name -> layer group (polylines + waypoint markers)
 let resultBoatMarkers = {};  // name -> marker
 let passageStartTime = null;
 let passageDuration = 0;
@@ -86,24 +87,34 @@ const WAVE_COLOR_STOPS = [
 function initMap() {
     // Create map centered on English Channel (default)
     map = L.map('map').setView([50.0, -1.5], 7);
-    
+
     // OpenStreetMap base layer
     const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     });
-    
+
     // OpenSeaMap overlay
     const seamapLayer = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="http://www.openseamap.org">OpenSeaMap</a> contributors'
     });
-    
+
     // Add layers
     osmLayer.addTo(map);
     seamapLayer.addTo(map);
-    
+
+    // Create custom panes for weather canvases so they don't compete
+    // with Leaflet's SVG renderer in the overlay pane (z-index 400).
+    // Wave below wind, both below overlay (polylines/markers).
+    const wavePane = map.createPane('wavePane');
+    wavePane.style.zIndex = 250;
+    wavePane.style.pointerEvents = 'none';
+    const windPane = map.createPane('windPane');
+    windPane.style.zIndex = 260;
+    windPane.style.pointerEvents = 'none';
+
     // Create canvas layers for wind and waves
     createCanvasLayers();
-    
+
     // Redraw on map events
     map.on('moveend', redraw);
     map.on('zoomend', redraw);
@@ -113,17 +124,18 @@ function initMap() {
  * Create canvas overlay layers for wind and waves
  */
 function createCanvasLayers() {
-    // Wave canvas (below wind arrows)
+    // Wave canvas — lives in its own pane (wavePane, z-index 250)
     const WaveCanvasLayer = L.Layer.extend({
+        options: { pane: 'wavePane' },
         onAdd: function(map) {
             this._map = map;
-            const pane = map.getPane('overlayPane');
+            const pane = this.getPane();
             this._canvas = L.DomUtil.create('canvas', 'wave-canvas');
             pane.appendChild(this._canvas);
             waveCanvas = this._canvas;
             this._updatePosition();
         },
-        onRemove: function(map) {
+        onRemove: function() {
             L.DomUtil.remove(this._canvas);
         },
         _updatePosition: function() {
@@ -134,18 +146,19 @@ function createCanvasLayers() {
             L.DomUtil.setPosition(this._canvas, topLeft);
         }
     });
-    
-    // Wind canvas (above waves)
+
+    // Wind canvas — lives in its own pane (windPane, z-index 260)
     const WindCanvasLayer = L.Layer.extend({
+        options: { pane: 'windPane' },
         onAdd: function(map) {
             this._map = map;
-            const pane = map.getPane('overlayPane');
+            const pane = this.getPane();
             this._canvas = L.DomUtil.create('canvas', 'wind-canvas');
             pane.appendChild(this._canvas);
             windCanvas = this._canvas;
             this._updatePosition();
         },
-        onRemove: function(map) {
+        onRemove: function() {
             L.DomUtil.remove(this._canvas);
         },
         _updatePosition: function() {
@@ -156,7 +169,7 @@ function createCanvasLayers() {
             L.DomUtil.setPosition(this._canvas, topLeft);
         }
     });
-    
+
     new WaveCanvasLayer().addTo(map);
     new WindCanvasLayer().addTo(map);
 }
@@ -164,6 +177,82 @@ function createCanvasLayers() {
 /**
  * Fetch metadata about available GRIB data
  */
+/**
+ * Populate GRIB file dropdown, filtering to files that overlap the passage time range.
+ * When no passage is loaded, all files are shown.
+ */
+function updateGribFileDropdown() {
+    if (!metadata || !metadata.files) return;
+
+    const fileSelect = document.getElementById('grib-file-select');
+    const prev = selectedGribFile;
+    fileSelect.innerHTML = '<option value="">-- Auto (all files) --</option>';
+
+    // Determine passage time range (if a route is loaded)
+    let passageMin = null;
+    let passageMax = null;
+    if (routeData && routeData.start_time && routeData.end_time) {
+        passageMin = routeData.start_time;
+        passageMax = routeData.end_time;
+    }
+
+    for (const [name, info] of Object.entries(metadata.files).sort()) {
+        // If a passage is active, only include files whose time range overlaps
+        if (passageMin && passageMax && info.time_min && info.time_max) {
+            if (info.time_max < passageMin || info.time_min > passageMax) {
+                continue;
+            }
+        }
+
+        const opt = document.createElement('option');
+        opt.value = name;
+        const types = [];
+        if (info.has_wind) types.push('wind');
+        if (info.has_waves) types.push('wave');
+        opt.textContent = `${name} (${types.join('+')})`;
+        fileSelect.appendChild(opt);
+    }
+
+    // Restore previous selection if it's still in the list, otherwise reset
+    if (prev && fileSelect.querySelector(`option[value="${CSS.escape(prev)}"]`)) {
+        fileSelect.value = prev;
+    } else {
+        fileSelect.value = '';
+        selectedGribFile = '';
+    }
+}
+
+/**
+ * Update metadata.active_times and the time slider based on selected GRIB file.
+ */
+function updateActiveTimesAndSlider() {
+    if (!metadata) return;
+
+    if (selectedGribFile && metadata.files && metadata.files[selectedGribFile]) {
+        metadata.active_times = (metadata.files[selectedGribFile].valid_times || []).slice().sort();
+    } else {
+        metadata.active_times = metadata.all_times || [];
+    }
+
+    const times = metadata.active_times;
+    const slider = document.getElementById('time-slider');
+    if (times.length > 0) {
+        slider.min = 0;
+        slider.max = times.length - 1;
+        // Clamp currentTimeIndex to new range
+        if (currentTimeIndex >= times.length) {
+            currentTimeIndex = times.length - 1;
+        }
+        slider.value = currentTimeIndex;
+        updateTimeDisplay(times[currentTimeIndex]);
+    } else {
+        slider.min = 0;
+        slider.max = 0;
+        slider.value = 0;
+        currentTimeIndex = 0;
+    }
+}
+
 async function fetchMetadata() {
     showLoading(true);
     try {
@@ -172,20 +261,18 @@ async function fetchMetadata() {
             throw new Error(`HTTP ${response.status}`);
         }
         metadata = await response.json();
-        
+
         if (metadata.error) {
             throw new Error(metadata.error);
         }
-        
-        // Set up time slider
-        const times = metadata.wind_times.length > 0 ? metadata.wind_times : metadata.wave_times;
-        if (times.length > 0) {
-            const slider = document.getElementById('time-slider');
-            slider.min = 0;
-            slider.max = times.length - 1;
-            slider.value = 0;
-            updateTimeDisplay(times[0]);
-        }
+
+        // Build a unified time list (union of wind + wave) for the slider
+        const allSet = new Set([...(metadata.wind_times || []), ...(metadata.wave_times || [])]);
+        metadata.all_times = [...allSet].sort();
+
+        // Populate file selector dropdown and set up time slider
+        updateGribFileDropdown();
+        updateActiveTimesAndSlider();
         
         // Fit map to data bounds if available
         if (metadata.bounds) {
@@ -211,31 +298,38 @@ async function fetchMetadata() {
  */
 async function loadData() {
     if (!metadata) return;
-    
-    const times = metadata.wind_times.length > 0 ? metadata.wind_times : metadata.wave_times;
+
+    const times = metadata.active_times || metadata.all_times || [];
     if (times.length === 0) return;
-    
+
     const time = times[currentTimeIndex];
+    const fileParam = selectedGribFile ? `&file=${encodeURIComponent(selectedGribFile)}` : '';
     showLoading(true);
-    
+
     try {
-        // Fetch wind and wave data in parallel
+        // Fetch wind and wave data in parallel (only if data exists for this type)
+        const hasWind = metadata.wind_times && metadata.wind_times.length > 0;
+        const hasWaves = metadata.wave_times && metadata.wave_times.length > 0;
+
         const [windResponse, waveResponse] = await Promise.all([
-            metadata.wind_times.length > 0 ? fetch(`/api/wind?time=${time}`) : null,
-            metadata.wave_times.length > 0 ? fetch(`/api/waves?time=${time}`) : null
-        ].filter(Boolean));
-        
+            hasWind ? fetch(`/api/wind?time=${time}${fileParam}`) : Promise.resolve(null),
+            hasWaves ? fetch(`/api/waves?time=${time}${fileParam}`) : Promise.resolve(null),
+        ]);
+
         if (windResponse) {
             const data = await windResponse.json();
             if (!data.error) {
                 windData = data;
             }
         }
-        
+
         if (waveResponse) {
             const data = await waveResponse.json();
             if (!data.error) {
                 waveData = data;
+            } else {
+                // No wave data for this time — clear so stale overlay is removed
+                waveData = null;
             }
         }
         
@@ -822,11 +916,18 @@ function setupEventListeners() {
     // Time slider
     document.getElementById('time-slider').addEventListener('input', async (e) => {
         currentTimeIndex = parseInt(e.target.value);
-        const times = metadata.wind_times.length > 0 ? metadata.wind_times : metadata.wave_times;
+        const times = metadata.active_times || metadata.all_times || [];
         if (times[currentTimeIndex]) {
             updateTimeDisplay(times[currentTimeIndex]);
             await loadData();
         }
+    });
+
+    // GRIB file selector
+    document.getElementById('grib-file-select').addEventListener('change', async (e) => {
+        selectedGribFile = e.target.value;
+        updateActiveTimesAndSlider();
+        await loadData();
     });
     
     // Show/hide checkboxes
@@ -1000,6 +1101,8 @@ async function loadRoute(name) {
         routeData = data;
         drawRoute();
         updatePassageSlider();
+        updateGribFileDropdown();
+        updateActiveTimesAndSlider();
         
         // Fit map to route bounds
         if (data.bounds) {
@@ -1034,6 +1137,8 @@ function clearRoute() {
         routeBoatMarker = null;
     }
     routeData = null;
+    updateGribFileDropdown();
+    updateActiveTimesAndSlider();
 }
 
 /**
@@ -1116,6 +1221,7 @@ function drawRoute() {
     const initialRouteData = {
         heading: firstWp.cog,
         sog: firstWp.sog,
+        stw: firstWp.sog,
         tws: firstWp.tws,
         twd: firstWp.twd,
         twa: firstWp.twa,
@@ -1149,7 +1255,8 @@ async function loadResult(name) {
         // Draw track
         drawResultTrack(name, data, color);
         updatePassageSlider();
-        
+        updateModeLegendVisibility();
+
     } catch (error) {
         showError(`Failed to load result: ${error.message}`);
     } finally {
@@ -1171,6 +1278,7 @@ function removeResult(name) {
     }
     delete resultData[name];
     updatePassageSlider();
+    updateModeLegendVisibility();
 }
 
 function clearAllResults() {
@@ -1180,23 +1288,122 @@ function clearAllResults() {
 }
 
 /**
- * Draw result track on map
+ * Show the steering mode legend when any result tracks are loaded.
+ */
+function updateModeLegendVisibility() {
+    const legend = document.getElementById('mode-legend');
+    if (legend) {
+        legend.style.display = Object.keys(resultData).length > 0 ? 'block' : 'none';
+    }
+}
+
+// Steering mode colors
+const MODE_COLORS = {
+    'compass': '#3498db',   // Blue
+    'wind_awa': '#e67e22',  // Orange
+    'wind_twa': '#9b59b6',  // Purple
+    'motoring': '#95a5a6',  // Gray
+};
+
+const MODE_LABELS = {
+    'compass': 'Compass',
+    'wind_awa': 'AWA',
+    'wind_twa': 'TWA',
+    'motoring': 'Motoring',
+};
+
+/**
+ * Draw result track on map, colored by steering mode, with waypoint markers.
  */
 function drawResultTrack(name, data, color) {
     if (!data || !data.points) return;
-    
-    // Build polyline coordinates
-    const coords = data.points.map(p => [p.lat, p.lon]);
-    
-    // Create solid polyline for actual track
-    const layer = L.polyline(coords, {
-        color: color,
-        weight: 2,
-        opacity: 0.9,
-    }).addTo(map);
-    
-    resultLayers[name] = layer;
-    
+
+    const group = L.layerGroup().addTo(map);
+
+    // Split points into segments by steering mode
+    let segments = [];
+    let currentSegment = { mode: data.points[0].steering_mode || '', points: [] };
+
+    for (const p of data.points) {
+        const mode = p.steering_mode || '';
+        if (mode !== currentSegment.mode) {
+            // Close previous segment (overlap last point for continuity)
+            if (currentSegment.points.length > 0) {
+                segments.push(currentSegment);
+                currentSegment = { mode: mode, points: [currentSegment.points[currentSegment.points.length - 1]] };
+            }
+        }
+        currentSegment.points.push([p.lat, p.lon]);
+    }
+    if (currentSegment.points.length > 0) {
+        segments.push(currentSegment);
+    }
+
+    // Draw each segment with its mode color
+    for (const seg of segments) {
+        const segColor = MODE_COLORS[seg.mode] || color;
+        L.polyline(seg.points, {
+            color: segColor,
+            weight: 3,
+            opacity: 0.9,
+        }).addTo(group);
+    }
+
+    // Extract waypoint markers from track data (where leg_index changes)
+    const waypointPositions = [];
+    let prevLeg = data.points[0].leg_index;
+    for (let i = 1; i < data.points.length; i++) {
+        const p = data.points[i];
+        if (p.leg_index !== prevLeg) {
+            // Leg transition — the previous point's waypoint_lat/lon is the waypoint reached
+            const prev = data.points[i - 1];
+            if (prev.waypoint_lat && prev.waypoint_lon) {
+                waypointPositions.push({
+                    lat: prev.waypoint_lat,
+                    lon: prev.waypoint_lon,
+                    leg: prevLeg,
+                });
+            }
+            prevLeg = p.leg_index;
+        }
+    }
+    // Also add the final waypoint target
+    const lastPt = data.points[data.points.length - 1];
+    if (lastPt.waypoint_lat && lastPt.waypoint_lon) {
+        waypointPositions.push({
+            lat: lastPt.waypoint_lat,
+            lon: lastPt.waypoint_lon,
+            leg: lastPt.leg_index,
+        });
+    }
+
+    // Deduplicate waypoints by position (within ~100m)
+    const uniqueWaypoints = [];
+    for (const wp of waypointPositions) {
+        const isDup = uniqueWaypoints.some(u =>
+            Math.abs(u.lat - wp.lat) < 0.001 && Math.abs(u.lon - wp.lon) < 0.001
+        );
+        if (!isDup) {
+            uniqueWaypoints.push(wp);
+        }
+    }
+
+    // Draw waypoint markers
+    for (let i = 0; i < uniqueWaypoints.length; i++) {
+        const wp = uniqueWaypoints[i];
+        const isLast = (i === uniqueWaypoints.length - 1);
+        const wpMarker = L.circleMarker([wp.lat, wp.lon], {
+            radius: isLast ? 6 : 4,
+            color: color,
+            fillColor: isLast ? '#2ecc71' : color,
+            fillOpacity: 0.8,
+            weight: 2,
+        }).addTo(group);
+        wpMarker.bindPopup(`<strong>WPT ${wp.leg + 1}</strong><br>${wp.lat.toFixed(4)}°N, ${wp.lon.toFixed(4)}°E`);
+    }
+
+    resultLayers[name] = group;
+
     // Create boat marker with initial data
     const firstPoint = data.points[0];
     const initialData = {
@@ -1209,6 +1416,7 @@ function drawResultTrack(name, data, color) {
         twa: firstPoint.twa,
         awa: firstPoint.awa,
         aws: firstPoint.aws,
+        steering_mode: firstPoint.steering_mode,
     };
     const marker = createBoatMarker(
         [firstPoint.lat, firstPoint.lon],
@@ -1279,8 +1487,16 @@ function calculateApparentWind(tws, twa, stw) {
  */
 function formatBoatTooltip(data, isPlanned) {
     const label = isPlanned ? 'Planned' : 'Actual';
-    let html = `<div class="boat-tooltip-content"><strong>${label}</strong><br>`;
-    
+    let html = `<div class="boat-tooltip-content"><strong>${label}</strong>`;
+
+    // Show steering mode badge
+    if (data.steering_mode) {
+        const modeLabel = MODE_LABELS[data.steering_mode] || data.steering_mode;
+        const modeColor = MODE_COLORS[data.steering_mode] || '#888';
+        html += ` <span style="background:${modeColor};color:#fff;padding:1px 5px;border-radius:3px;font-size:11px;">${modeLabel}</span>`;
+    }
+    html += '<br>';
+
     if (data.heading !== undefined) {
         html += `HDG: ${data.heading.toFixed(0)}°`;
     }
@@ -1391,13 +1607,13 @@ function updatePassageSlider() {
  */
 async function syncGribTimeToPassage(seconds) {
     if (!passageStartTime || !metadata) return;
-    
-    const times = metadata.wind_times.length > 0 ? metadata.wind_times : metadata.wave_times;
+
+    const times = metadata.active_times || metadata.all_times || [];
     if (times.length === 0) return;
-    
+
     // Calculate absolute time from passage
     const targetTime = new Date(passageStartTime.getTime() + seconds * 1000);
-    
+
     // Find closest GRIB time index
     let closestIndex = 0;
     let minDiff = Infinity;
@@ -1490,6 +1706,7 @@ function interpolateRoutePosition(seconds) {
                     cog: wp.cog,
                     heading: wp.cog,
                     sog: wp.sog,
+                    stw: wp.sog,  // Use SOG as STW proxy for planned route
                     tws: wp.tws,
                     twd: wp.twd,
                     twa: wp.twa,
@@ -1504,6 +1721,7 @@ function interpolateRoutePosition(seconds) {
                     cog: wp.cog,
                     heading: wp.cog,
                     sog: wp.sog,
+                    stw: wp.sog,
                     tws: wp.tws,
                     twd: wp.twd,
                     twa: wp.twa,
@@ -1520,6 +1738,7 @@ function interpolateRoutePosition(seconds) {
         cog: firstWp.cog,
         heading: firstWp.cog,
         sog: firstWp.sog,
+        stw: firstWp.sog,
         tws: firstWp.tws,
         twd: firstWp.twd,
         twa: firstWp.twa,
@@ -1551,6 +1770,7 @@ function interpolateTrackPosition(points, seconds) {
             twa: p1.twa,
             awa: p1.awa,
             aws: p1.aws,
+            steering_mode: p1.steering_mode,
         };
     }
     
@@ -1572,9 +1792,10 @@ function interpolateTrackPosition(points, seconds) {
             sog: last.sog, stw: last.stw,
             tws: last.tws, twd: last.twd, twa: last.twa,
             awa: last.awa, aws: last.aws,
+            steering_mode: last.steering_mode,
         };
     }
-    
+
     // Return first point if before start
     const first = points[0];
     return {
@@ -1583,6 +1804,7 @@ function interpolateTrackPosition(points, seconds) {
         sog: first.sog, stw: first.stw,
         tws: first.tws, twd: first.twd, twa: first.twa,
         awa: first.awa, aws: first.aws,
+        steering_mode: first.steering_mode,
     };
 }
 

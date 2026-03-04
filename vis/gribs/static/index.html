@@ -21,11 +21,18 @@
         <h3>GRIB Weather Data</h3>
         
         <div class="control-group">
+            <label for="grib-file-select">GRIB File:</label>
+            <select id="grib-file-select">
+                <option value="">-- Auto (all files) --</option>
+            </select>
+        </div>
+
+        <div class="control-group">
             <label for="time-slider">Forecast Time:</label>
             <input type="range" id="time-slider" min="0" max="0" value="0">
             <div id="time-display">--</div>
         </div>
-        
+
         <div class="control-group">
             <label>
                 <input type="checkbox" id="show-wind" checked>
@@ -169,6 +176,27 @@
         </div>
     </div>
     
+    <!-- Steering mode legend -->
+    <div id="mode-legend" class="legend" style="display:none;">
+        <h4>Steering Mode</h4>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #3498db;"></span>
+            <span>Compass</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #e67e22;"></span>
+            <span>AWA</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #9b59b6;"></span>
+            <span>TWA</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #95a5a6;"></span>
+            <span>Motoring</span>
+        </div>
+    </div>
+
     <!-- Hover tooltip -->
     <div id="tooltip" class="hidden">
         <div class="tooltip-title">Weather Data</div>

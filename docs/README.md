@@ -2,6 +2,34 @@
 
 This folder contains operational documentation for the ML Yacht Autopilot project.
 
+# Standard Pilots
+
+* PD
+* PID
+
+## Evaluting
+
+
+
+PD pilot — passes all 3 CL scenarios (CL score: 3.6°):
+
+  - compass_small: PASS 0.4° (max 0.7°)
+  - compass_large: PASS 9.4° (max 39.9°) — oscillates hard but settles in time
+  - wind_awa_hold: PASS 1.0° (max 4.8°)
+
+PID pilot (ki=0.1) — passes 2/3 (CL score: 7.6°):
+
+  - compass_small: PASS 0.1° — best of any controller so far
+  - compass_large: FAIL 21.8° — integral term causes overshoot in large transients
+  - wind_awa_hold: PASS 1.0°
+
+  CLI Usage
+
+        uv run python -m src.pilots.evaluate --pilot pd
+        uv run python -m src.pilots.evaluate --pilot pid --ki 0.2
+        uv run python -m src.pilots.evaluate --pilot pd --kp 2.0 --kd 1.8 --verbose
+        uv run python -m src.pilots.evaluate --list
+
 # Overall process of training the ML Model for the Autopilot
 
 ## Training Data
@@ -23,6 +51,7 @@ Each cycle of training, where the evaluations gve better results than the previo
 
 | Document | Description |
 |----------|-------------|
+| [Blended PD ML Controller](blended_pd_ml_controller.md) | Current best controller | 
 | [Data Preparation](data_preparation.md) | Complete guide for preprocessing logs and preparing training data |
 | [Simulated Training Data](simulated_training_data.md) | Guide for generating simulated training data |
 | [Hardware Simulators](hardware_simulators.md) | IMU, Actuator, and CAN simulators for testing |
@@ -36,6 +65,7 @@ Each cycle of training, where the evaluations gve better results than the previo
 | [Planned Passage Experiment](planned_passage_experiment.md) | How to run the passage following experiment |
 | [Helm Controller Bug Fix](helm_controller_bug_fix.md) | Critical bug fix in simulation helm controller |
 | [Feature Engineering Sign Convention](feature_engineering_sign_convention.md) | Sign convention alignment for error signals |
+| [CAN Logger](can_logger.md) | Raw CAN frame datalogger with web UI and Pi deployment |
 
 ## Quick Reference
 
