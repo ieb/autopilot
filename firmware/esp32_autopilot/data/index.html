@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pogo Autopilot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; padding: 12px; }
+  h1 { font-size: 1.2em; text-align: center; margin-bottom: 12px; color: #0af; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 600px; margin: 0 auto; }
+  .card { background: #16213e; border-radius: 8px; padding: 10px; }
+  .card.full { grid-column: 1 / -1; }
+  .label { font-size: 0.7em; color: #888; text-transform: uppercase; }
+  .value { font-size: 1.5em; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .unit { font-size: 0.6em; color: #666; }
+  .row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; }
+  .fault { color: #f44; font-weight: bold; }
+  .ok { color: #4f4; }
+  button { background: #0a3d6e; color: #fff; border: none; border-radius: 6px;
+           padding: 8px 16px; font-size: 0.9em; cursor: pointer; margin: 2px; }
+  button:hover { background: #0d5aa7; }
+  button.active { background: #0af; color: #000; }
+  button.standby { background: #633; }
+  button.standby:hover { background: #a44; }
+  input[type=number] { width: 60px; background: #0d1b2a; color: #eee; border: 1px solid #334;
+                       border-radius: 4px; padding: 4px; text-align: center; }
+  .bar-bg { background: #0d1b2a; border-radius: 4px; height: 16px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .rudder-fill { background: #0af; }
+  .polar-fill { background: #4f4; }
+</style>
+</head>
+<body>
+<h1>Pogo 1250 Autopilot</h1>
+<div class="grid">
+
+  <div class="card">
+    <div class="label">Heading</div>
+    <div class="value" id="heading">---</div>
+  </div>
+  <div class="card">
+    <div class="label">Target</div>
+    <div class="value" id="target">---</div>
+  </div>
+
+  <div class="card">
+    <div class="label">AWA / AWS</div>
+    <div class="value"><span id="awa">---</span> <span class="unit">@</span> <span id="aws">---</span><span class="unit">kn</span></div>
+  </div>
+  <div class="card">
+    <div class="label">TWA / TWS</div>
+    <div class="value"><span id="twa">---</span> <span class="unit">@</span> <span id="tws">---</span><span class="unit">kn</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label">STW</div>
+    <div class="value"><span id="stw">---</span><span class="unit">kn</span></div>
+  </div>
+  <div class="card">
+    <div class="label">Polar %</div>
+    <div class="value"><span id="polar_pct">---</span><span class="unit">%</span></div>
+  </div>
+
+  <div class="card full">
+    <div class="label">Rudder</div>
+    <div class="bar-bg" style="margin-top:6px">
+      <div class="bar-fill rudder-fill" id="rudder_bar" style="width:50%;margin-left:50%"></div>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <span>Target: <span id="rudder_target">0.0</span>&deg;</span>
+      <span>Actual: <span id="rudder_actual">0.0</span>&deg;</span>
+    </div>
+  </div>
+
+  <div class="card full">
+    <div class="label">Mode</div>
+    <div style="margin-top:6px">
+      <button class="standby" onclick="setMode(0,0)">Standby</button>
+      <button onclick="setModePrompt(1,'Heading')">Compass</button>
+      <button onclick="setModePrompt(2,'AWA')">AWA</button>
+      <button onclick="setModePrompt(3,'TWA')">TWA</button>
+      <button onclick="setMode(4,0)">VMG Up</button>
+      <button onclick="setMode(5,0)">VMG Down</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span>Active: <b id="mode_name">Standby</b></span>
+      <span id="fault_display" class="ok">OK</span>
+    </div>
+  </div>
+
+  <div class="card full">
+    <div class="label">Pilot Type</div>
+    <div style="margin-top:6px">
+      <button onclick="setPilot(0)">PD</button>
+      <button onclick="setPilot(1)">PID</button>
+      <button onclick="setPilot(2)">Smooth</button>
+      <button onclick="setPilot(3)">Adaptive</button>
+    </div>
+  </div>
+
+  <div class="card full">
+    <div class="label">Gains</div>
+    <div class="row" style="margin-top:6px">
+      <span>Kp <input type="number" id="kp" step="0.1" value="1.0"></span>
+      <span>Ki <input type="number" id="ki" step="0.01" value="0.1"></span>
+      <span>Kd <input type="number" id="kd" step="0.1" value="1.5"></span>
+      <button onclick="setGains()">Set</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const MODES = ['Standby','Compass','AWA','TWA','VMG Up','VMG Down'];
+const FAULTS = ['OK','Overcurrent','Stall','Position Limit','Sensor','Watchdog','IMU','N2K'];
+
+function fmt(v, d) { return v !== undefined && v !== null ? v.toFixed(d) : '---'; }
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    document.getElementById('heading').textContent = fmt(d.heading, 1) + '\u00B0';
+    document.getElementById('target').textContent = fmt(d.target_value, 1) + '\u00B0';
+    document.getElementById('awa').textContent = fmt(d.awa, 0) + '\u00B0';
+    document.getElementById('aws').textContent = fmt(d.aws, 1);
+    document.getElementById('twa').textContent = fmt(d.twa, 0) + '\u00B0';
+    document.getElementById('tws').textContent = fmt(d.tws, 1);
+    document.getElementById('stw').textContent = fmt(d.stw, 1);
+    document.getElementById('polar_pct').textContent = d.polar_pct ? fmt(d.polar_pct, 0) : '---';
+    document.getElementById('rudder_target').textContent = fmt(d.rudder_target * 25, 1);
+    document.getElementById('rudder_actual').textContent = fmt(d.rudder_actual * 25, 1);
+    document.getElementById('mode_name').textContent = MODES[d.pilot_mode] || 'Unknown';
+
+    // Rudder bar
+    const pct = (d.rudder_actual + 1) / 2 * 100;
+    const bar = document.getElementById('rudder_bar');
+    if (d.rudder_actual >= 0) {
+      bar.style.width = (d.rudder_actual * 50) + '%';
+      bar.style.marginLeft = '50%';
+    } else {
+      bar.style.width = (-d.rudder_actual * 50) + '%';
+      bar.style.marginLeft = (50 + d.rudder_actual * 50) + '%';
+    }
+
+    const fd = document.getElementById('fault_display');
+    fd.textContent = FAULTS[d.fault_code] || 'Unknown';
+    fd.className = d.fault_code === 0 ? 'ok' : 'fault';
+  } catch(e) {}
+}
+
+async function setMode(mode, target) {
+  await fetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({mode, target})});
+}
+
+function setModePrompt(mode, label) {
+  const v = prompt('Enter target ' + label + ' (degrees):');
+  if (v !== null) setMode(mode, parseFloat(v));
+}
+
+async function setPilot(type) {
+  await fetch('/api/pilot', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({type})});
+}
+
+async function setGains() {
+  const kp = parseFloat(document.getElementById('kp').value);
+  const ki = parseFloat(document.getElementById('ki').value);
+  const kd = parseFloat(document.getElementById('kd').value);
+  await fetch('/api/gains', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kp, ki, kd})});
+}
+
+// Load current gains on page load
+fetch('/api/gains').then(r=>r.json()).then(d=>{
+  document.getElementById('kp').value = d.kp;
+  document.getElementById('ki').value = d.ki;
+  document.getElementById('kd').value = d.kd;
+}).catch(()=>{});
+
+setInterval(poll, 500);
+poll();
+</script>
+</body>
+</html>
