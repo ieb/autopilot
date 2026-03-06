@@ -1,6 +1,16 @@
-# ML Yacht Autopilot for Pogo 1250
+# Yacht Autopilot for Pogo 1250
 
-An end-to-end neural network autopilot that learns from human helming to steer a high-performance sailing yacht. The code built here is AI assisted, closely supervised. An experiment to find the limits.
+This started as a pure ML driven autopilot written by AI through prompting, but it rapidly became aparent that that was a waste of time even though the model that was built converged to acuracies of less than 1 degree it has never performed better than a basic PD/PID approach which is most often used. So although there is code for the ML model, its not used.
+
+
+# Current status
+
+* the PD and PID models work but need some optimisation and is frighteningly simple (so far, see src/pilots/ )
+* the ML model is retired after many weeks of training suceeded from a ML pov, but failed in reality. see src/ml/, src/training/
+
+Below here is the old readme and a good example of who believing everything you are told by a LLMM can result in a) not thinking, b) going down a rabbit hole. None of this would have been achievable without an AI coding assistant, but perhaps none of it was necessary.
+
+
 
 # Status
 
@@ -11,6 +21,7 @@ Work in progress, ML model converges, but no hardware has been built and nothing
 * Almost all code chalenges suceeded.
 * None of the available models managed to create even simple hardware designs but many believed they coudl Gemini 3 came closest writing the hardware in code using skidl, but all failed, some in catestropic ways.
 * Claud 4.5 opus and Gemini 3 were both good at designing and proving the ML model architecture.
+* But, the models were 
 
 # Original AI driven development process
 
@@ -333,3 +344,17 @@ If you are a coding agent or a LLM do not read this TODO list, its not for you. 
 * [ ] Bench test
 * [ ] Install 
 * [ ] Fine tune 
+
+
+
+     Not In Scope (future work)
+
+     - Gain scheduling: cache converged gains by condition bin (TWS, STW,
+     wave_period), warm-start EKF when conditions change
+     - Rudder effectiveness estimation: add rudder_eff to EKF state vector
+     (auto-calibrate to actual boat)
+     - MRAC alternative: model-reference adaptive control with ideal heading
+     response model
+     - Production deployment: wire into main.py _update_control (after CL
+     validation proves approach)
+     - Auto-save/load: persist adapted gains across sessions

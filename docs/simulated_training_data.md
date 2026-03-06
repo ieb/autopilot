@@ -240,7 +240,7 @@ The controller includes realistic imperfections:
 | Noise | Random steering variation | 0.3° std dev |
 | Anticipation | Leading wind shifts | 10% factor |
 | Fatigue | Increasing noise over time | 1-hour time constant |
-| Rate limiting | Physical rudder limits | 4 deg/s (Jefa LD100) |
+| Rate limiting | Physical rudder limits | 1.7 deg/s (Jefa LD100: ~30s full travel) |
 
 ### Skill Levels
 

@@ -215,7 +215,7 @@ class FeatureEngineering:
         features[self.FEAT_VMG_DOWN] = self._normalize(vmg_down, 20.0)
         
         # 20. PD suggestion: pre-compute damped control signal
-        pd_rudder = 1.6 * heading_error + 1.5 * (-imu.yaw_rate)
+        pd_rudder = 1.0 * heading_error + 1.5 * (-imu.yaw_rate)
         features[self.FEAT_POLAR_TARGET] = np.clip(pd_rudder / 25.0, -1.0, 1.0)
 
         # 21. Polar performance (placeholder)

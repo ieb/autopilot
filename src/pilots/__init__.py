@@ -42,6 +42,10 @@ def list_pilots() -> list[str]:
 # Register built-in pilots on import.
 from .pd_pilot import PDPilot
 from .pid_pilot import PIDPilot
+from .adaptive_pilot import AdaptivePilot
+from .smooth_pilot import SmoothPilot
 
 register(PDPilot)
 register(PIDPilot)
+register(AdaptivePilot)
+register(SmoothPilot)

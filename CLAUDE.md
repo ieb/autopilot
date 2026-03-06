@@ -72,7 +72,7 @@ The `TestNMEA2000Conventions` class in `tests/test_simulation.py` validates thes
   - `data_generator.py` - Scenario runner, binary data writer
   - `yacht_dynamics.py` - Physics model
   - `scenarios.py` - Predefined sailing scenarios
-  - `helm_controller.py` - Expert PD controller (kp=1.6, kd=1.5)
+  - `helm_controller.py` - Expert PD controller (kp=1.0, kd=1.5)
   - `wave_model.py`, `wind_model.py` - Environment models
 
 - **`control/`** - Real-time control (rudder controller, mode manager, safety)

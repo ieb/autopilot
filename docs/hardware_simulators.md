@@ -180,7 +180,7 @@ from src.simulation.hw_simulators.actuator_sim import ActuatorSimulator, Actuato
 config = ActuatorSimulatorConfig(
     socket_path="/tmp/autopilot_actuator.sock",
     update_rate_hz=20.0,
-    max_rudder_rate=4.0,      # degrees/second
+    max_rudder_rate=1.7,      # degrees/second (Jefa LD100: ~30s full travel)
     max_rudder_angle=30.0,    # degrees
     watchdog_timeout=2.0,     # seconds
     clutch_engage_delay=0.1,  # seconds

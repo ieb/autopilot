@@ -28,9 +28,9 @@ class SteeringMode(Enum):
 class HelmConfig:
     """Configuration for helm controller."""
     # PD gains for compass mode
-    # Scaled for rudder_effectiveness=0.5 (boat needs more rudder to turn)
-    # P/D ratio >1 ensures heading_error drives rudder sign in training data
-    compass_kp: float = 1.6          # Proportional gain
+    # Tuned for Jefa LD100 actuator (1.7 deg/s) — kp=1.0 avoids overshoot
+    # on large manoeuvres where the slow actuator can't reverse fast enough
+    compass_kp: float = 1.0          # Proportional gain
     compass_kd: float = 1.5          # Derivative gain
 
     # PD gains for AWA mode (more responsive)
@@ -43,7 +43,7 @@ class HelmConfig:
     
     # Rudder limits
     max_rudder_angle: float = 25.0   # Maximum rudder deflection (degrees)
-    max_rudder_rate: float = 4.0     # Maximum rate (deg/s) - Jefa LD100 spec
+    max_rudder_rate: float = 1.7     # Maximum rate (deg/s) - Jefa LD100: ~30s full travel
     
     # Human-like behavior
     reaction_delay: float = 0.15     # Reaction delay (seconds)

@@ -22,7 +22,7 @@ class PIDPilot(BasePilot):
 
     name = "pid"
 
-    def __init__(self, kp: float = 1.6, ki: float = 0.1, kd: float = 1.5,
+    def __init__(self, kp: float = 1.0, ki: float = 0.1, kd: float = 1.5,
                  max_rudder: float = 1.0, integrator_limit: float = 10.0,
                  dt: float = 0.5):
         self.kp = kp

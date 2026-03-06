@@ -193,7 +193,7 @@ class YachtDynamics:
         
     def _apply_rudder(self, command: float, dt: float):
         """Apply rudder command with rate limiting."""
-        max_rate = 4.0  # deg/s (Jefa LD100 spec)
+        max_rate = 1.7  # deg/s (Jefa LD100: ~30s full travel over 50°)
         
         # Clamp command to limits
         command = max(-self.config.max_rudder_angle,

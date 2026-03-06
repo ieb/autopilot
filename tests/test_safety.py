@@ -30,7 +30,7 @@ class TestSafetyConfig:
         """Default rate limit should be 5 deg/s."""
         config = SafetyConfig()
         
-        assert config.max_rudder_rate == 5.0
+        assert config.max_rudder_rate == 2.0
     
     def test_default_sensor_timeouts(self):
         """Default sensor timeouts should match specification."""
@@ -140,9 +140,9 @@ class TestRateLimiting:
             time_module.sleep(0.02)  # 20ms between calls
         
         # After ~600ms with realistic timing, filtered output should approach target
-        # Rate limit is 5 deg/s = 0.167 normalized/s, so in 0.6s max change ~0.1
+        # Rate limit is 2.0 deg/s = 0.08 normalized/s, so in 0.6s max change ~0.048
         # Plus filter needs time to settle (alpha=0.3)
-        assert output > 0.03  # Should have built up with realistic timing
+        assert output > 0.01  # Should have built up with realistic timing
 
 
 class TestSensorTimeouts:

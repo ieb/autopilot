@@ -64,8 +64,8 @@ class RudderControlConfig:
     max_rudder_angle: float = 25.0  # degrees
     software_limit: float = 24.0    # degrees (inside hardware limit)
     
-    # Rate limits (based on 15s lock-to-lock over 60 degrees)
-    max_rate: float = 4.0           # deg/s
+    # Rate limits (Jefa LD100: ~30s full travel over 50°)
+    max_rate: float = 1.7           # deg/s
     
     # Control gains
     kp: float = 0.8                 # Proportional gain

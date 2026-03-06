@@ -1106,12 +1106,12 @@ def dagger_collect(model, device, data_dir: str, iteration: int) -> str:
 
     # Expert controller — clean PD, no noise/fatigue/delay
     expert = HelmController(HelmConfig(
-        compass_kp=1.6, compass_kd=1.5,
+        compass_kp=1.0, compass_kd=1.5,
         skill_level=1.0,
         noise_std=0.0,
         fatigue_enabled=False,
         reaction_delay=0.0,
-        max_rudder_rate=4.0,
+        max_rudder_rate=1.7,
     ))
 
     # Build diverse scenario list

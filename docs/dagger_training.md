@@ -12,7 +12,7 @@ This approach works well in **open-loop** evaluation (predicting rudder for isol
 
 ### The Problem in Detail
 
-In training, the model sees states visited by the expert. The expert's PD controller (kp=1.6, kd=1.5) steers smoothly, so the training data contains:
+In training, the model sees states visited by the expert. The expert's PD controller (kp=1.0, kd=1.5) steers smoothly, so the training data contains:
 - Mostly steady-state sailing (heading error near zero, small rudder)
 - Occasional large corrections during error recovery scenarios
 - Clean transitions from error to recovery (the expert never overshoots badly)
@@ -136,7 +136,7 @@ This runs the model through ~100 diverse scenarios:
 Each scenario runs for 120 seconds at 2 Hz inference, producing ~24,000 DAgger frames per iteration. These frames are high-value because they cover exactly the states where the model struggles.
 
 The expert controller used for relabelling has:
-- Same PD gains as training (kp=1.6, kd=1.5)
+- Same PD gains as training (kp=1.0, kd=1.5)
 - Perfect execution: skill_level=1.0, no noise, no fatigue, no reaction delay
 - Physical rate limiting preserved (4 deg/s, matching real actuator)
 

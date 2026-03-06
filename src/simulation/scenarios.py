@@ -570,9 +570,9 @@ def _error_recovery() -> Scenario:
         skill_level=1.0,
         noise_std=0.15,
         reaction_delay=0.1,
-        max_rudder_rate=4.0,  # Standard rate limiting
+        max_rudder_rate=1.7,  # Jefa LD100: ~30s full travel
     )
-    
+
     # Randomly choose a steering mode
     mode = random.choice([
         SteeringMode.COMPASS,
@@ -636,7 +636,7 @@ def _error_recovery_wind_awa() -> Scenario:
         skill_level=1.0,
         noise_std=0.15,
         reaction_delay=0.1,
-        max_rudder_rate=4.0,
+        max_rudder_rate=1.7,
     )
 
     # Always wind_awa mode with various target angles

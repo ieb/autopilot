@@ -129,10 +129,10 @@ def compute_features(heading: float, pitch: float, roll: float,
     features[17] = np.clip(vmg_up / 15.0, -1.0, 1.0)
     features[18] = np.clip(vmg_down / 20.0, -1.0, 1.0)
     # PD suggestion: pre-compute damped control signal from heading error and
-    # heading rate using default compass PD gains (kp=1.6, kd=1.5).
+    # heading rate using default compass PD gains (kp=1.0, kd=1.5).
     # This bakes in the correct error+rate combination so the model doesn't
     # have to learn the phase relationship from scratch.
-    pd_rudder = 1.6 * error + 1.5 * (-yaw_rate)
+    pd_rudder = 1.0 * error + 1.5 * (-yaw_rate)
     features[19] = np.clip(pd_rudder / 25.0, -1.0, 1.0)
     features[20] = 0.0   # polar_performance placeholder (zero, not informative)
     features[21] = np.clip(wave_period / 15.0, 0.0, 1.0)  # seconds, 0-15s range

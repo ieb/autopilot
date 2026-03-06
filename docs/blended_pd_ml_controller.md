@@ -8,7 +8,7 @@ The autopilot uses a blended control strategy where a classical PD controller ha
 graph LR
     S[Sensors] --> F[Feature<br/>Computation]
     F --> |22 features| ML[LSTM Model]
-    F --> |heading_error<br/>heading_rate| PD[PD Controller<br/>kp=1.6 kd=1.5]
+    F --> |heading_error<br/>heading_rate| PD[PD Controller<br/>kp=1.0 kd=1.5]
     F --> |heading_error| B{Blend<br/>alpha}
     ML --> |correction| B
     PD --> |pd_suggestion| B
@@ -93,7 +93,7 @@ flowchart TD
     BLEND -->|gust or wave<br/>pushes heading off| E
 ```
 
-1. **Large transients (alpha=0)**: PD handles course changes, tacks, and recovery from disturbances. The PD controller's damped response (kp=1.6, kd=1.5) prevents overshoot and oscillation. This is proven to work — the PD controller passes all CL tests when given enough time to settle.
+1. **Large transients (alpha=0)**: PD handles course changes, tacks, and recovery from disturbances. The PD controller's damped response (kp=1.0, kd=1.5) prevents overshoot and oscillation. This is proven to work — the PD controller passes all CL tests when given enough time to settle.
 
 2. **Steady state (alpha=1)**: The model adds small corrections that account for conditions the PD cannot model: wind shifts, gusts, wave-induced yaw, sail trim effects, and current. These corrections are trained as residuals (expert_rudder - pd_suggestion), so the model only needs to learn what the PD gets wrong.
 

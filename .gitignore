@@ -10,3 +10,5 @@ results
 model
 mlruns/
 mlflow.db
+settings.local.json
+.mcp.json

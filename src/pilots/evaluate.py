@@ -161,6 +161,7 @@ def run_cl_scenario(
             diagnostics.append((
                 t, features[0], features[1], features[19],
                 rudder_norm, yacht.state.awa, yacht.state.heading, rudder_deg,
+                yacht.state.rudder_angle,
             ))
 
         # Track error every physics step for accurate measurement
@@ -188,13 +189,13 @@ def run_cl_scenario(
     if verbose and diagnostics:
         print(f"    CL Diagnostics for {name}:")
         print(f"    {'time':>6s}  {'h_err_f':>7s}  {'pd_sug':>7s}  "
-              f"{'rud_n':>7s}  {'rud_deg':>7s}  {'AWA':>7s}  {'heading':>7s}")
+              f"{'cmd_deg':>7s}  {'act_deg':>7s}  {'AWA':>7s}  {'heading':>7s}")
         snap_times = [0, 5, 10, 20, 30, 60, 90, run_sec - 1]
         for snap_t in snap_times:
             closest = min(diagnostics, key=lambda d: abs(d[0] - snap_t))
-            t, h_err, mode_f, pd_sug, rud_n, awa, hdg, rud_d = closest
+            t, h_err, mode_f, pd_sug, rud_n, awa, hdg, rud_cmd, rud_act = closest
             print(f"    {t:6.1f}  {h_err:+7.3f}  {pd_sug:+7.3f}  "
-                  f"{rud_n:+7.3f}  {rud_d:+7.1f}  {awa:+7.1f}  {hdg:7.1f}")
+                  f"{rud_cmd:+7.1f}  {rud_act:+7.1f}  {awa:+7.1f}  {hdg:7.1f}")
 
     return {
         "name": name,
@@ -310,6 +311,8 @@ def main():
     parser.add_argument("--ki", type=float, default=None)
     parser.add_argument("--integrator-limit", type=float, default=None)
     parser.add_argument("--max-rudder", type=float, default=None)
+    parser.add_argument("--inner", type=str, default="pd",
+                        help="Inner pilot for adaptive wrapper (default: pd)")
 
     args = parser.parse_args()
 
@@ -322,8 +325,40 @@ def main():
     if not args.pilot:
         parser.error("--pilot is required (or use --list)")
 
-    # Build pilot
-    pilot = get_pilot(args.pilot)
+    # Build pilot — wrapper types need an inner pilot.
+    # AdaptivePilot tunes PD/PID gains so it must wrap a PD/PID directly.
+    # SmoothPilot can wrap anything. Valid chains:
+    #   pd, pid, adaptive(pd), smooth(pd), smooth(adaptive(pd))
+    WRAPPER_TYPES = ("adaptive", "smooth")
+
+    def _build_pilot(name, inner_name):
+        if name not in WRAPPER_TYPES:
+            return get_pilot(name)
+
+        if name == "adaptive":
+            if inner_name in WRAPPER_TYPES:
+                parser.error(
+                    f"adaptive cannot wrap '{inner_name}' — it needs "
+                    f"direct access to PD/PID gains. "
+                    f"Try: --pilot smooth --inner adaptive"
+                )
+            inner = get_pilot(inner_name)
+            from .adaptive_pilot import AdaptivePilot
+            return AdaptivePilot(inner=inner)
+
+        # smooth — inner can itself be a wrapper
+        if inner_name == "adaptive":
+            base = get_pilot("pd")
+            from .adaptive_pilot import AdaptivePilot
+            inner = AdaptivePilot(inner=base)
+        elif inner_name in WRAPPER_TYPES:
+            inner = _build_pilot(inner_name, "pd")
+        else:
+            inner = get_pilot(inner_name)
+        from .smooth_pilot import SmoothPilot
+        return SmoothPilot(inner=inner)
+
+    pilot = _build_pilot(args.pilot, args.inner)
 
     # Apply gain overrides
     overrides = {}

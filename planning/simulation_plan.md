@@ -86,7 +86,7 @@ Core simulation logic:
 class SimulationConfig:
     sample_rate_hz: float = 10.0      # Simulation rate
     closed_loop: bool = False          # True = simulate yacht dynamics
-    rudder_rate_limit: float = 4.0     # deg/s (Jefa LD100 spec)
+    rudder_rate_limit: float = 1.7     # deg/s (Jefa LD100: ~30s full travel)
     heading_rate_per_rudder: float = 2.0  # deg/s per deg rudder (yacht response)
 
 @dataclass 

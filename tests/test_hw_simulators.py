@@ -303,7 +303,7 @@ class TestActuatorSimulator:
         config = ActuatorSimulatorConfig()
         assert config.socket_path == "/tmp/autopilot_actuator.sock"
         assert config.update_rate_hz == 20.0
-        assert config.max_rudder_rate == 4.0
+        assert config.max_rudder_rate == 1.7
         assert config.watchdog_timeout == 2.0
         
     def test_simulator_creation(self, shared_state):
@@ -447,7 +447,7 @@ class TestActuatorSimulator:
         """Test rudder movement is rate limited."""
         config = ActuatorSimulatorConfig(
             socket_path=temp_socket_path,
-            max_rudder_rate=4.0,
+            max_rudder_rate=1.7,
             clutch_engage_delay=0.01  # Fast engage for test
         )
         sim = ActuatorSimulator(shared_state, config)

@@ -39,7 +39,7 @@ class ActuatorSimulatorConfig(SimulatorConfig):
     update_rate_hz: float = 20.0  # Status output rate
     
     # Physical parameters
-    max_rudder_rate: float = 4.0       # degrees per second
+    max_rudder_rate: float = 1.7       # degrees per second (Jefa LD100: ~30s full travel)
     max_rudder_angle: float = 30.0     # degrees
     position_limit: float = 28.0       # software limit (degrees)
     

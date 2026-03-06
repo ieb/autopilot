@@ -22,7 +22,7 @@ class PDPilot(BasePilot):
 
     name = "pd"
 
-    def __init__(self, kp: float = 1.6, kd: float = 1.5,
+    def __init__(self, kp: float = 1.0, kd: float = 1.5,
                  max_rudder: float = 1.0):
         self.kp = kp
         self.kd = kd

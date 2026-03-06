@@ -55,7 +55,7 @@ class SafetyConfig:
     rudder_warning_deg: float = 22.0     # Warning when approaching limit
     
     # Rate limits  
-    max_rudder_rate: float = 5.0         # deg/s max change rate
+    max_rudder_rate: float = 2.0         # deg/s max change rate (above 1.7 actuator limit)
     
     # Heading deviation
     max_heading_error: float = 45.0      # Disengage if exceeded
