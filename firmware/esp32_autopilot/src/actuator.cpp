@@ -4,25 +4,42 @@
 #include "config.h"
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_adc_cal.h>
 
-// Calibration data
-static uint16_t adc_center = ADC_RUDDER_CENTER;
-static uint16_t adc_port_limit = ADC_RUDDER_PORT_LIMIT;
-static uint16_t adc_stbd_limit = ADC_RUDDER_STBD_LIMIT;
+// Calibration data (stored as millivolts for linearity)
+static uint32_t mv_center = ADC_RUDDER_CENTER_MV;
+static uint32_t mv_port_limit = ADC_RUDDER_PORT_MV;
+static uint32_t mv_stbd_limit = ADC_RUDDER_STBD_MV;
 
 static float last_angle = 0.0f;
 static uint16_t stall_timer = 0;
 
 static Preferences prefs;
 
-static float adc_to_angle(uint16_t adc) {
+// ESP32 ADC calibration characteristics
+static esp_adc_cal_characteristics_t adc_chars;
+static bool adc_cal_valid = false;
+
+// Read ADC as calibrated millivolts
+static uint32_t read_rudder_mv() {
+    uint32_t raw = analogRead(PIN_ADC_RUDDER);
+    if (adc_cal_valid) {
+        return esp_adc_cal_raw_to_voltage(raw, &adc_chars);
+    }
+    // Fallback: linear approximation (3.3V over 12-bit range)
+    return (raw * 3300) / 4095;
+}
+
+static float mv_to_angle(uint32_t mv) {
     float angle;
-    if (adc < adc_center) {
-        float range = (float)(adc_center - adc_port_limit);
-        angle = -((float)(adc_center - adc) / range);
+    if (mv < mv_center) {
+        float range = (float)(mv_center - mv_port_limit);
+        if (range < 1.0f) return 0.0f;
+        angle = -((float)(mv_center - mv) / range);
     } else {
-        float range = (float)(adc_stbd_limit - adc_center);
-        angle = (float)(adc - adc_center) / range;
+        float range = (float)(mv_stbd_limit - mv_center);
+        if (range < 1.0f) return 0.0f;
+        angle = (float)(mv - mv_center) / range;
     }
     return constrain(angle, -1.0f, 1.0f);
 }
@@ -45,17 +62,22 @@ void actuator_init() {
     digitalWrite(PIN_BRIDGE_EN, LOW);
     digitalWrite(PIN_CLUTCH, LOW);
 
-    // Load calibration from NVS
+    // Initialize ESP32 ADC calibration (uses eFuse factory cal if available)
+    esp_adc_cal_value_t cal_type = esp_adc_cal_characterize(
+        ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
+    adc_cal_valid = (cal_type != ESP_ADC_CAL_VAL_NOT_SUPPORTED);
+
+    // Load calibration from NVS (millivolts)
     prefs.begin(NVS_NAMESPACE, true);  // read-only
-    adc_center = prefs.getUShort("adc_center", ADC_RUDDER_CENTER);
-    adc_port_limit = prefs.getUShort("adc_port", ADC_RUDDER_PORT_LIMIT);
-    adc_stbd_limit = prefs.getUShort("adc_stbd", ADC_RUDDER_STBD_LIMIT);
+    mv_center = prefs.getULong("adc_center_mv", ADC_RUDDER_CENTER_MV);
+    mv_port_limit = prefs.getULong("adc_port_mv", ADC_RUDDER_PORT_MV);
+    mv_stbd_limit = prefs.getULong("adc_stbd_mv", ADC_RUDDER_STBD_MV);
     prefs.end();
 }
 
 void actuator_read_sensors(AppState& state) {
-    uint16_t adc_rudder = analogRead(PIN_ADC_RUDDER);
-    float new_angle = adc_to_angle(adc_rudder);
+    uint32_t mv = read_rudder_mv();
+    float new_angle = mv_to_angle(mv);
 
     float dt = ACTUATOR_INTERVAL_MS / 1000.0f;
     state.rudder_velocity = (new_angle - last_angle) / dt;
@@ -183,25 +205,46 @@ void actuator_update(AppState& state) {
 
 void actuator_save_calibration() {
     prefs.begin(NVS_NAMESPACE, false);
-    prefs.putUShort("adc_center", adc_center);
-    prefs.putUShort("adc_port", adc_port_limit);
-    prefs.putUShort("adc_stbd", adc_stbd_limit);
+    prefs.putULong("adc_center_mv", mv_center);
+    prefs.putULong("adc_port_mv", mv_port_limit);
+    prefs.putULong("adc_stbd_mv", mv_stbd_limit);
     prefs.end();
 }
 
 void actuator_calibrate_center() {
-    adc_center = analogRead(PIN_ADC_RUDDER);
+    mv_center = read_rudder_mv();
     actuator_save_calibration();
 }
 
 void actuator_calibrate_port() {
-    adc_port_limit = analogRead(PIN_ADC_RUDDER);
+    mv_port_limit = read_rudder_mv();
     actuator_save_calibration();
 }
 
 void actuator_calibrate_stbd() {
-    adc_stbd_limit = analogRead(PIN_ADC_RUDDER);
+    mv_stbd_limit = read_rudder_mv();
     actuator_save_calibration();
+}
+
+void actuator_calibration_linearise() {
+    // Make port and starboard ranges symmetric by clamping the wider side.
+    // This ensures ±1.0 maps to equal physical deflection on both sides.
+    uint32_t port_range = mv_center - mv_port_limit;
+    uint32_t stbd_range = mv_stbd_limit - mv_center;
+    uint32_t min_range = (port_range < stbd_range) ? port_range : stbd_range;
+    mv_port_limit = mv_center - min_range;
+    mv_stbd_limit = mv_center + min_range;
+    actuator_save_calibration();
+}
+
+void actuator_get_calibration(uint32_t& center, uint32_t& port, uint32_t& stbd) {
+    center = mv_center;
+    port = mv_port_limit;
+    stbd = mv_stbd_limit;
+}
+
+uint32_t actuator_read_raw_mv() {
+    return read_rudder_mv();
 }
 
 #endif // NATIVE_BUILD

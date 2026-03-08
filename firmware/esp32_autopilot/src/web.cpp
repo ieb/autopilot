@@ -3,6 +3,7 @@
 #include "web.h"
 #include "config.h"
 #include "pilot_manager.h"
+#include "actuator.h"
 #include "polar.h"
 
 #include <WiFi.h>
@@ -147,6 +148,46 @@ void web_init() {
             request->send(200, "application/json", "{\"ok\":true}");
         }
     );
+
+    // POST /api/calibrate/center — set rudder center position
+    server.on("/api/calibrate/center", HTTP_POST, [](AsyncWebServerRequest* request) {
+        actuator_calibrate_center();
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/calibrate/port — set rudder port limit
+    server.on("/api/calibrate/port", HTTP_POST, [](AsyncWebServerRequest* request) {
+        actuator_calibrate_port();
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/calibrate/stbd — set rudder starboard limit
+    server.on("/api/calibrate/stbd", HTTP_POST, [](AsyncWebServerRequest* request) {
+        actuator_calibrate_stbd();
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/calibrate/linearise — equalise port/stbd ranges
+    server.on("/api/calibrate/linearise", HTTP_POST, [](AsyncWebServerRequest* request) {
+        actuator_calibration_linearise();
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // GET /api/calibrate — current calibration values + live ADC reading
+    server.on("/api/calibrate", HTTP_GET, [](AsyncWebServerRequest* request) {
+        uint32_t center, port, stbd;
+        actuator_get_calibration(center, port, stbd);
+
+        JsonDocument doc;
+        doc["center_mv"] = center;
+        doc["port_mv"] = port;
+        doc["stbd_mv"] = stbd;
+        doc["live_mv"] = actuator_read_raw_mv();
+
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
+    });
 
     server.begin();
 }

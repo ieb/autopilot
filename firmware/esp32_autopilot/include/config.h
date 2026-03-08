@@ -70,12 +70,12 @@
 #define LEDC_RESOLUTION          8       // 8-bit (0-255)
 
 // ============================================================================
-// ADC Calibration Defaults
+// ADC Calibration Defaults (millivolts, using esp_adc_cal for linearity)
 // ============================================================================
 
-#define ADC_RUDDER_CENTER        2048    // 12-bit ADC mid-range
-#define ADC_RUDDER_PORT_LIMIT    410     // ADC at -25 deg
-#define ADC_RUDDER_STBD_LIMIT    3686    // ADC at +25 deg
+#define ADC_RUDDER_CENTER_MV     1650    // mV at center (pot mid-range)
+#define ADC_RUDDER_PORT_MV       1000    // mV at full port (-25 deg)
+#define ADC_RUDDER_STBD_MV       2300    // mV at full starboard (+25 deg)
 
 // BTS7960 IS pin current scale
 #define BTS7960_CURRENT_SCALE    0.00806f  // Amps per ADC count (12-bit, 3.3V)

@@ -108,6 +108,22 @@
       <button onclick="setGains()">Set</button>
     </div>
   </div>
+
+  <div class="card full">
+    <div class="label">Rudder Calibration</div>
+    <div class="row" style="margin-top:6px">
+      <span>Live: <b id="cal_live">---</b> mV</span>
+      <span>Center: <span id="cal_center">---</span> mV</span>
+      <span>Port: <span id="cal_port">---</span> mV</span>
+      <span>Stbd: <span id="cal_stbd">---</span> mV</span>
+    </div>
+    <div style="margin-top:6px">
+      <button onclick="calibrate('center')">Set Center</button>
+      <button onclick="calibrate('port')">Set Port</button>
+      <button onclick="calibrate('stbd')">Set Stbd</button>
+      <button onclick="calibrate('linearise')">Linearise</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -172,6 +188,22 @@ async function setGains() {
     body: JSON.stringify({kp, ki, kd})});
 }
 
+async function calibrate(what) {
+  await fetch('/api/calibrate/' + what, {method:'POST'});
+  pollCal();
+}
+
+async function pollCal() {
+  try {
+    const r = await fetch('/api/calibrate');
+    const d = await r.json();
+    document.getElementById('cal_live').textContent = d.live_mv;
+    document.getElementById('cal_center').textContent = d.center_mv;
+    document.getElementById('cal_port').textContent = d.port_mv;
+    document.getElementById('cal_stbd').textContent = d.stbd_mv;
+  } catch(e) {}
+}
+
 // Load current gains on page load
 fetch('/api/gains').then(r=>r.json()).then(d=>{
   document.getElementById('kp').value = d.kp;
@@ -180,7 +212,9 @@ fetch('/api/gains').then(r=>r.json()).then(d=>{
 }).catch(()=>{});
 
 setInterval(poll, 500);
+setInterval(pollCal, 1000);
 poll();
+pollCal();
 </script>
 </body>
 </html>

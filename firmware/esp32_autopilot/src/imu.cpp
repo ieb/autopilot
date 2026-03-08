@@ -4,9 +4,25 @@
 #include "config.h"
 #include <Wire.h>
 #include <Adafruit_BNO055.h>
+#include <math.h>
 
 static Adafruit_BNO055 bno(55, 0x28, &Wire);
 static float prev_roll = 0.0f;
+
+// Wrap angle difference to [-180, 180]
+static float wrap_180(float deg) {
+    deg = fmodf(deg, 360.0f);
+    if (deg > 180.0f) deg -= 360.0f;
+    if (deg < -180.0f) deg += 360.0f;
+    return deg;
+}
+
+// Wrap angle to [0, 360)
+static float wrap_360(float deg) {
+    deg = fmodf(deg, 360.0f);
+    if (deg < 0.0f) deg += 360.0f;
+    return deg;
+}
 
 bool imu_init() {
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -25,9 +41,18 @@ void imu_read(AppState& state) {
     sensors_event_t orient;
     bno.getEvent(&orient, Adafruit_BNO055::VECTOR_EULER);
 
-    state.heading = orient.orientation.x;  // 0-360 clockwise from North
-    state.roll    = orient.orientation.z;   // positive = starboard heel
-    state.pitch   = orient.orientation.y;   // positive = bow up
+    float imu_heading = orient.orientation.x;  // 0-360 clockwise from North
+    state.roll    = orient.orientation.z;       // positive = starboard heel
+    state.pitch   = orient.orientation.y;       // positive = bow up
+
+    // Fuse N2K heading (primary) with IMU delta (interpolation between updates)
+    if (state.n2k_heading_valid) {
+        float imu_delta = wrap_180(imu_heading - state.imu_heading_at_n2k);
+        state.heading = wrap_360(state.n2k_heading + imu_delta);
+    } else {
+        // No N2K heading yet — fall back to raw IMU heading
+        state.heading = imu_heading;
+    }
 
     // Gyro rates (deg/s)
     imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);

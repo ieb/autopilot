@@ -63,6 +63,11 @@ struct AppState {
     uint32_t n2k_cog_ms;
     uint32_t n2k_heading_ms;
 
+    // N2K heading fusion
+    float n2k_heading;           // deg, last heading from PGN 127250
+    float imu_heading_at_n2k;    // deg, IMU heading snapshot at time of N2K update
+    bool n2k_heading_valid;      // true after first N2K heading received
+
     // Actuator (updated at 50Hz)
     float rudder_actual;     // normalized -1..+1
     float rudder_velocity;   // normalized/s

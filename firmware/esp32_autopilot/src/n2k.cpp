@@ -158,7 +158,10 @@ static void parse_heading(const tN2kMsg& msg, AppState& state) {
     tN2kHeadingReference ref;
 
     if (ParseN2kHeading(msg, sid, heading, deviation, variation, ref)) {
-        // BNO055 heading is primary; N2K heading used as timestamp only
+        state.n2k_heading = RadToDeg(heading);
+        // Snapshot IMU heading at this instant so imu_read() can compute delta
+        state.imu_heading_at_n2k = state.heading;
+        state.n2k_heading_valid = true;
         state.n2k_heading_ms = millis();
     }
 }
