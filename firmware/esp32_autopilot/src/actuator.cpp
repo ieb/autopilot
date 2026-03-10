@@ -1,10 +1,17 @@
-#ifndef NATIVE_BUILD
+#if !defined(NATIVE_BUILD) || defined(HAL_SIM)
 
 #include "actuator.h"
 #include "config.h"
+
+#ifdef HAL_SIM
+#include "hal/Arduino.h"
+#include "hal/Preferences.h"
+#include "hal/esp_adc_cal.h"
+#else
 #include <Arduino.h>
 #include <Preferences.h>
 #include <esp_adc_cal.h>
+#endif
 
 // Calibration data (stored as millivolts for linearity)
 static uint32_t mv_center = ADC_RUDDER_CENTER_MV;
@@ -247,4 +254,4 @@ uint32_t actuator_read_raw_mv() {
     return read_rudder_mv();
 }
 
-#endif // NATIVE_BUILD
+#endif // !NATIVE_BUILD || HAL_SIM

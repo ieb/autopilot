@@ -1,0 +1,13 @@
+{
+    "name": "Adafruit_BNO055_local",
+    "version": "1.0.0",
+    "build": {
+        "srcFilter": ["+<Adafruit_BNO055.cpp>"],
+        "flags": [
+            "-Isrc/hal",
+            "-Ilib/Adafruit_BusIO",
+            "-Ilib/Adafruit_Sensor",
+            "-Wno-c++11-narrowing"
+        ]
+    }
+}

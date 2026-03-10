@@ -1,0 +1,10 @@
+{
+    "name": "Adafruit_Sensor_local",
+    "version": "1.0.0",
+    "build": {
+        "srcFilter": ["+<Adafruit_Sensor.cpp>"],
+        "flags": [
+            "-Isrc/hal"
+        ]
+    }
+}

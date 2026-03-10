@@ -163,9 +163,15 @@ void pilot_manager_set_gains(float kp, float ki, float kd) {
 }
 
 void pilot_manager_get_gains(float& kp, float& ki, float& kd) {
-    kp = pd_pilot.kp;
-    ki = pid_pilot.ki;
-    kd = pd_pilot.kd;
+    if (active_type == PILOT_ADAPTIVE) {
+        kp = adaptive_pilot.get_kp();
+        ki = adaptive_pilot.get_ki();
+        kd = adaptive_pilot.get_kd();
+    } else {
+        kp = pd_pilot.kp;
+        ki = pid_pilot.ki;
+        kd = pd_pilot.kd;
+    }
 }
 
 PilotType pilot_manager_get_type() {

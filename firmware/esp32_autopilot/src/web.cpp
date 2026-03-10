@@ -200,6 +200,7 @@ void web_apply_commands(AppState& state) {
         state.pilot_mode = cmd_mode;
         state.target_value = cmd_target;
         state.clutch_requested = (cmd_mode != MODE_STANDBY);
+        state.last_pilot_ms = millis();  // prevent watchdog on engage
         pilot_manager_set_mode(cmd_mode, cmd_target);
     }
 

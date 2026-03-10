@@ -1,12 +1,18 @@
-#ifndef NATIVE_BUILD
+#if !defined(NATIVE_BUILD) || defined(HAL_SIM)
 
 #include "n2k.h"
 #include "config.h"
+#include <math.h>
 
+#ifdef HAL_SIM
+#include "hal/NMEA2000_sim.h"
+// NMEA2000 instance defined in NMEA2000_sim.cpp
+#else
 #include <NMEA2000_esp32.h>
-#include <N2kMessages.h>
-
 static tNMEA2000_esp32 NMEA2000((gpio_num_t)PIN_CAN_TX, (gpio_num_t)PIN_CAN_RX);
+#endif
+
+#include <N2kMessages.h>
 
 // Forward declarations
 static void handle_msg(const tN2kMsg& msg);
@@ -120,7 +126,19 @@ static void parse_wind(const tN2kMsg& msg, AppState& state) {
             if (angle_deg > 180.0f) angle_deg -= 360.0f;
             state.awa = angle_deg;
             state.aws = speed_kts;
+
+            // Compute true wind from apparent wind + STW (wind triangle)
+            // Real N2K buses only carry apparent wind — no True_boat PGN.
+            // V_true = V_apparent - V_boat
+            if (state.stw > 0.1f) {
+                float awa_rad = angle_deg * (M_PI / 180.0f);
+                float wx = speed_kts * cosf(awa_rad) - state.stw;
+                float wy = speed_kts * sinf(awa_rad);
+                state.tws = sqrtf(wx * wx + wy * wy);
+                state.twa = atan2f(wy, wx) * (180.0f / M_PI);
+            }
         } else if (ref == N2kWind_True_boat) {
+            // Accept true wind if a processor is sending it (fallback)
             if (angle_deg > 180.0f) angle_deg -= 360.0f;
             state.twa = angle_deg;
             state.tws = speed_kts;
@@ -166,4 +184,4 @@ static void parse_heading(const tN2kMsg& msg, AppState& state) {
     }
 }
 
-#endif // NATIVE_BUILD
+#endif // !NATIVE_BUILD || HAL_SIM

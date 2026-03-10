@@ -5,7 +5,14 @@
 #include <math.h>
 
 #ifdef NATIVE_BUILD
+// Under SIM_BUILD, millis() is provided by sim_main.cpp / hal_sim_main.cpp
+// with real timing. Under plain NATIVE_BUILD (unit tests), return 0.
+// Use extern "C" linkage to match N2kDef.h's declaration.
+#ifndef SIM_BUILD
 inline uint32_t millis() { return 0; }
+#else
+extern "C" uint32_t millis();
+#endif
 #else
 #include <Arduino.h>
 #endif

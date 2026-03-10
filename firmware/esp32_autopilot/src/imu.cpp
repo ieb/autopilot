@@ -1,4 +1,4 @@
-#ifndef NATIVE_BUILD
+#if !defined(NATIVE_BUILD) || defined(HAL_SIM)
 
 #include "imu.h"
 #include "config.h"
@@ -68,4 +68,4 @@ void imu_read(AppState& state) {
     state.imu_last_ms = millis();
 }
 
-#endif // NATIVE_BUILD
+#endif // !NATIVE_BUILD || HAL_SIM

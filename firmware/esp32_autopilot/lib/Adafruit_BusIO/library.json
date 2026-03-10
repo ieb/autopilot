@@ -1,0 +1,10 @@
+{
+    "name": "Adafruit_BusIO_local",
+    "version": "1.0.0",
+    "build": {
+        "srcFilter": ["+<Adafruit_I2CDevice.cpp>"],
+        "flags": [
+            "-Isrc/hal"
+        ]
+    }
+}

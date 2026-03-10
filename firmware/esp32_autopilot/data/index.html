@@ -76,12 +76,12 @@
   <div class="card full">
     <div class="label">Mode</div>
     <div style="margin-top:6px">
-      <button class="standby" onclick="setMode(0,0)">Standby</button>
-      <button onclick="setModePrompt(1,'Heading')">Compass</button>
-      <button onclick="setModePrompt(2,'AWA')">AWA</button>
-      <button onclick="setModePrompt(3,'TWA')">TWA</button>
-      <button onclick="setMode(4,0)">VMG Up</button>
-      <button onclick="setMode(5,0)">VMG Down</button>
+      <button id="pm0" class="standby" onclick="setMode(0,0)">Standby</button>
+      <button id="pm1" onclick="setModePrompt(1,'Heading')">Compass</button>
+      <button id="pm2" onclick="setModePrompt(2,'AWA')">AWA</button>
+      <button id="pm3" onclick="setModePrompt(3,'TWA')">TWA</button>
+      <button id="pm4" onclick="setMode(4,0)">VMG Up</button>
+      <button id="pm5" onclick="setMode(5,0)">VMG Down</button>
     </div>
     <div class="row" style="margin-top:6px">
       <span>Active: <b id="mode_name">Standby</b></span>
@@ -92,10 +92,10 @@
   <div class="card full">
     <div class="label">Pilot Type</div>
     <div style="margin-top:6px">
-      <button onclick="setPilot(0)">PD</button>
-      <button onclick="setPilot(1)">PID</button>
-      <button onclick="setPilot(2)">Smooth</button>
-      <button onclick="setPilot(3)">Adaptive</button>
+      <button id="pt0" onclick="setPilot(0)">PD</button>
+      <button id="pt1" onclick="setPilot(1)">PID</button>
+      <button id="pt2" onclick="setPilot(2)">Smooth</button>
+      <button id="pt3" onclick="setPilot(3)">Adaptive</button>
     </div>
   </div>
 
@@ -162,6 +162,18 @@ async function poll() {
     const fd = document.getElementById('fault_display');
     fd.textContent = FAULTS[d.fault_code] || 'Unknown';
     fd.className = d.fault_code === 0 ? 'ok' : 'fault';
+
+    // Highlight active pilot type button
+    for (let i = 0; i < 4; i++) {
+      const btn = document.getElementById('pt' + i);
+      if (btn) btn.className = (i === d.pilot_type) ? 'active' : '';
+    }
+
+    // Highlight active mode button
+    for (let i = 0; i < 6; i++) {
+      const btn = document.getElementById('pm' + i);
+      if (btn) btn.className = (i === d.pilot_mode) ? 'active' : (i === 0 ? 'standby' : '');
+    }
   } catch(e) {}
 }
 
@@ -178,6 +190,7 @@ function setModePrompt(mode, label) {
 async function setPilot(type) {
   await fetch('/api/pilot', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({type})});
+  pollGains();
 }
 
 async function setGains() {
@@ -204,17 +217,22 @@ async function pollCal() {
   } catch(e) {}
 }
 
-// Load current gains on page load
-fetch('/api/gains').then(r=>r.json()).then(d=>{
-  document.getElementById('kp').value = d.kp;
-  document.getElementById('ki').value = d.ki;
-  document.getElementById('kd').value = d.kd;
-}).catch(()=>{});
+async function pollGains() {
+  try {
+    const r = await fetch('/api/gains');
+    const d = await r.json();
+    document.getElementById('kp').value = d.kp.toFixed(2);
+    document.getElementById('ki').value = d.ki.toFixed(3);
+    document.getElementById('kd').value = d.kd.toFixed(2);
+  } catch(e) {}
+}
 
 setInterval(poll, 500);
 setInterval(pollCal, 1000);
+setInterval(pollGains, 2000);
 poll();
 pollCal();
+pollGains();
 </script>
 </body>
 </html>
