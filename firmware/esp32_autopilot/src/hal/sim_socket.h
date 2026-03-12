@@ -18,6 +18,32 @@
 class tNMEA2000_sim;
 class TwoWire;
 
+// Snapshot of socket diagnostics, readable from any thread.
+// Updated atomically by SimSocket after each received message.
+struct SimSocketStats {
+    bool connected = false;
+
+    // Total message counts
+    uint32_t can_rx_count = 0;
+    uint32_t imu_rx_count = 0;
+    uint32_t can_tx_count = 0;
+
+    // Per-PGN receive counts
+    uint32_t pgn_wind_count = 0;    // PGN 130306
+    uint32_t pgn_stw_count = 0;     // PGN 128259
+    uint32_t pgn_cog_sog_count = 0; // PGN 129026
+    uint32_t pgn_heading_count = 0; // PGN 127250
+    uint32_t pgn_other_count = 0;   // unrecognised PGNs
+
+    // Last IMU values (degrees / dps, already scaled from raw)
+    float imu_heading = 0;
+    float imu_roll = 0;
+    float imu_pitch = 0;
+    float imu_gyro_x = 0;
+    float imu_gyro_y = 0;
+    float imu_gyro_z = 0;
+};
+
 class SimSocket {
 public:
     SimSocket(tNMEA2000_sim& nmea, TwoWire& wire);
@@ -33,6 +59,9 @@ public:
     // True if an external client is connected.
     bool is_connected() const { return client_fd.load() >= 0; }
 
+    // Thread-safe snapshot of current stats.
+    SimSocketStats get_stats() const;
+
 private:
     void accept_thread();
     void reader_thread(int fd);
@@ -45,6 +74,14 @@ private:
     int server_fd = -1;
     std::atomic<int> client_fd{-1};
     std::mutex write_mutex;
+
+    // Stats (protected by stats_mutex)
+    mutable std::mutex stats_mutex;
+    SimSocketStats stats;
 };
+
+// Global pointer set by hal_sim_main so sim_web.cpp can access stats.
+// NULL when not in HAL_SIM mode or before socket is created.
+extern SimSocket* g_sim_socket;
 
 #endif // SIM_SOCKET_H

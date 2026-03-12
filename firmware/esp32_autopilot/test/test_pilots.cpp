@@ -161,26 +161,25 @@ void test_smooth_reset() {
 
 void test_adaptive_passes_through() {
     PDPilot inner;
-    AdaptivePilot adaptive(&inner, false, 0.2f);
+    AdaptivePilot adaptive(&inner, 0.2f);
 
     PilotFeatures f = make_features(5.0f, 0.0f);
     float cmd = adaptive.steer(f);
 
     // First step: no EKF update, just passes through inner pilot
-    // Inner PD: 1.0*5/25 = 0.2 (gains may have been set to midpoint of bounds)
-    // Since default bounds midpoint for kp = (0.5+4.0)/2 = 2.25, kd = 2.25
-    // We just check it produces a reasonable output
+    // with gains derived from initial plant params (kr=0.4, kd_plant=0.5)
+    // kp = 0.6^2/0.4 = 0.9, kd = (2*0.9*0.6-0.5)/0.4 = 1.45
     TEST_ASSERT_TRUE(fabsf(cmd) > 0.0f);
     TEST_ASSERT_TRUE(fabsf(cmd) <= 1.0f);
 }
 
 void test_adaptive_confidence() {
     PDPilot inner;
-    AdaptivePilot adaptive(&inner, false, 0.2f);
+    AdaptivePilot adaptive(&inner, 0.2f);
 
     float conf = adaptive.get_confidence();
-    // Initial: trace(P) = 2 * 0.1 = 0.2, confidence = 1/(1+0.2) = 0.833
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.833f, conf);
+    // Initial: trace(P) = 2 * 0.1 = 0.2, confidence = 1/(1+5*0.2) = 0.5
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.5f, conf);
 }
 
 // ============================================================================

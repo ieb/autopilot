@@ -27,8 +27,11 @@ void actuator_read_sensors(AppState& state) {
     state.rudder_velocity = (sim_rudder_pos - sim_rudder_prev) / dt;
     sim_rudder_prev = sim_rudder_pos;
     state.rudder_actual = sim_rudder_pos;
-    state.motor_current = 0.0f;
-    state.supply_voltage = 12.0f;
+
+    // Simulate motor current: ~3A at full duty, proportional to velocity
+    // (motor draws current when moving, near-zero when at target)
+    state.motor_current = sim_clutch ? fabsf(state.rudder_velocity) / ACTUATOR_RATE * 3.0f : 0.0f;
+    state.supply_voltage = 12.8f;
 }
 
 void actuator_update(AppState& state) {

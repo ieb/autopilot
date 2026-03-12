@@ -23,6 +23,9 @@ static constexpr uint8_t MSG_CAN_RX  = 0x01;  // Python→ESP: CAN frame
 static constexpr uint8_t MSG_CAN_TX  = 0x02;  // ESP→Python: CAN frame
 static constexpr uint8_t MSG_IMU     = 0x03;  // Python→ESP: IMU registers
 
+// Global pointer for sim_web.cpp access
+SimSocket* g_sim_socket = nullptr;
+
 SimSocket::SimSocket(tNMEA2000_sim& nmea, TwoWire& wire)
     : nmea(nmea), wire(wire) {}
 
@@ -83,6 +86,13 @@ void SimSocket::accept_thread() {
         int old_fd = client_fd.exchange(fd);
         if (old_fd >= 0) {
             close(old_fd);
+        }
+
+        // Reset stats for new session
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats = SimSocketStats();
+            stats.connected = true;
         }
 
 #ifdef __APPLE__
@@ -146,9 +156,20 @@ void SimSocket::reader_thread(int fd) {
 disconnected:
     // Only clear client_fd if it's still our fd (not replaced by a new client)
     int expected = fd;
-    client_fd.compare_exchange_strong(expected, -1);
+    if (client_fd.compare_exchange_strong(expected, -1)) {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        stats.connected = false;
+    }
     close(fd);
     printf("\n[SOCKET] External simulator disconnected\n");
+}
+
+static unsigned long extract_pgn(unsigned long can_id) {
+    unsigned char pdu_format = (can_id >> 16) & 0xFF;
+    if (pdu_format < 240) {
+        return (can_id >> 8) & 0x1FF00UL;
+    }
+    return (can_id >> 8) & 0x1FFFFUL;
 }
 
 void SimSocket::handle_can_rx(const uint8_t* payload, uint16_t len) {
@@ -162,6 +183,27 @@ void SimSocket::handle_can_rx(const uint8_t* payload, uint16_t len) {
     if (len < 5u + frame.len) return;
 
     memcpy(frame.buf, payload + 5, frame.len);
+
+    unsigned long pgn = extract_pgn(frame.id);
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        stats.can_rx_count++;
+
+        if (stats.can_rx_count == 1) {
+            printf("\n[SOCKET] First CAN frame received: PGN %lu, %d bytes\n",
+                   pgn, frame.len);
+        }
+
+        switch (pgn) {
+            case 130306: stats.pgn_wind_count++; break;
+            case 128259: stats.pgn_stw_count++; break;
+            case 129026: stats.pgn_cog_sog_count++; break;
+            case 127250: stats.pgn_heading_count++; break;
+            default:     stats.pgn_other_count++; break;
+        }
+    }
+
     nmea.inject_frame(frame);
 }
 
@@ -176,6 +218,23 @@ void SimSocket::handle_imu(const uint8_t* payload, uint16_t len) {
     int16_t gyro_x  = (int16_t)(payload[6] | (payload[7] << 8));
     int16_t gyro_y  = (int16_t)(payload[8] | (payload[9] << 8));
     int16_t gyro_z  = (int16_t)(payload[10] | (payload[11] << 8));
+
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        stats.imu_rx_count++;
+
+        if (stats.imu_rx_count == 1) {
+            printf("\n[SOCKET] First IMU data received: hdg=%.1f° roll=%.1f° pitch=%.1f° gyro_z=%.1f°/s\n",
+                   heading / 16.0f, roll / 16.0f, pitch / 16.0f, gyro_z / 16.0f);
+        }
+
+        stats.imu_heading = heading / 16.0f;
+        stats.imu_roll    = roll / 16.0f;
+        stats.imu_pitch   = pitch / 16.0f;
+        stats.imu_gyro_x  = gyro_x / 16.0f;
+        stats.imu_gyro_y  = gyro_y / 16.0f;
+        stats.imu_gyro_z  = gyro_z / 16.0f;
+    }
 
     wire.set_register_16(0x1A, heading);  // EULER_H
     wire.set_register_16(0x1C, roll);     // EULER_R
@@ -200,8 +259,17 @@ void SimSocket::flush_tx_frames() {
         payload[4] = frame.len;
         memcpy(payload + 5, frame.buf, frame.len);
 
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.can_tx_count++;
+        }
         send_message(MSG_CAN_TX, payload, 5 + frame.len);
     }
+}
+
+SimSocketStats SimSocket::get_stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    return stats;
 }
 
 bool SimSocket::send_message(uint8_t type, const uint8_t* data, uint16_t len) {

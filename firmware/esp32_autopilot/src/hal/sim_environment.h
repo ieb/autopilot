@@ -7,6 +7,7 @@
 #define SIM_ENVIRONMENT_H
 
 #include <stdint.h>
+#include <cmath>
 
 // Forward declarations
 class tNMEA2000_sim;
@@ -31,6 +32,10 @@ public:
     float get_heading() const { return heading; }
     float get_tws() const { return tws; }
     float get_twd() const { return twd; }
+
+    // Simulated motor current (A) based on PWM duty: ~3A at full duty
+    float get_motor_current() const { return fabsf(motor_command) * 3.0f; }
+    bool get_clutch_engaged() const { return clutch_engaged; }
 
 private:
     // Update sub-systems

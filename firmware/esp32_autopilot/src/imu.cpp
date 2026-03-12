@@ -44,6 +44,7 @@ void imu_read(AppState& state) {
     float imu_heading = orient.orientation.x;  // 0-360 clockwise from North
     state.roll    = orient.orientation.z;       // positive = starboard heel
     state.pitch   = orient.orientation.y;       // positive = bow up
+    state.imu_raw_heading = imu_heading;        // store raw for N2K fusion snapshot
 
     // Fuse N2K heading (primary) with IMU delta (interpolation between updates)
     if (state.n2k_heading_valid) {

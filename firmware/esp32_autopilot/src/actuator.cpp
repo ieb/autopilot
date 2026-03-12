@@ -96,6 +96,11 @@ void actuator_read_sensors(AppState& state) {
     // state.motor_current = analogRead(PIN_ADC_CURRENT) * BTS7960_CURRENT_SCALE;
     state.motor_current = 0.0f;  // placeholder until wired
     state.supply_voltage = 0.0f;
+
+    // 5-second exponential moving average of motor current
+    // EMA alpha = dt / tau, tau = 5s, dt = ACTUATOR_INTERVAL_MS / 1000
+    const float alpha = (ACTUATOR_INTERVAL_MS / 1000.0f) / 5.0f;
+    state.motor_current_avg += alpha * (state.motor_current - state.motor_current_avg);
 }
 
 static void enforce_limits(float& pwm_output, AppState& state) {

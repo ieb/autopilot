@@ -6,21 +6,34 @@ Connects to the HAL sim's socket port, sends CAN frames (N2K PGNs) and
 IMU data from the Python yacht_dynamics model, and reads back rudder
 commands from the firmware.
 
+Keyboard acts as a Raymarine p70 control head:
+    Left/Right arrows or a/d  : adjust heading +-1 degree
+    Shift+Left/Right or A/D   : adjust heading +-10 degrees
+    s or Space                 : standby
+    c                          : compass (auto) mode
+    w                          : wind (AWA) mode
+    t                          : tack starboard
+    T                          : tack port
+
 Usage:
     uv run python scripts/external_sim.py [--tws 12] [--twd 225] [--host localhost] [--port 9876]
 """
 
 import argparse
 import math
+import os
 import select
 import socket
 import struct
 import sys
+import termios
 import time
+import tty
 
 # Add project root to path
 sys.path.insert(0, ".")
 from src.simulation.yacht_dynamics import YachtDynamics, YachtState
+from src.simulation.wave_model import WaveModel
 
 # Wire protocol message types
 MSG_CAN_RX = 0x01  # Python→ESP: CAN frame
@@ -211,6 +224,178 @@ def parse_can_frame(payload: bytes) -> tuple[int, bytes] | None:
     return can_id, data
 
 
+# ============================================================================
+# p70 emulation — send Seatalk PGNs as CAN frames
+# ============================================================================
+
+# Raymarine manufacturer header
+RAYMARINE_MFR_LO = 0x3B
+RAYMARINE_MFR_HI = 0x9F
+
+# Keystroke codes
+KEY_PLUS_1 = 0x07F8
+KEY_MINUS_1 = 0x05FA
+KEY_PLUS_10 = 0x08F7
+KEY_MINUS_10 = 0x06F9
+KEY_TACK_STBD = 0x22DD
+KEY_TACK_PORT = 0x21DE
+
+# Mode bytes
+SEATALK_MODE_STANDBY = 0x00
+SEATALK_MODE_AUTO = 0x40
+SEATALK_SUBMODE_STANDBY = 0x00
+SEATALK_SUBMODE_WIND = 0x01
+
+P70_SOURCE = 70  # Simulated p70 source address
+_fast_packet_seq = 0  # 3-bit sequence counter (0-7)
+
+
+def _next_fp_seq() -> int:
+    """Increment and return fast-packet sequence counter (0-7)."""
+    global _fast_packet_seq
+    seq = _fast_packet_seq
+    _fast_packet_seq = (seq + 1) & 0x07
+    return seq
+
+
+def send_fast_packet(sock: socket.socket, pgn: int, data: bytes, source: int = P70_SOURCE):
+    """Send a multi-frame fast-packet N2K message as individual CAN frames."""
+    can_id = make_can_id(pgn, source=source, priority=3)
+    seq = _next_fp_seq()
+    total_len = len(data)
+    offset = 0
+
+    # Frame 0: [seq<<5 | 0] [total_len] [up to 6 data bytes]
+    frame0 = bytes([(seq << 5) | 0, total_len]) + data[0:6]
+    frame0 = frame0.ljust(8, b"\xff")
+    send_can_frame(sock, can_id, frame0)
+    offset = 6
+
+    frame_num = 1
+    while offset < total_len:
+        chunk = data[offset : offset + 7]
+        frame = bytes([(seq << 5) | frame_num]) + chunk
+        frame = frame.ljust(8, b"\xff")
+        send_can_frame(sock, can_id, frame)
+        offset += 7
+        frame_num += 1
+
+
+def send_p70_keystroke(sock: socket.socket, key_code: int):
+    """Send PGN 126720 keystroke command (22 bytes, fast-packet)."""
+    data = bytes([
+        RAYMARINE_MFR_LO, RAYMARINE_MFR_HI,
+        0xF0, 0x81, 0x86, 0x21,
+        (key_code >> 8) & 0xFF, key_code & 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xC1, 0xC2, 0xCD, 0x66, 0x80, 0xD3, 0x42, 0xB1, 0xC8,
+    ])
+    send_fast_packet(sock, 126720, data)
+
+
+def send_p70_mode(sock: socket.socket, mode: int, submode: int):
+    """Send PGN 126208 mode change command (17 bytes, fast-packet)."""
+    data = bytes([
+        0x01, 0x63, 0xFF, 0x00, 0xF8, 0x04, 0x01, 0x3B,
+        0x07, 0x03, 0x04, 0x04, mode, submode, 0x05, 0xFF, 0xFF,
+    ])
+    send_fast_packet(sock, 126208, data)
+
+
+def send_p70_heartbeat(sock: socket.socket):
+    """Send PGN 65374 heartbeat (8 bytes, single frame)."""
+    data = bytes([RAYMARINE_MFR_LO, RAYMARINE_MFR_HI, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF])
+    can_id = make_can_id(65374, source=P70_SOURCE, priority=7)
+    send_can_frame(sock, can_id, data)
+
+
+# ============================================================================
+# Keyboard input (raw terminal, non-blocking)
+# ============================================================================
+
+class RawTerminal:
+    """Context manager for raw terminal input."""
+
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = termios.tcgetattr(self.fd)
+        tty.setraw(self.fd)
+        # Set non-blocking
+        os.set_blocking(self.fd, False)
+        return self
+
+    def __exit__(self, *args):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+
+    def read_key(self) -> str | None:
+        """Read a keypress. Returns key string or None if nothing available."""
+        try:
+            ch = os.read(self.fd, 1)
+        except (BlockingIOError, OSError):
+            return None
+        if not ch:
+            return None
+        b = ch[0]
+        if b == 0x1B:  # Escape sequence
+            try:
+                seq = os.read(self.fd, 2)
+            except (BlockingIOError, OSError):
+                return "ESC"
+            if len(seq) == 2 and seq[0] == ord("["):
+                code = chr(seq[1])
+                # Check for modifier (e.g. 1;2C = shift+right)
+                if code == "1":
+                    try:
+                        rest = os.read(self.fd, 3)
+                    except (BlockingIOError, OSError):
+                        return None
+                    if len(rest) >= 2 and rest[0] == ord(";") and rest[1] == ord("2"):
+                        arrow = chr(rest[2]) if len(rest) > 2 else ""
+                        if arrow == "C":
+                            return "SHIFT_RIGHT"
+                        elif arrow == "D":
+                            return "SHIFT_LEFT"
+                    return None
+                elif code == "C":
+                    return "RIGHT"
+                elif code == "D":
+                    return "LEFT"
+            return None
+        return chr(b)
+
+
+def handle_keypress(key: str, sock: socket.socket) -> str | None:
+    """Process a keypress and send the appropriate p70 CAN message. Returns action description or None."""
+    if key in ("d", "RIGHT"):
+        send_p70_keystroke(sock, KEY_PLUS_1)
+        return "+1"
+    elif key in ("a", "LEFT"):
+        send_p70_keystroke(sock, KEY_MINUS_1)
+        return "-1"
+    elif key in ("D", "SHIFT_RIGHT"):
+        send_p70_keystroke(sock, KEY_PLUS_10)
+        return "+10"
+    elif key in ("A", "SHIFT_LEFT"):
+        send_p70_keystroke(sock, KEY_MINUS_10)
+        return "-10"
+    elif key in ("s", " "):
+        send_p70_mode(sock, SEATALK_MODE_STANDBY, SEATALK_SUBMODE_STANDBY)
+        return "STANDBY"
+    elif key == "c":
+        send_p70_mode(sock, SEATALK_MODE_AUTO, SEATALK_SUBMODE_STANDBY)
+        return "COMPASS"
+    elif key == "w":
+        send_p70_mode(sock, SEATALK_MODE_STANDBY, SEATALK_SUBMODE_WIND)
+        return "WIND"
+    elif key == "t":
+        send_p70_keystroke(sock, KEY_TACK_STBD)
+        return "TACK STBD"
+    elif key == "T":
+        send_p70_keystroke(sock, KEY_TACK_PORT)
+        return "TACK PORT"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="External simulator for HAL sim")
     parser.add_argument("--host", default="localhost", help="HAL sim host")
@@ -219,11 +404,27 @@ def main():
     parser.add_argument("--twd", type=float, default=225.0, help="True wind direction (deg)")
     parser.add_argument("--heading", type=float, default=180.0, help="Initial heading (deg)")
     parser.add_argument("--dt", type=float, default=0.05, help="Timestep (seconds)")
+    parser.add_argument(
+        "--sea",
+        choices=["calm", "moderate", "rough", "none"],
+        default="moderate",
+        help="Sea state for wave model (default: moderate)",
+    )
     args = parser.parse_args()
 
     # Initialize yacht dynamics
     yacht = YachtDynamics()
     yacht.reset(heading=args.heading, twd=args.twd, tws=args.tws)
+
+    # Initialize wave model
+    if args.sea == "none":
+        waves = None
+    elif args.sea == "calm":
+        waves = WaveModel.calm()
+    elif args.sea == "rough":
+        waves = WaveModel.rough()
+    else:
+        waves = WaveModel.moderate()
 
     print(f"Connecting to {args.host}:{args.port}...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -233,87 +434,150 @@ def main():
         print(f"Connection refused. Is the HAL sim running with --socket-port {args.port}?")
         return 1
 
-    print(f"Connected. TWS={args.tws:.1f} kn TWD={args.twd:.0f}° heading={args.heading:.0f}°")
-    print("Press Ctrl+C to stop.\n")
+    print(f"Connected. TWS={args.tws:.1f} kn TWD={args.twd:.0f}° heading={args.heading:.0f}° sea={args.sea}")
+    print()
+    print("+---------------------------------------------------------+")
+    print("|                  Raymarine p70 Controls                  |")
+    print("+---------------------------------------------------------+")
+    print("|  Heading adjust:                                        |")
+    print("|    a / Left arrow        -1 degree                      |")
+    print("|    d / Right arrow       +1 degree                      |")
+    print("|    A / Shift+Left       -10 degrees                     |")
+    print("|    D / Shift+Right      +10 degrees                     |")
+    print("|                                                         |")
+    print("|  Mode select:                                           |")
+    print("|    c                     Compass (auto)                 |")
+    print("|    w                     Wind (AWA)                     |")
+    print("|    s / Space             Standby                        |")
+    print("|                                                         |")
+    print("|  Tack:                                                  |")
+    print("|    t                     Tack starboard                 |")
+    print("|    T                     Tack port                      |")
+    print("|                                                         |")
+    print("|  q / Ctrl-C              Quit                           |")
+    print("+---------------------------------------------------------+")
+    print()
 
     rudder_from_firmware = 0.0  # degrees, from PGN 127245
     step_count = 0
     dt = args.dt
+    prev_pitch = 0.0  # for computing pitch rate from wave model
+    last_heartbeat = 0.0
+    last_action = ""  # last p70 action for display
 
-    try:
-        while True:
-            t_start = time.monotonic()
+    with RawTerminal() as term:
+        try:
+            while True:
+                t_start = time.monotonic()
 
-            # Step yacht dynamics with the rudder command from firmware
-            state = yacht.step(rudder_from_firmware, dt)
+                # Handle keyboard input (p70 emulation)
+                key = term.read_key()
+                if key == "q" or key == "\x03":  # q or Ctrl-C
+                    break
+                if key is not None:
+                    action = handle_keypress(key, sock)
+                    if action:
+                        last_action = action
 
-            # Send CAN frames: wind, STW, COG/SOG, heading
-            can_id, data = encode_wind(state.awa, state.aws)
-            send_can_frame(sock, can_id, data)
+                # Send p70 heartbeat at ~1 Hz
+                now = time.monotonic()
+                if now - last_heartbeat >= 1.0:
+                    last_heartbeat = now
+                    send_p70_heartbeat(sock)
 
-            can_id, data = encode_stw(state.stw)
-            send_can_frame(sock, can_id, data)
+                # Step wave model (if enabled)
+                wave_roll = 0.0
+                wave_pitch = 0.0
+                wave_yaw = 0.0
+                if waves is not None:
+                    wave_roll, wave_pitch, wave_yaw = waves.step(
+                        dt,
+                        tws=args.tws,
+                        heading=yacht.state.heading,
+                        twa=yacht.state.twd - yacht.state.heading,
+                        heel=yacht.state.roll,
+                    )
 
-            can_id, data = encode_cog_sog(state.cog, state.sog)
-            send_can_frame(sock, can_id, data)
+                # Step yacht dynamics with rudder command + wave yaw perturbation
+                state = yacht.step(rudder_from_firmware, dt, wave_yaw=wave_yaw)
 
-            can_id, data = encode_heading(state.heading)
-            send_can_frame(sock, can_id, data)
+                # Compute pitch rate from wave-induced pitch changes
+                total_pitch = state.pitch + wave_pitch
+                pitch_rate = (total_pitch - prev_pitch) / dt
+                prev_pitch = total_pitch
 
-            # Send IMU data
-            send_imu(
-                sock,
-                heading=state.heading,
-                roll=state.roll,
-                pitch=state.pitch,
-                gyro_x=state.roll_rate,
-                gyro_y=0.0,
-                gyro_z=state.heading_rate,
-            )
+                # Send CAN frames: wind, STW, COG/SOG, heading
+                can_id, data = encode_wind(state.awa, state.aws)
+                send_can_frame(sock, can_id, data)
 
-            # Read responses from firmware (rudder PGN)
-            try:
-                messages = recv_messages(sock)
-                for msg_type, payload in messages:
-                    if msg_type == MSG_CAN_TX:
-                        result = parse_can_frame(payload)
-                        if result is None:
-                            continue
-                        can_id, frame_data = result
-                        pgn = extract_pgn(can_id)
-                        if pgn == 127245:  # Rudder
-                            rudder = decode_rudder(frame_data)
-                            if rudder:
-                                actual_deg, commanded_deg = rudder
-                                rudder_from_firmware = commanded_deg
-            except ConnectionError:
-                print("\nConnection lost")
-                break
+                can_id, data = encode_stw(state.stw)
+                send_can_frame(sock, can_id, data)
 
-            step_count += 1
-            if step_count % 20 == 0:  # Print at ~1 Hz (if dt=0.05)
-                print(
-                    f"\r[{step_count * dt:6.1f}s] "
-                    f"hdg={state.heading:5.1f}° "
-                    f"awa={state.awa:5.1f}° "
-                    f"aws={state.aws:4.1f}kn "
-                    f"stw={state.stw:4.1f}kn "
-                    f"rud={rudder_from_firmware:+5.1f}° "
-                    f"yaw={state.heading_rate:+5.1f}°/s",
-                    end="",
-                    flush=True,
+                can_id, data = encode_cog_sog(state.cog, state.sog)
+                send_can_frame(sock, can_id, data)
+
+                can_id, data = encode_heading(state.heading)
+                send_can_frame(sock, can_id, data)
+
+                # Send IMU data — add wave-induced pitch and roll to yacht state
+                send_imu(
+                    sock,
+                    heading=state.heading,
+                    roll=state.roll + wave_roll,
+                    pitch=total_pitch,
+                    gyro_x=state.roll_rate,
+                    gyro_y=pitch_rate,
+                    gyro_z=state.heading_rate,
                 )
 
-            # Pace the loop
-            elapsed = time.monotonic() - t_start
-            sleep_time = dt - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                # Read responses from firmware (rudder PGN)
+                try:
+                    messages = recv_messages(sock)
+                    for msg_type, payload in messages:
+                        if msg_type == MSG_CAN_TX:
+                            result = parse_can_frame(payload)
+                            if result is None:
+                                continue
+                            can_id, frame_data = result
+                            pgn = extract_pgn(can_id)
+                            if pgn == 127245:  # Rudder
+                                rudder = decode_rudder(frame_data)
+                                if rudder:
+                                    actual_deg, commanded_deg = rudder
+                                    rudder_from_firmware = commanded_deg
+                except ConnectionError:
+                    print("\r\nConnection lost")
+                    break
 
-    except KeyboardInterrupt:
-        print("\n\nStopping.")
-    finally:
-        sock.close()
+                step_count += 1
+                if step_count % 20 == 0:  # Print at ~1 Hz (if dt=0.05)
+                    action_str = f" [{last_action}]" if last_action else ""
+                    sys.stdout.write(
+                        f"\r[{step_count * dt:6.1f}s] "
+                        f"hdg={state.heading:5.1f}\xb0 "
+                        f"awa={state.awa:5.1f}\xb0 "
+                        f"stw={state.stw:4.1f}kn "
+                        f"rud={rudder_from_firmware:+5.1f}\xb0 "
+                        f"roll={state.roll + wave_roll:+5.1f}\xb0 "
+                        f"pitch={state.pitch + wave_pitch:+4.1f}\xb0 "
+                        f"wyaw={wave_yaw:+4.1f}"
+                        f"{action_str:>14s}"
+                        "    "
+                    )
+                    sys.stdout.flush()
+                    last_action = ""
+
+                # Pace the loop
+                elapsed = time.monotonic() - t_start
+                sleep_time = dt - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            pass
+
+    print("\r\nStopping.")
+    sock.close()
 
     return 0
 

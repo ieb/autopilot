@@ -14,6 +14,7 @@
 #include "n2k.h"
 #include "actuator.h"
 #include "pilot_manager.h"
+#include "seatalk.h"
 #include "web.h"
 
 #include "NMEA2000_sim.h"
@@ -106,6 +107,7 @@ int main(int argc, char* argv[]) {
 
     // Create SimSocket for external simulator communication
     SimSocket sim_socket(NMEA2000, Wire);
+    g_sim_socket = &sim_socket;
     sim_socket.start(socket_port);
 
     // Configure sim web
@@ -148,8 +150,9 @@ int main(int argc, char* argv[]) {
         // N2K parse — every loop (processes injected CAN frames)
         n2k_update(state);
 
-        // Web commands — every loop
+        // Web and p70 commands — every loop
         web_apply_commands(state);
+        seatalk_apply_commands(state);
 
         // IMU at 20Hz
         if (now - last_imu_ms >= IMU_INTERVAL_MS) {
@@ -173,6 +176,12 @@ int main(int argc, char* argv[]) {
         if (now - last_actuator_ms >= ACTUATOR_INTERVAL_MS) {
             last_actuator_ms = now;
             actuator_read_sensors(state);
+            // Override current/voltage with simulated values (actuator.cpp has no real ADC)
+            state.motor_current = sim_env.get_motor_current();
+            state.supply_voltage = 12.8f;
+            // Recompute 5s EMA with correct current (actuator.cpp ran it with 0)
+            const float ema_alpha = (ACTUATOR_INTERVAL_MS / 1000.0f) / 5.0f;
+            state.motor_current_avg += ema_alpha * (state.motor_current - state.motor_current_avg);
             actuator_update(state);
         }
 
@@ -185,16 +194,32 @@ int main(int argc, char* argv[]) {
         // Console status at 2Hz
         if (now - last_print_ms >= 500) {
             last_print_ms = now;
-            printf("\r[%6.1fs] %s%s tgt=%.1f° hdg=%.1f° awa=%.0f° stw=%.1f kn rud=%.1f°/%.1f° ",
-                   now / 1000.0f,
-                   sim_env.is_external_active() ? "EXT " : "",
-                   mode_name(state.pilot_mode),
-                   state.target_value,
-                   state.heading,
-                   state.awa,
-                   state.stw,
-                   state.rudder_target * 25.0f,
-                   state.rudder_actual * 25.0f);
+            if (sim_env.is_external_active()) {
+                auto ss = sim_socket.get_stats();
+                printf("\r[%6.1fs] EXT %s tgt=%.1f° hdg=%.1f° awa=%.0f° twa=%.0f° stw=%.1f kn rud=%.1f°/%.1f° rx:%u imu:%u tx:%u ",
+                       now / 1000.0f,
+                       mode_name(state.pilot_mode),
+                       state.target_value,
+                       state.heading,
+                       state.awa,
+                       state.twa,
+                       state.stw,
+                       state.rudder_target * 25.0f,
+                       state.rudder_actual * 25.0f,
+                       ss.can_rx_count,
+                       ss.imu_rx_count,
+                       ss.can_tx_count);
+            } else {
+                printf("\r[%6.1fs] %s tgt=%.1f° hdg=%.1f° awa=%.0f° stw=%.1f kn rud=%.1f°/%.1f° ",
+                       now / 1000.0f,
+                       mode_name(state.pilot_mode),
+                       state.target_value,
+                       state.heading,
+                       state.awa,
+                       state.stw,
+                       state.rudder_target * 25.0f,
+                       state.rudder_actual * 25.0f);
+            }
             fflush(stdout);
         }
 

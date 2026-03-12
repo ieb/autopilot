@@ -5,101 +5,114 @@
 #include <math.h>
 #include <string.h>
 
-// Inline 3x3 matrix ops — no external library needed for EKF this small.
+// Plant-identification adaptive pilot.
+//
+// Instead of estimating controller gains directly (which requires an indirect
+// observation model), we estimate the PLANT parameters from direct observations:
+//
+//   d(yaw_rate)/dt = K_r * rudder_deg - K_d * yaw_rate
+//
+// Where:
+//   K_r = rudder effectiveness (deg/s² per deg of rudder)
+//   K_d = natural yaw damping (1/s)
+//
+// The EKF observes changes in heading rate and the actual rudder position each
+// step, giving it a direct, well-conditioned measurement model. From the
+// estimated plant, we compute optimal PD gains via pole placement:
+//
+//   Closed-loop characteristic: s² + (K_d + K_r*kd)*s + K_r*kp = 0
+//   For desired ωn and damping ratio ζ:
+//     kp = ωn² / K_r
+//     kd = (2*ζ*ωn - K_d) / K_r
 
 class AdaptivePilot : public BasePilot {
 public:
-    AdaptivePilot(BasePilot* inner, bool has_ki = false,
-                  float dt = 0.2f, float q_diag = 1e-6f,
-                  float r_scalar = 1.0f, float rudder_eff = 0.5f,
-                  float kp_min = 0.5f, float kp_max = 4.0f,
-                  float kd_min = 0.5f, float kd_max = 4.0f,
-                  float ki_min = 0.0f, float ki_max = 0.5f,
+    AdaptivePilot(BasePilot* inner,
+                  float dt = 0.2f,
+                  float q_diag = 1e-4f,
+                  float r_scalar = 0.5f,
+                  float omega_n = 0.6f,
+                  float zeta = 0.9f,
+                  float kr_init = 0.4f,
+                  float kd_plant_init = 0.5f,
+                  float kr_min = 0.02f, float kr_max = 3.0f,
+                  float kd_plant_min = 0.02f, float kd_plant_max = 3.0f,
                   float max_p_trace = 10.0f)
-        : _inner(inner), _has_ki(has_ki), _dt(dt),
-          _q_diag(q_diag), _r_scalar(r_scalar), _rudder_eff(rudder_eff),
+        : _inner(inner), _dt(dt),
+          _q_diag(q_diag), _r_scalar(r_scalar),
+          _omega_n(omega_n), _zeta(zeta),
           _max_p_trace(max_p_trace), _step(0),
-          _prev_error(0.0f), _integrator_est(0.0f)
+          _prev_rate(0.0f)
     {
-        _n = _has_ki ? 3 : 2;
-        _bounds[0][0] = kp_min; _bounds[0][1] = kp_max;
-        if (_has_ki) {
-            _bounds[1][0] = ki_min; _bounds[1][1] = ki_max;
-            _bounds[2][0] = kd_min; _bounds[2][1] = kd_max;
-        } else {
-            _bounds[1][0] = kd_min; _bounds[1][1] = kd_max;
-        }
+        _bounds[0][0] = kr_min;       _bounds[0][1] = kr_max;
+        _bounds[1][0] = kd_plant_min; _bounds[1][1] = kd_plant_max;
+        _kr_init = kr_init;
+        _kd_plant_init = kd_plant_init;
         _init_ekf();
     }
 
     float steer(const PilotFeatures& f) override {
-        float e = f.heading_error * 90.0f;
-        float rate = f.heading_rate * 30.0f;
+        float rate = f.heading_rate * 30.0f;           // deg/s
+        float rudder_deg = f.rudder_position * 25.0f;  // actual rudder in degrees
 
-        // Build regressor phi
-        float phi[3] = {0};
-        if (_has_ki) {
-            _integrator_est += e * _dt;
-            phi[0] = e;
-            phi[1] = _integrator_est;
-            phi[2] = -rate;
-        } else {
-            phi[0] = e;
-            phi[1] = -rate;
-        }
+        // EKF update: observe heading rate change, regress against rudder and rate
+        if (_step > 0 && fabsf(rate) < 20.0f && fabsf(rudder_deg) < 26.0f) {
+            float delta_rate = rate - _prev_rate;
 
-        // EKF update (skip during large manoeuvres)
-        if (_step > 0 && fabsf(e) < 45.0f && fabsf(rate) < 15.0f) {
-            float innovation = e - _prev_error + rate * _dt;
+            // Predicted delta_rate = (K_r * rudder_deg - K_d * rate) * dt
+            float predicted = (_x[0] * rudder_deg - _x[1] * rate) * _dt;
+            float innovation = delta_rate - predicted;
 
-            // H = -rudder_eff * dt * phi  (1 x n)
-            float H[3];
-            for (int i = 0; i < _n; i++)
-                H[i] = -_rudder_eff * _dt * phi[i];
+            // Jacobian H = d(predicted)/d(x) = [rudder_deg * dt, -rate * dt]
+            float H[2] = {
+                rudder_deg * _dt,
+                -rate * _dt
+            };
 
             // S = H @ P @ H^T + R  (scalar)
             float S = _r_scalar;
-            for (int i = 0; i < _n; i++)
-                for (int j = 0; j < _n; j++)
+            for (int i = 0; i < 2; i++)
+                for (int j = 0; j < 2; j++)
                     S += H[i] * _cov[i][j] * H[j];
 
-            // K = P @ H^T / S  (n x 1)
-            float K[3];
-            for (int i = 0; i < _n; i++) {
-                K[i] = 0;
-                for (int j = 0; j < _n; j++)
-                    K[i] += _cov[i][j] * H[j];
-                K[i] /= S;
+            if (S > 1e-10f) {
+                // K = P @ H^T / S  (2 x 1)
+                float K[2];
+                for (int i = 0; i < 2; i++) {
+                    K[i] = 0;
+                    for (int j = 0; j < 2; j++)
+                        K[i] += _cov[i][j] * H[j];
+                    K[i] /= S;
+                }
+
+                // x = x + K * innovation
+                for (int i = 0; i < 2; i++)
+                    _x[i] += K[i] * innovation;
+
+                // P = (I - K @ H) @ P + Q
+                float KH_P[2][2] = {{0}};
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 2; j++)
+                        for (int k = 0; k < 2; k++)
+                            KH_P[i][j] += K[i] * H[k] * _cov[k][j];
+
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 2; j++)
+                        _cov[i][j] = _cov[i][j] - KH_P[i][j] + ((i == j) ? _q_diag : 0.0f);
+
+                _clamp_state();
+
+                // Check for divergence
+                float trace = _cov[0][0] + _cov[1][1];
+                if (trace > _max_p_trace)
+                    _reset_to_defaults();
             }
-
-            // x = x + K * innovation
-            for (int i = 0; i < _n; i++)
-                _x[i] += K[i] * innovation;
-
-            // P = P - K @ H @ P + Q
-            float KH_cov[3][3] = {{0}};
-            for (int i = 0; i < _n; i++)
-                for (int j = 0; j < _n; j++)
-                    for (int k = 0; k < _n; k++)
-                        KH_cov[i][j] += K[i] * H[k] * _cov[k][j];
-
-            for (int i = 0; i < _n; i++)
-                for (int j = 0; j < _n; j++)
-                    _cov[i][j] = _cov[i][j] - KH_cov[i][j] + ((i == j) ? _q_diag : 0.0f);
-
-            _clamp_gains();
-
-            // Check for divergence
-            float trace = 0;
-            for (int i = 0; i < _n; i++) trace += _cov[i][i];
-            if (trace > _max_p_trace)
-                _reset_to_defaults();
         }
 
-        _prev_error = e;
+        _prev_rate = rate;
         _step++;
 
-        // Apply adapted gains to inner pilot
+        // Compute optimal PD gains from estimated plant and apply
         _apply_gains();
 
         return _inner->steer(f);
@@ -111,72 +124,94 @@ public:
     }
 
     void configure(float kp, float ki, float kd) override {
+        // Manual gain override — set inner pilot directly, but also
+        // back-compute what plant params would produce these gains,
+        // so the EKF starts from the right place.
         _inner->configure(kp, ki, kd);
     }
 
-    // Accessors for web API
-    float get_kp() const { return _x[0]; }
-    float get_kd() const { return _has_ki ? _x[2] : _x[1]; }
-    float get_ki() const { return _has_ki ? _x[1] : 0.0f; }
+    // Accessors for web API — report the derived PD gains and plant params
+    float get_kp() const {
+        if (_x[0] < 0.01f) return 0.0f;
+        return _omega_n * _omega_n / _x[0];
+    }
+    float get_kd() const {
+        if (_x[0] < 0.01f) return 0.0f;
+        float kd = (2.0f * _zeta * _omega_n - _x[1]) / _x[0];
+        return (kd > 0.0f) ? kd : 0.0f;
+    }
+    float get_ki() const { return 0.0f; }
+
+    float get_kr() const { return _x[0]; }
+    float get_kd_plant() const { return _x[1]; }
+
     float get_confidence() const {
-        float trace = 0;
-        for (int i = 0; i < _n; i++) trace += _cov[i][i];
-        return 1.0f / (1.0f + trace);
+        float trace = _cov[0][0] + _cov[1][1];
+        // Scale: initial trace 0.2 → ~50%, converged trace ~0.02 → ~91%
+        float c = 1.0f / (1.0f + 5.0f * trace);
+        if (c < 0.0f) c = 0.0f;
+        if (c > 1.0f) c = 1.0f;
+        return c;
     }
 
 private:
     BasePilot* _inner;
-    bool _has_ki;
-    int _n;
     float _dt;
     float _q_diag;
     float _r_scalar;
-    float _rudder_eff;
+    float _omega_n;    // desired natural frequency (rad/s)
+    float _zeta;       // desired damping ratio
     float _max_p_trace;
     uint32_t _step;
-    float _prev_error;
-    float _integrator_est;
+    float _prev_rate;  // previous heading rate (deg/s)
 
-    float _x[3];                  // state: [kp, kd] or [kp, ki, kd]
-    float _cov[3][3];               // covariance
-    float _bounds[3][2];          // [min, max] per gain
-    float _default_x[3];          // for reset
+    float _x[2];           // state: [K_r, K_d]  (plant params)
+    float _cov[2][2];      // covariance
+    float _bounds[2][2];   // [min, max] per state
+    float _default_x[2];   // for reset
+    float _kr_init, _kd_plant_init;
 
     void _init_ekf() {
-        // Initialize state from inner pilot's current gains
-        // We store defaults for reset
         memset(_cov, 0, sizeof(_cov));
-        for (int i = 0; i < _n; i++) {
-            _cov[i][i] = 0.1f;
-            _x[i] = (_bounds[i][0] + _bounds[i][1]) / 2.0f;
-        }
-        // Set to inner pilot's actual gains via default
-        // (caller should set _x after construction if needed)
+        _cov[0][0] = 0.1f;
+        _cov[1][1] = 0.1f;
+
+        _x[0] = _kr_init;
+        _x[1] = _kd_plant_init;
+
         memcpy(_default_x, _x, sizeof(_x));
-        _prev_error = 0.0f;
-        _integrator_est = 0.0f;
+        _prev_rate = 0.0f;
         _step = 0;
     }
 
-    void _clamp_gains() {
-        for (int i = 0; i < _n; i++) {
+    void _clamp_state() {
+        for (int i = 0; i < 2; i++) {
             if (_x[i] < _bounds[i][0]) _x[i] = _bounds[i][0];
             if (_x[i] > _bounds[i][1]) _x[i] = _bounds[i][1];
         }
     }
 
     void _apply_gains() {
-        if (_has_ki)
-            _inner->configure(_x[0], _x[1], _x[2]);
-        else
-            _inner->configure(_x[0], 0.0f, _x[1]);
+        float kr = _x[0];
+        float kd_plant = _x[1];
+
+        if (kr < 0.01f) return;  // can't compute gains if K_r ~= 0
+
+        float kp = _omega_n * _omega_n / kr;
+        float kd = (2.0f * _zeta * _omega_n - kd_plant) / kr;
+
+        // Clamp to sane controller gain range
+        kp = clampf(kp, 0.1f, 8.0f);
+        kd = clampf(kd, 0.0f, 10.0f);
+
+        _inner->configure(kp, 0.0f, kd);
     }
 
     void _reset_to_defaults() {
         memcpy(_x, _default_x, sizeof(_x));
         memset(_cov, 0, sizeof(_cov));
-        for (int i = 0; i < _n; i++)
-            _cov[i][i] = 0.1f;
+        _cov[0][0] = 0.1f;
+        _cov[1][1] = 0.1f;
     }
 };
 

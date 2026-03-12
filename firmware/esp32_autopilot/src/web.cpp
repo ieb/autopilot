@@ -8,20 +8,21 @@
 
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncEventSource.h>
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 
 static AsyncWebServer server(80);
+static AsyncEventSource events("/api/events");
 
 // Shared state pointer for web callbacks
 static volatile AppState* g_web_state = nullptr;
 
 // Pending commands from web (applied in main loop)
-static volatile bool cmd_pending = false;
+static volatile bool cmd_mode_change = false;
 static volatile PilotMode cmd_mode = MODE_STANDBY;
 static volatile float cmd_target = 0.0f;
 static volatile PilotType cmd_pilot_type = PILOT_PD;
-static volatile bool cmd_mode_change = false;
 static volatile bool cmd_type_change = false;
 static volatile bool cmd_gains_change = false;
 static volatile float cmd_kp = DEFAULT_KP;
@@ -30,6 +31,10 @@ static volatile float cmd_kd = DEFAULT_KD;
 
 static const char* AP_SSID = "PogoAutopilot";
 static const char* AP_PASS = "pogo1250";
+
+// SSE push rate
+static uint32_t last_sse_ms = 0;
+static const uint32_t SSE_INTERVAL_MS = 200;  // 5 Hz
 
 void web_init() {
     // Start as WiFi Access Point
@@ -41,62 +46,11 @@ void web_init() {
     // GET / — serve dashboard
     server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
 
-    // GET /api/status — JSON status
-    server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
-        if (!g_web_state) {
-            request->send(500, "application/json", "{\"error\":\"not ready\"}");
-            return;
-        }
-
-        const volatile AppState& s = *g_web_state;
-        JsonDocument doc;
-        doc["heading"] = s.heading;
-        doc["pitch"] = s.pitch;
-        doc["roll"] = s.roll;
-        doc["yaw_rate"] = s.yaw_rate;
-        doc["awa"] = s.awa;
-        doc["aws"] = s.aws;
-        doc["twa"] = s.twa;
-        doc["tws"] = s.tws;
-        doc["stw"] = s.stw;
-        doc["sog"] = s.sog;
-        doc["cog"] = s.cog;
-        doc["rudder_actual"] = s.rudder_actual;
-        doc["rudder_target"] = s.rudder_target;
-        doc["pilot_mode"] = (int)s.pilot_mode;
-        doc["pilot_type"] = (int)s.pilot_type;
-        doc["target_value"] = s.target_value;
-        doc["fault_code"] = s.fault_code;
-        doc["clutch_engaged"] = s.clutch_engaged;
-        doc["motor_current"] = s.motor_current;
-        doc["supply_voltage"] = s.supply_voltage;
-
-        // Performance ratio if sailing
-        if (s.tws > 1.0f && s.stw > 0.1f) {
-            doc["polar_pct"] = polar_get_performance_ratio(
-                fabsf(s.twa), s.tws, s.stw) * 100.0f;
-        }
-
-        String response;
-        serializeJson(doc, response);
-        request->send(200, "application/json", response);
+    // SSE event source
+    events.onConnect([](AsyncEventSourceClient* client) {
+        client->send("connected", "hello", millis(), 1000);
     });
-
-    // GET /api/gains — current pilot gains
-    server.on("/api/gains", HTTP_GET, [](AsyncWebServerRequest* request) {
-        float kp, ki, kd;
-        pilot_manager_get_gains(kp, ki, kd);
-
-        JsonDocument doc;
-        doc["kp"] = kp;
-        doc["ki"] = ki;
-        doc["kd"] = kd;
-        doc["pilot_type"] = (int)pilot_manager_get_type();
-
-        String response;
-        serializeJson(doc, response);
-        request->send(200, "application/json", response);
-    });
+    server.addHandler(&events);
 
     // POST /api/gains — set gains
     server.on("/api/gains", HTTP_POST,
@@ -149,47 +103,74 @@ void web_init() {
         }
     );
 
-    // POST /api/calibrate/center — set rudder center position
+    // Calibration endpoints
     server.on("/api/calibrate/center", HTTP_POST, [](AsyncWebServerRequest* request) {
         actuator_calibrate_center();
         request->send(200, "application/json", "{\"ok\":true}");
     });
-
-    // POST /api/calibrate/port — set rudder port limit
     server.on("/api/calibrate/port", HTTP_POST, [](AsyncWebServerRequest* request) {
         actuator_calibrate_port();
         request->send(200, "application/json", "{\"ok\":true}");
     });
-
-    // POST /api/calibrate/stbd — set rudder starboard limit
     server.on("/api/calibrate/stbd", HTTP_POST, [](AsyncWebServerRequest* request) {
         actuator_calibrate_stbd();
         request->send(200, "application/json", "{\"ok\":true}");
     });
-
-    // POST /api/calibrate/linearise — equalise port/stbd ranges
     server.on("/api/calibrate/linearise", HTTP_POST, [](AsyncWebServerRequest* request) {
         actuator_calibration_linearise();
         request->send(200, "application/json", "{\"ok\":true}");
     });
 
-    // GET /api/calibrate — current calibration values + live ADC reading
-    server.on("/api/calibrate", HTTP_GET, [](AsyncWebServerRequest* request) {
-        uint32_t center, port, stbd;
-        actuator_get_calibration(center, port, stbd);
-
-        JsonDocument doc;
-        doc["center_mv"] = center;
-        doc["port_mv"] = port;
-        doc["stbd_mv"] = stbd;
-        doc["live_mv"] = actuator_read_raw_mv();
-
-        String response;
-        serializeJson(doc, response);
-        request->send(200, "application/json", response);
-    });
-
     server.begin();
+}
+
+// Build combined JSON for SSE push
+static void build_sse_json(char* buf, size_t len, const AppState& s) {
+    float polar_pct = 0.0f;
+    if (s.tws > 1.0f && s.stw > 0.1f) {
+        polar_pct = polar_get_performance_ratio(fabsf(s.twa), s.tws, s.stw) * 100.0f;
+    }
+
+    float g_kp, g_ki, g_kd;
+    pilot_manager_get_gains(g_kp, g_ki, g_kd);
+    float confidence = pilot_manager_get_adaptive_confidence();
+    float g_kr = 0.0f, g_kd_plant = 0.0f;
+    pilot_manager_get_plant_params(g_kr, g_kd_plant);
+
+    uint32_t center, port_mv, stbd;
+    actuator_get_calibration(center, port_mv, stbd);
+
+    snprintf(buf, len,
+        "{"
+        "\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"yaw_rate\":%.2f,"
+        "\"awa\":%.1f,\"aws\":%.1f,\"twa\":%.1f,\"tws\":%.1f,"
+        "\"stw\":%.1f,\"sog\":%.1f,\"cog\":%.1f,"
+        "\"rudder_actual\":%.3f,\"rudder_target\":%.3f,"
+        "\"pilot_mode\":%d,\"pilot_type\":%d,"
+        "\"target_value\":%.1f,\"fault_code\":%d,"
+        "\"clutch_engaged\":%s,\"clutch_requested\":%s,"
+        "\"motor_current\":%.2f,\"motor_current_avg\":%.2f,\"supply_voltage\":%.1f,"
+        "\"polar_pct\":%.0f,"
+        "\"gains_kp\":%.3f,\"gains_ki\":%.3f,\"gains_kd\":%.3f,"
+        "\"adaptive_confidence\":%.3f,"
+        "\"plant_kr\":%.4f,\"plant_kd\":%.4f,"
+        "\"cal_center\":%u,\"cal_port\":%u,\"cal_stbd\":%u,\"cal_live\":%u"
+        "}",
+        s.heading, s.pitch, s.roll, s.yaw_rate,
+        s.awa, s.aws, s.twa, s.tws,
+        s.stw, s.sog, s.cog,
+        s.rudder_actual, s.rudder_target,
+        (int)s.pilot_mode, (int)s.pilot_type,
+        s.target_value, (int)s.fault_code,
+        s.clutch_engaged ? "true" : "false",
+        s.clutch_requested ? "true" : "false",
+        s.motor_current, s.motor_current_avg, s.supply_voltage,
+        polar_pct,
+        g_kp, g_ki, g_kd,
+        confidence,
+        g_kr, g_kd_plant,
+        center, port_mv, stbd, actuator_read_raw_mv()
+    );
 }
 
 void web_apply_commands(AppState& state) {
@@ -201,6 +182,9 @@ void web_apply_commands(AppState& state) {
         state.target_value = cmd_target;
         state.clutch_requested = (cmd_mode != MODE_STANDBY);
         state.last_pilot_ms = millis();  // prevent watchdog on engage
+        if (cmd_mode == MODE_VMG_UP || cmd_mode == MODE_VMG_DOWN) {
+            pilot_manager_latch_tack(state.twa);
+        }
         pilot_manager_set_mode(cmd_mode, cmd_target);
     }
 
@@ -213,6 +197,15 @@ void web_apply_commands(AppState& state) {
     if (cmd_gains_change) {
         cmd_gains_change = false;
         pilot_manager_set_gains(cmd_kp, cmd_ki, cmd_kd);
+    }
+
+    // Push SSE at 5 Hz
+    uint32_t now = millis();
+    if (events.count() > 0 && now - last_sse_ms >= SSE_INTERVAL_MS) {
+        last_sse_ms = now;
+        char buf[1024];
+        build_sse_json(buf, sizeof(buf), state);
+        events.send(buf, "state", now);
     }
 }
 

@@ -20,6 +20,7 @@
 #include "n2k.h"
 #include "actuator.h"
 #include "pilot_manager.h"
+#include "seatalk.h"
 #include "web.h"
 
 static AppState state;
@@ -69,8 +70,9 @@ void loop() {
     // NMEA2000 parse — every loop iteration
     n2k_update(state);
 
-    // Apply pending web commands
+    // Apply pending web and p70 commands
     web_apply_commands(state);
+    seatalk_apply_commands(state);
 
     // IMU read at 20Hz
     if (now - last_imu_ms >= IMU_INTERVAL_MS) {

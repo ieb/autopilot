@@ -1,6 +1,7 @@
 #if !defined(NATIVE_BUILD) || defined(HAL_SIM)
 
 #include "n2k.h"
+#include "seatalk.h"
 #include "config.h"
 #include <math.h>
 
@@ -37,16 +38,27 @@ void n2k_init() {
     NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode);
     NMEA2000.SetMsgHandler(msg_handler);
 
-    // Transmit PGNs
-    const unsigned long txPGNs[] = {127245UL, 127237UL, 0};
+    // Transmit PGNs: standard + Seatalk proprietary
+    const unsigned long txPGNs[] = {
+        127245UL, 127237UL,           // Rudder, Heading/Track Control
+        65379UL, 65359UL, 65360UL, 65345UL,  // Seatalk Pilot Mode/Heading/Locked/Wind
+        0
+    };
     NMEA2000.ExtendTransmitMessages(txPGNs);
 
     NMEA2000.Open();
+
+    seatalk_init();
 }
 
 void n2k_update(AppState& state) {
     g_state = &state;
     NMEA2000.ParseMessages();
+}
+
+// Public: send a message via the NMEA2000 instance (used by seatalk.cpp)
+void n2k_send_msg(tN2kMsg& msg) {
+    NMEA2000.SendMsg(msg);
 }
 
 void n2k_send(const AppState& state) {
@@ -101,9 +113,16 @@ void n2k_send(const AppState& state) {
         DegToRad(state.heading)                 // vessel heading
     );
     NMEA2000.SendMsg(htc_msg);
+
+    // Seatalk proprietary PGNs for p70 display
+    seatalk_send(state);
 }
 
 static void handle_msg(const tN2kMsg& msg) {
+    // Try Seatalk handler first for proprietary PGNs
+    if (seatalk_handle_msg(msg.Data, msg.DataLen, msg.PGN, msg.Source, *g_state))
+        return;
+
     switch (msg.PGN) {
         case 130306: parse_wind(msg, *g_state); break;
         case 128259: parse_stw(msg, *g_state); break;
@@ -177,8 +196,10 @@ static void parse_heading(const tN2kMsg& msg, AppState& state) {
 
     if (ParseN2kHeading(msg, sid, heading, deviation, variation, ref)) {
         state.n2k_heading = RadToDeg(heading);
-        // Snapshot IMU heading at this instant so imu_read() can compute delta
-        state.imu_heading_at_n2k = state.heading;
+        // Snapshot raw IMU heading so imu_read() can compute delta correctly.
+        // Must use raw IMU, not fused heading — otherwise when both sources
+        // report the same value, the delta is doubled.
+        state.imu_heading_at_n2k = state.imu_raw_heading;
         state.n2k_heading_valid = true;
         state.n2k_heading_ms = millis();
     }

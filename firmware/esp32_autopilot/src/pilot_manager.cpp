@@ -17,10 +17,16 @@ static Preferences prefs;
 static PDPilot pd_pilot(DEFAULT_KP, DEFAULT_KD);
 static PIDPilot pid_pilot(DEFAULT_KP, DEFAULT_KI, DEFAULT_KD);
 static SmoothPilot smooth_pilot(&pd_pilot, 1.0f / PILOT_RATE_HZ);
-static AdaptivePilot adaptive_pilot(&pd_pilot, false, 1.0f / PILOT_RATE_HZ);
+static AdaptivePilot adaptive_pilot(&pd_pilot, 1.0f / PILOT_RATE_HZ,
+    /* q_diag */ 1e-4f, /* r_scalar */ 0.5f,
+    /* omega_n */ 0.6f, /* zeta */ 0.9f,
+    /* kr_init */ 0.4f, /* kd_plant_init */ 0.5f);
 
 static BasePilot* active_pilot = &pd_pilot;
 static PilotType active_type = PILOT_PD;
+
+// VMG tack latch: +1 = starboard tack (TWA positive), -1 = port tack
+static int vmg_tack_sign = 1;
 
 // Wrap heading difference to [-180, 180]
 static float wrap_180(float angle) {
@@ -84,14 +90,15 @@ void pilot_manager_update(AppState& state) {
         return;
     }
 
-    // For VMG modes, update target TWA from polar each cycle
+    // For VMG modes, update target TWA from polar each cycle.
+    // Tack side is latched on mode entry and only changes via explicit tack command
+    // to prevent oscillation near dead upwind/downwind where TWA sign flips.
     if (state.pilot_mode == MODE_VMG_UP) {
         PolarResult r = polar_get_optimal_vmg_upwind(state.tws);
-        // Preserve tack side: if TWA is negative (port tack), target is negative
-        state.target_value = (state.twa < 0) ? -r.optimal_twa : r.optimal_twa;
+        state.target_value = vmg_tack_sign * r.optimal_twa;
     } else if (state.pilot_mode == MODE_VMG_DOWN) {
         PolarResult r = polar_get_optimal_vmg_downwind(state.tws);
-        state.target_value = (state.twa < 0) ? -r.optimal_twa : r.optimal_twa;
+        state.target_value = vmg_tack_sign * r.optimal_twa;
     }
 
     float heading_error = compute_heading_error(state);
@@ -148,6 +155,20 @@ void pilot_manager_set_type(PilotType type) {
 void pilot_manager_set_mode(PilotMode mode, float target) {
     // Reset pilot state on mode change
     active_pilot->reset();
+
+    // For VMG modes, latch tack side from the target value provided
+    // (web/p70 sets target=0, so we use current TWA sign at call site instead)
+    // The caller should set state.target_value appropriately before calling.
+    // For VMG, the target passed in is typically 0 — we'll latch from TWA
+    // in pilot_manager_update on the first cycle. Pre-set a reasonable default.
+}
+
+void pilot_manager_latch_tack(float twa) {
+    vmg_tack_sign = (twa >= 0) ? 1 : -1;
+}
+
+void pilot_manager_tack() {
+    vmg_tack_sign = -vmg_tack_sign;
 }
 
 void pilot_manager_set_gains(float kp, float ki, float kd) {
@@ -163,17 +184,39 @@ void pilot_manager_set_gains(float kp, float ki, float kd) {
 }
 
 void pilot_manager_get_gains(float& kp, float& ki, float& kd) {
-    if (active_type == PILOT_ADAPTIVE) {
-        kp = adaptive_pilot.get_kp();
-        ki = adaptive_pilot.get_ki();
-        kd = adaptive_pilot.get_kd();
-    } else {
-        kp = pd_pilot.kp;
-        ki = pid_pilot.ki;
-        kd = pd_pilot.kd;
+    switch (active_type) {
+        case PILOT_ADAPTIVE:
+            kp = adaptive_pilot.get_kp();
+            ki = adaptive_pilot.get_ki();
+            kd = adaptive_pilot.get_kd();
+            break;
+        case PILOT_PID:
+            kp = pid_pilot.kp;
+            ki = pid_pilot.ki;
+            kd = pid_pilot.kd;
+            break;
+        case PILOT_PD:
+        case PILOT_SMOOTH:
+        default:
+            kp = pd_pilot.kp;
+            ki = 0.0f;
+            kd = pd_pilot.kd;
+            break;
     }
 }
 
 PilotType pilot_manager_get_type() {
     return active_type;
+}
+
+float pilot_manager_get_adaptive_confidence() {
+    if (active_type != PILOT_ADAPTIVE) return -1.0f;
+    return adaptive_pilot.get_confidence();
+}
+
+bool pilot_manager_get_plant_params(float& kr, float& kd_plant) {
+    if (active_type != PILOT_ADAPTIVE) return false;
+    kr = adaptive_pilot.get_kr();
+    kd_plant = adaptive_pilot.get_kd_plant();
+    return true;
 }

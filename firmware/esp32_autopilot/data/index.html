@@ -74,6 +74,16 @@
   </div>
 
   <div class="card full">
+    <div class="label">Actuator</div>
+    <div class="row" style="margin-top:6px">
+      <span>Clutch: <b id="clutch_state" class="ok">Disengaged</b></span>
+      <span>Current: <b id="motor_current">0.00</b><span class="unit">A</span></span>
+      <span>Avg (5s): <b id="motor_current_avg">0.00</b><span class="unit">A</span></span>
+      <span>Supply: <b id="supply_voltage">0.0</b><span class="unit">V</span></span>
+    </div>
+  </div>
+
+  <div class="card full">
     <div class="label">Mode</div>
     <div style="margin-top:6px">
       <button id="pm0" class="standby" onclick="setMode(0,0)">Standby</button>
@@ -107,6 +117,57 @@
       <span>Kd <input type="number" id="kd" step="0.1" value="1.5"></span>
       <button onclick="setGains()">Set</button>
     </div>
+    <div id="adaptive_gains" style="display:none; margin-top:8px; padding-top:8px; border-top:1px solid #334;">
+      <div style="font-size:0.75em; color:#888; text-transform:uppercase; margin-bottom:4px;">Adaptive (Plant ID → Pole Placement)</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; font-size:0.85em;">
+        <div class="row"><span>K<sub>r</sub> (rudder eff.)</span> <b id="plant_kr">-</b></div>
+        <div class="row"><span>K<sub>d</sub> (yaw damp.)</span> <b id="plant_kd">-</b></div>
+      </div>
+      <div style="margin-top:6px; font-size:0.75em; color:#888; text-transform:uppercase;">Derived PD Gains</div>
+      <div class="row" style="margin-top:4px;">
+        <span>Kp <b id="adapted_kp">-</b></span>
+        <span>Kd <b id="adapted_kd">-</b></span>
+      </div>
+      <div style="margin-top:6px;">
+        <div class="row">
+          <span class="label">Confidence</span>
+          <span id="confidence_val" style="font-size:0.85em;">-</span>
+        </div>
+        <div class="bar-bg" style="margin-top:4px;">
+          <div class="bar-fill" id="confidence_bar" style="width:0%;background:#0af;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card full" id="socket_card" style="display:none">
+    <div class="label">External Simulator</div>
+    <div class="row" style="margin-top:6px">
+      <span id="sock_status" class="ok">Connected</span>
+    </div>
+    <div style="margin-top:8px; display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; font-size:0.85em;">
+      <div class="row"><span class="label" style="min-width:80px">CAN RX</span> <b id="sock_can_rx">0</b></div>
+      <div class="row"><span class="label" style="min-width:80px">CAN TX</span> <b id="sock_can_tx">0</b></div>
+      <div class="row"><span class="label" style="min-width:80px">IMU RX</span> <b id="sock_imu_rx">0</b></div>
+      <div class="row"><span class="label" style="min-width:80px">IMU Rate</span> <b id="sock_imu_rate">-</b></div>
+    </div>
+    <div style="margin-top:10px; font-size:0.75em; color:#888; text-transform:uppercase;">PGN Counts</div>
+    <div style="margin-top:4px; display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; font-size:0.85em;">
+      <div class="row"><span>130306 Wind</span> <b id="pgn_wind">0</b></div>
+      <div class="row"><span>128259 STW</span> <b id="pgn_stw">0</b></div>
+      <div class="row"><span>129026 COG/SOG</span> <b id="pgn_cog">0</b></div>
+      <div class="row"><span>127250 Heading</span> <b id="pgn_hdg">0</b></div>
+      <div class="row"><span>Other</span> <b id="pgn_other">0</b></div>
+    </div>
+    <div style="margin-top:10px; font-size:0.75em; color:#888; text-transform:uppercase;">Socket IMU (raw from external sim)</div>
+    <div style="margin-top:4px; display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px 12px; font-size:0.85em;">
+      <div>Hdg <b id="simu_hdg">-</b>&deg;</div>
+      <div>Roll <b id="simu_roll">-</b>&deg;</div>
+      <div>Pitch <b id="simu_pitch">-</b>&deg;</div>
+      <div>Gyro X <b id="simu_gx">-</b></div>
+      <div>Gyro Y <b id="simu_gy">-</b></div>
+      <div>Gyro Z <b id="simu_gz">-</b>&deg;/s</div>
+    </div>
   </div>
 
   <div class="card full">
@@ -132,51 +193,169 @@ const FAULTS = ['OK','Overcurrent','Stall','Position Limit','Sensor','Watchdog',
 
 function fmt(v, d) { return v !== undefined && v !== null ? v.toFixed(d) : '---'; }
 
-async function poll() {
-  try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
-    document.getElementById('heading').textContent = fmt(d.heading, 1) + '\u00B0';
-    document.getElementById('target').textContent = fmt(d.target_value, 1) + '\u00B0';
-    document.getElementById('awa').textContent = fmt(d.awa, 0) + '\u00B0';
-    document.getElementById('aws').textContent = fmt(d.aws, 1);
-    document.getElementById('twa').textContent = fmt(d.twa, 0) + '\u00B0';
-    document.getElementById('tws').textContent = fmt(d.tws, 1);
-    document.getElementById('stw').textContent = fmt(d.stw, 1);
-    document.getElementById('polar_pct').textContent = d.polar_pct ? fmt(d.polar_pct, 0) : '---';
-    document.getElementById('rudder_target').textContent = fmt(d.rudder_target * 25, 1);
-    document.getElementById('rudder_actual').textContent = fmt(d.rudder_actual * 25, 1);
-    document.getElementById('mode_name').textContent = MODES[d.pilot_mode] || 'Unknown';
+// Track previous socket IMU count for rate calculation
+let prevImuRx = null;
+let prevImuTime = null;
+let lastPilotType = -1;
 
-    // Rudder bar
-    const pct = (d.rudder_actual + 1) / 2 * 100;
-    const bar = document.getElementById('rudder_bar');
-    if (d.rudder_actual >= 0) {
-      bar.style.width = (d.rudder_actual * 50) + '%';
-      bar.style.marginLeft = '50%';
+function handleState(d) {
+  document.getElementById('heading').textContent = fmt(d.heading, 1) + '\u00B0';
+  document.getElementById('target').textContent = fmt(d.target_value, 1) + '\u00B0';
+  document.getElementById('awa').textContent = fmt(d.awa, 0) + '\u00B0';
+  document.getElementById('aws').textContent = fmt(d.aws, 1);
+  document.getElementById('twa').textContent = fmt(d.twa, 0) + '\u00B0';
+  document.getElementById('tws').textContent = fmt(d.tws, 1);
+  document.getElementById('stw').textContent = fmt(d.stw, 1);
+  document.getElementById('polar_pct').textContent = d.polar_pct ? fmt(d.polar_pct, 0) : '---';
+  document.getElementById('rudder_target').textContent = fmt(d.rudder_target * 25, 1);
+  document.getElementById('rudder_actual').textContent = fmt(d.rudder_actual * 25, 1);
+  document.getElementById('mode_name').textContent = MODES[d.pilot_mode] || 'Unknown';
+
+  // Rudder bar
+  const bar = document.getElementById('rudder_bar');
+  if (d.rudder_actual >= 0) {
+    bar.style.width = (d.rudder_actual * 50) + '%';
+    bar.style.marginLeft = '50%';
+  } else {
+    bar.style.width = (-d.rudder_actual * 50) + '%';
+    bar.style.marginLeft = (50 + d.rudder_actual * 50) + '%';
+  }
+
+  const fd = document.getElementById('fault_display');
+  fd.textContent = FAULTS[d.fault_code] || 'Unknown';
+  fd.className = d.fault_code === 0 ? 'ok' : 'fault';
+
+  // Actuator / clutch
+  const cs = document.getElementById('clutch_state');
+  if (d.clutch_engaged) {
+    cs.textContent = 'Engaged';
+    cs.className = 'ok';
+  } else if (d.clutch_requested) {
+    cs.textContent = 'Engaging...';
+    cs.className = 'fault';
+  } else {
+    cs.textContent = 'Disengaged';
+    cs.style.color = '#888';
+    cs.className = '';
+  }
+  document.getElementById('motor_current').textContent = d.motor_current.toFixed(2);
+  document.getElementById('motor_current_avg').textContent = d.motor_current_avg.toFixed(2);
+  document.getElementById('supply_voltage').textContent = d.supply_voltage.toFixed(1);
+
+  // Highlight active pilot type button
+  for (let i = 0; i < 4; i++) {
+    const btn = document.getElementById('pt' + i);
+    if (btn) btn.className = (i === d.pilot_type) ? 'active' : '';
+  }
+
+  // Highlight active mode button
+  for (let i = 0; i < 6; i++) {
+    const btn = document.getElementById('pm' + i);
+    if (btn) btn.className = (i === d.pilot_mode) ? 'active' : (i === 0 ? 'standby' : '');
+  }
+
+  // Gains: only auto-update inputs on pilot type change (not continuously)
+  // For adaptive pilot, gains change dynamically so we update the read-only display below
+  if (d.pilot_type !== lastPilotType && d.gains_kp !== undefined) {
+    lastPilotType = d.pilot_type;
+    document.getElementById('kp').value = d.gains_kp.toFixed(2);
+    document.getElementById('ki').value = d.gains_ki.toFixed(3);
+    document.getElementById('kd').value = d.gains_kd.toFixed(2);
+  }
+
+  // Adaptive gains display
+  const ag = document.getElementById('adaptive_gains');
+  if (d.adaptive_confidence >= 0) {
+    ag.style.display = '';
+    document.getElementById('plant_kr').textContent = d.plant_kr.toFixed(4);
+    document.getElementById('plant_kd').textContent = d.plant_kd.toFixed(4);
+    document.getElementById('adapted_kp').textContent = d.gains_kp.toFixed(2);
+    document.getElementById('adapted_kd').textContent = d.gains_kd.toFixed(2);
+    const conf = d.adaptive_confidence;
+    document.getElementById('confidence_val').textContent = (conf * 100).toFixed(1) + '%';
+    document.getElementById('confidence_bar').style.width = (conf * 100) + '%';
+    const r = Math.round(255 * (1 - conf));
+    const g = Math.round(255 * conf);
+    document.getElementById('confidence_bar').style.background = 'rgb(' + r + ',' + g + ',0)';
+  } else {
+    ag.style.display = 'none';
+  }
+
+  // Calibration (included in SSE stream)
+  if (d.cal_center !== undefined) {
+    document.getElementById('cal_live').textContent = d.cal_live;
+    document.getElementById('cal_center').textContent = d.cal_center;
+    document.getElementById('cal_port').textContent = d.cal_port;
+    document.getElementById('cal_stbd').textContent = d.cal_stbd;
+  }
+
+  // Socket stats (HAL_SIM only, fields present when socket exists)
+  const card = document.getElementById('socket_card');
+  if (d.sock_connected !== undefined) {
+    if (d.sock_connected) {
+      card.style.display = '';
+      document.getElementById('sock_status').textContent = 'Connected';
+      document.getElementById('sock_status').className = 'ok';
+      document.getElementById('sock_can_rx').textContent = d.sock_can_rx;
+      document.getElementById('sock_can_tx').textContent = d.sock_can_tx;
+      document.getElementById('sock_imu_rx').textContent = d.sock_imu_rx;
+
+      // Compute IMU message rate from delta
+      const now = Date.now();
+      if (prevImuRx !== null && prevImuTime !== null) {
+        const dt = (now - prevImuTime) / 1000;
+        if (dt > 0.1) {
+          const rate = (d.sock_imu_rx - prevImuRx) / dt;
+          document.getElementById('sock_imu_rate').textContent = rate.toFixed(0) + ' /s';
+          prevImuRx = d.sock_imu_rx;
+          prevImuTime = now;
+        }
+      } else {
+        prevImuRx = d.sock_imu_rx;
+        prevImuTime = now;
+      }
+
+      document.getElementById('pgn_wind').textContent = d.sock_pgn_wind;
+      document.getElementById('pgn_stw').textContent = d.sock_pgn_stw;
+      document.getElementById('pgn_cog').textContent = d.sock_pgn_cog_sog;
+      document.getElementById('pgn_hdg').textContent = d.sock_pgn_heading;
+      document.getElementById('pgn_other').textContent = d.sock_pgn_other;
+
+      document.getElementById('simu_hdg').textContent = d.sock_imu_heading.toFixed(1);
+      document.getElementById('simu_roll').textContent = d.sock_imu_roll.toFixed(1);
+      document.getElementById('simu_pitch').textContent = d.sock_imu_pitch.toFixed(1);
+      document.getElementById('simu_gx').textContent = d.sock_imu_gyro_x.toFixed(1);
+      document.getElementById('simu_gy').textContent = d.sock_imu_gyro_y.toFixed(1);
+      document.getElementById('simu_gz').textContent = d.sock_imu_gyro_z.toFixed(1);
     } else {
-      bar.style.width = (-d.rudder_actual * 50) + '%';
-      bar.style.marginLeft = (50 + d.rudder_actual * 50) + '%';
+      card.style.display = 'none';
+      prevImuRx = null;
+      prevImuTime = null;
     }
-
-    const fd = document.getElementById('fault_display');
-    fd.textContent = FAULTS[d.fault_code] || 'Unknown';
-    fd.className = d.fault_code === 0 ? 'ok' : 'fault';
-
-    // Highlight active pilot type button
-    for (let i = 0; i < 4; i++) {
-      const btn = document.getElementById('pt' + i);
-      if (btn) btn.className = (i === d.pilot_type) ? 'active' : '';
-    }
-
-    // Highlight active mode button
-    for (let i = 0; i < 6; i++) {
-      const btn = document.getElementById('pm' + i);
-      if (btn) btn.className = (i === d.pilot_mode) ? 'active' : (i === 0 ? 'standby' : '');
-    }
-  } catch(e) {}
+  } else {
+    card.style.display = 'none';
+  }
 }
 
+// SSE connection with auto-reconnect
+function connectSSE() {
+  const es = new EventSource('/api/events');
+
+  es.addEventListener('state', function(e) {
+    try {
+      const d = JSON.parse(e.data);
+      handleState(d);
+    } catch(err) {}
+  });
+
+  es.onerror = function() {
+    es.close();
+    // Reconnect after 2 seconds
+    setTimeout(connectSSE, 2000);
+  };
+}
+
+// Command functions (still use POST)
 async function setMode(mode, target) {
   await fetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({mode, target})});
@@ -190,7 +369,6 @@ function setModePrompt(mode, label) {
 async function setPilot(type) {
   await fetch('/api/pilot', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({type})});
-  pollGains();
 }
 
 async function setGains() {
@@ -203,36 +381,9 @@ async function setGains() {
 
 async function calibrate(what) {
   await fetch('/api/calibrate/' + what, {method:'POST'});
-  pollCal();
 }
 
-async function pollCal() {
-  try {
-    const r = await fetch('/api/calibrate');
-    const d = await r.json();
-    document.getElementById('cal_live').textContent = d.live_mv;
-    document.getElementById('cal_center').textContent = d.center_mv;
-    document.getElementById('cal_port').textContent = d.port_mv;
-    document.getElementById('cal_stbd').textContent = d.stbd_mv;
-  } catch(e) {}
-}
-
-async function pollGains() {
-  try {
-    const r = await fetch('/api/gains');
-    const d = await r.json();
-    document.getElementById('kp').value = d.kp.toFixed(2);
-    document.getElementById('ki').value = d.ki.toFixed(3);
-    document.getElementById('kd').value = d.kd.toFixed(2);
-  } catch(e) {}
-}
-
-setInterval(poll, 500);
-setInterval(pollCal, 1000);
-setInterval(pollGains, 2000);
-poll();
-pollCal();
-pollGains();
+connectSSE();
 </script>
 </body>
 </html>

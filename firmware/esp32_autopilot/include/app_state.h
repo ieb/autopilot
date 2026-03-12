@@ -65,13 +65,15 @@ struct AppState {
 
     // N2K heading fusion
     float n2k_heading;           // deg, last heading from PGN 127250
-    float imu_heading_at_n2k;    // deg, IMU heading snapshot at time of N2K update
+    float imu_heading_at_n2k;    // deg, raw IMU heading snapshot at time of N2K update
+    float imu_raw_heading;       // deg, last raw IMU heading (before fusion)
     bool n2k_heading_valid;      // true after first N2K heading received
 
     // Actuator (updated at 50Hz)
     float rudder_actual;     // normalized -1..+1
     float rudder_velocity;   // normalized/s
-    float motor_current;     // Amps
+    float motor_current;     // Amps (instantaneous)
+    float motor_current_avg; // Amps (5s EMA)
     float supply_voltage;    // Volts
 
     // Pilot output
