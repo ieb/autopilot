@@ -42,6 +42,7 @@ void n2k_init() {
     const unsigned long txPGNs[] = {
         127245UL, 127237UL,           // Rudder, Heading/Track Control
         65379UL, 65359UL, 65360UL, 65345UL,  // Seatalk Pilot Mode/Heading/Locked/Wind
+        126720UL, 126208UL,           // Pilot status heartbeat + p70 poll responses + ACK
         0
     };
     NMEA2000.ExtendTransmitMessages(txPGNs);

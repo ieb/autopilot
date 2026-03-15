@@ -1,0 +1,433 @@
+# Bus analysis
+
+This is the results of an alysis performed by Claud on a resording of traffic on the N2K bus while tied to the dock.
+It mostly focuses on the messages between the p70 head, the EV-1 and ACU200 to understand the dependencies.
+
+Devices on the N2K Bus                                                                  
+                                                                                                                          
+  ┌────────┬────────────────────────────────┬──────────┬──────────┐                                                       
+  │ Source │             Device             │  Model   │    SW    │                                                       
+  ├────────┼────────────────────────────────┼──────────┼──────────┤                                                       
+  │ 0      │ Raymarine p70 Display          │ E22166   │ 3.09     │                                                       
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 1      │ Raymarine i70 Display          │ E22172   │ 3.20     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 2      │ Raymarine i70 Display #2       │ E22172   │ 3.20     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 3      │ Raymarine e7 Chartplotter      │ E62354   │ 19.03    │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 28     │ Baro Sensor (custom)           │ Baro     │ 1.2.3.4  │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 30     │ 5Hz GNSS (custom)              │ 5Hz GNSS │ —        │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 50     │ N2k WiFi Bridge (custom)       │ —        │ 1.0.0.10 │
+  ├────────┼───────────────────────────────┼──────────┼──────────┤
+  │ 110    │ i60 Wind Instrument            │ E70061   │ 1.06     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 182    │ Raymarine ACU200 Actuator      │ E70099A  │ 3.12     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 199    │ Raymarine iTC5 Converter       │ E70010   │ 1.12     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 205    │ Raymarine EV-1 Course Computer │ E70096   │ 3.02     │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 206    │ B921 AIS Class B               │ —        │ —        │
+  ├────────┼────────────────────────────────┼──────────┼──────────┤
+  │ 207    │ SeaTalk-STNG Converter         │ E22158   │ 2.03     │
+  └────────┴────────────────────────────────┴──────────┴──────────┘
+
+  Critical Finding: p70 does NOT use PGN 126720 keystrokes
+
+  Zero keystroke commands (F0 81 86 21) found in the entire log. The p70 (Source 0) communicates exclusively via PGN
+  126208 (NMEA Command Group):
+
+  - CMD→PGN 65379 (mode change): 13 messages — Standby, Auto, Wind
+  - CMD→PGN 65360 (heading set): 19 messages — +1°/+10° increments
+  - CMD→PGN 65345 (wind datum): 53 messages — wind target adjustments
+  - REQUEST (reads): 1,120 messages — polling EV-1 for state
+
+  The p70's PGN 126720 traffic (sig f0819000, 864 msgs) is just a status byte 3b 9f f0 81 90 00 03 — likely an
+  acknowledgment/heartbeat, not keystrokes.
+
+  Our firmware's seatalk.cpp parse_keystroke() is looking for a pattern that never appears on the real bus. The p70 uses
+  PGN 126208 Command Group to tell the EV-1 what to do — it sends structured NMEA commands targeting specific proprietary
+  PGNs.
+
+  PGN 126720 — Dominated by EV-1 (Source 205)
+
+  980,735 CAN frames → 217,257 reassembled messages. The EV-1 broadcasts ~29 different f088XX00 sub-types at high rate.
+  These are 27-byte status/telemetry messages — likely the EV-1's internal sensor fusion data (compass, rate-of-turn,
+  attitude, calibration). Each sub-type runs at ~840 messages across the log (~1Hz each, with 29 channels = ~29 Hz
+  aggregate).
+
+  PGN 65379 (Pilot Mode) Format Mismatch
+
+  The real EV-1 sends pilot mode as:
+  3b 9f [mode] [mode_hi] [submode] [submode_hi] 02 ff
+  Our firmware sends it differently (proprietary field byte at position 2). The p70 may not recognize our pilot mode
+  broadcasts.
+
+  ---
+  This means the external_sim.py p70 emulation is sending the wrong message format. The real p70 uses PGN 126208 commands,
+   not PGN 126720 keystroke codes. Want me to fix the seatalk.cpp and external_sim.py to match the real p70 protocol?
+
+TODO ^^^
+
+
+
+what messages does the ACU emit (source 182)                                                                            
+                                               
+⏺ From the analysis output, Source 182 (Raymarine ACU200 Actuator Unit) sends:                                            
+                                         
+  ┌────────┬─────────────────────────────┬────────┐                                                                       
+  │  PGN   │            Name             │ Count  │         
+  ├────────┼─────────────────────────────┼────────┤                                                                       
+  │ 127237 │ Heading/Track Control       │ 28,692 │         
+  ├────────┼─────────────────────────────┼────────┤
+  │ 127245 │ Rudder                      │ 17,940 │
+  ├───────┼─────────────────────────────┼────────┤
+  │ 126720 │ Raymarine Proprietary       │ 1,040  │
+  ├────────┼─────────────────────────────┼────────┤
+  │ 59904  │ ISO Request                 │ 77     │
+  ├────────┼─────────────────────────────┼────────┤
+  │ 126996 │ Product Information         │ 40     │
+  ├────────┼─────────────────────────────┼────────┤
+  │ 126993 │ Heartbeat                   │ 30     │
+  ├────────┼─────────────────────────────┼────────┤
+  │ 126464 │ PGN List (Transmit/Receive) │ 15     │
+  ├────────┼─────────────────────────────┼────────┤
+  │ 60928  │ ISO Address Claim           │ 1      │
+  └────────┴─────────────────────────────┴────────┘
+
+  The interesting ones:
+
+  - 127237 (Heading/Track Control) at ~28.7K — the ACU is broadcasting steering status at high rate (~15Hz). This is what
+  the p70 reads to show current autopilot state.
+  - 127245 (Rudder) at ~18K — rudder position feedback (~10Hz)
+  - 126720 (Proprietary) — 344 reassembled messages, almost all with signature 5c0f0201 (15 bytes): 3b 9f 5c 0f 02 01 ff
+  01 06 ff 02 ff 01 06 ff. This is likely the ACU's internal status (drive type, clutch state, current limits, etc.). Plus
+   1 product info variant (5c003a07).
+
+  The ACU is essentially a slave — it receives steering commands from the EV-1 (Source 205) and reports back rudder
+  position and drive status. Our autopilot replaces the EV-1, so we need to send the PGNs the ACU expects to receive (from
+   the EV-1's traffic) and read the ACU's 127245 rudder feedback.
+
+❯ The intention is that our pilot would replace the ACU and the EV-1 however since the EV-1 also emits heading (check it  
+does) I think its harder to disconnect it from the bus, unless the BNO055 can be relied on to give an accurate magnetic   
+heading.                                                                                                                  
+                                                                                                                          
+⏺ Yes, the EV-1 (Source 205) is the sole heading source on the bus:                                                       
+                                                                                                                          
+  ┌────────┬───────────────────────────┬────────────────┐                                                           ▪   ─ 
+  │  PGN   │           Name            │      Rate      │
+  ├────────┼───────────────────────────┼────────────────┤                                                                 
+  │ 127250 │ Vessel Heading            │ 17,929 (~10Hz) │   
+  ├────────┼───────────────────────────┼────────────────┤
+  │ 127251 │ Rate of Turn              │ 17,929 (~10Hz) │
+  ├────────┼───────────────────────────┼────────────────┤
+  │ 127257 │ Attitude (Yaw/Pitch/Roll) │ 17,929 (~10Hz) │
+  ├────────┼───────────────────────────┼────────────────┤
+  │ 65359  │ Seatalk Pilot Heading     │ 17,929 (~10Hz) │
+  └────────┴───────────────────────────┴────────────────┘
+
+  No other device on the bus sends heading. The e7, i70s, p70 — they all depend on the EV-1 for heading data.
+
+  The EV-1 has a dedicated fluxgate compass, which is purpose-built for marine heading:
+  - Immune to acceleration/heel errors (fluxgate measures field direction, not inertial)
+  - Factory calibrated for marine magnetic environments
+  - Proven reliable on the swing circle
+
+  The BNO055's magnetometer is a different story on a boat:
+  - MEMS magnetometer is sensitive to hard/soft iron interference (engine, keel bolts, wiring)
+  - Needs careful calibration that can drift with heel angle and temperature
+  - The BNO055's NDOF fusion mode uses accelerometers to determine orientation, which gets confused by sustained heel and
+  wave acceleration
+  - Generally considered less reliable than a fluxgate for marine heading
+
+  Practical options:
+
+  1. Keep the EV-1 on the bus as heading source only — your pilot ignores the EV-1's steering commands and reads its
+  heading PGN 127250. The EV-1 stays in standby, just providing heading/attitude/ROT. The p70 and chartplotter keep
+  getting heading. Simplest path.
+  2. Replace EV-1 entirely — your pilot must broadcast PGN 127250, 127251, 127257 from the BNO055. Every device on the bus
+   depends on you for heading. Risky unless the BNO055 is well calibrated and proven.
+  3. Add a dedicated fluxgate (e.g. Airmar H2183) as an independent heading source on the bus, then disconnect the EV-1
+  entirely.
+
+  Option 1 seems safest — the EV-1 is a ~$300 puck that draws very little power and gives you a rock-solid heading. You'd
+  replace only the ACU (motor driver + clutch + rudder feedback), which is what your custom hardware actually does
+  differently.
+
+❯ Ok so lets keep Option 1. What does the p70 need from the EV-1 to work. It is asking for state message "REQUEST         
+(reads): 1,120 messages — polling EV-1 for state" can you find out what the content of the response is. I suspect the p70 
+ doesnt get a response it expects, then it will display the wrong information 
+
+
+                                                                                                                          
+⏺ Let me decode those REQUEST messages in detail and correlate them with responses from the EV-1.                         
+                                                                                                                          
+⏺ Write(scripts/analyze_p70_requests.py)                                                                            ▪   ─ 
+  ⎿  Wrote 473 lines to scripts/analyze_p70_requests.py                                   
+       1 #!/usr/bin/env python3                                                                                           
+       2 """                                                                                                              
+       3 Analyze p70 REQUEST messages (PGN 126208 FC=0x00) and EV-1 responses.                                            
+       4 Decode what the p70 is polling for and what it expects back.                                                     
+       5 """                                                
+       6
+       7 import struct
+       8 import math
+       9 from collections import defaultdict, Counter
+      10 from pathlib import Path
+     … +463 lines (ctrl+o to expand)
+
+⏺ Bash(uv run python scripts/analyze_p70_requests.py 2>&1)
+  ⎿  Total frames: 1,391,447                                                              
+     Reassembled 126208 messages: 1650
+     … +80 lines (ctrl+o to expand)                                                                                       
+                                                                                          
+⏺ This is very clear now. Here's what the p70 needs:                                                                      
+                                                                                                                          
+  p70 Protocol Summary
+                                                                                                                          
+  1. Polling (126208 REQUEST → PGN 126720) at 0.5 Hz        
+                                                                                                                          
+  The p70 continuously polls the EV-1 for proprietary status via PGN 126208 REQUEST targeting PGN 126720. Two alternating
+  patterns (558x and 552x), differing only in the last param bytes (1a 50 vs 23 50). These correspond to different EV-1
+  telemetry sub-types.
+
+  If the p70 doesn't get a response to these, it likely shows blank/error state on its display.
+
+  2. Commands (126208 COMMAND) — always absolute values
+
+  The p70 sends absolute target values, not deltas:
+  - +1° button → CMD→PGN 65360 with heading = current + 1° (p70 computes it)
+  - +10° button → same, with heading = current + 10°
+  - Mode change → CMD→PGN 65379 with mode/submode bytes
+  - Wind adjust → CMD→PGN 65345 with absolute wind datum angle
+
+  3. The EV-1 ACKs every command
+
+  Every p70 command gets a 126208 FC=0x02 acknowledge within 2-34ms, always with pgn_error=OK. Our pilot must send these
+  ACKs too, or the p70 may think commands are failing.
+
+  4. What we need to respond to
+
+  To make the p70 work with our pilot (keeping EV-1 on bus for heading):
+
+  ┌────────────────────────────────────────────┬───────────────────────────────────┐
+  │                Requirement                 │              Status               │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Process CMD→65379 (mode change)            │ Already in parse_mode_command() ✓ │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Process CMD→65360 (heading set)            │ Already in parse_mode_command() ✓ │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Process CMD→65345 (wind datum)             │ Missing — need to add             │
+  ├────────────────────────────────────────────┼───────────────────────────────────
+  │ Send ACK (126208 FC=0x02) for each command │ Missing — critical                │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Respond to REQUEST for PGN 126720 status   │ Missing — p70 display needs this  │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Broadcast PGN 65379 (pilot mode)           │ Already in seatalk_send() ✓       │
+  ├───────────────────────────────────────────┼───────────────────────────────────┤
+  │ Broadcast PGN 65359 (pilot heading)        │ Already in seatalk_send() ✓       │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Broadcast PGN 65360 (locked heading)       │ Already in seatalk_send() ✓       │
+  ├────────────────────────────────────────────┼───────────────────────────────────┤
+  │ Broadcast PGN 65345 (wind datum)           │ Already in seatalk_send() ✓       │
+  └────────────────────────────────────────────┴───────────────────────────────────┘
+
+  The keystroke parsing (PGN 126720 F0818621) can be removed entirely — the p70 never sends those. And the
+  parse_mode_command for heading adjustments already works since the p70 sends absolute heading via CMD→65360.
+
+  The big unknown is what the PGN 126720 response needs to contain for the p70 display to be happy. Want me to dig deeper
+  into the EV-1's 126720 response format to reverse-engineer what the p70 expects back?
+
+
+
+  OK, I've now read the complete analysis output. Here's where we left off — the deep analysis of EV-1 PGN 126720         
+  responses. Let me summarize the key findings:                                                                           
+                                                                                                                          
+  EV-1 PGN 126720 Analysis Summary                                                                                        
+                                                                                                                          
+  The EV-1 sends 217,257 PGN 126720 messages across these categories:                                                     
+                                                                                                                          
+  1. p70 REQUEST responses (direct answers to polling)      
+  - 6c1a5086 (537 msgs, ~0.2 Hz): Always constant — 3b 9f 6c 1a 50 86 01 86 01 86 01 ff 7f (13 bytes)
+  - 6c235064 (532 msgs, ~0.2 Hz): Always constant — 3b 9f 6c 23 50 64 64 64 00 (9 bytes)
+  - The p70 alternates 1a and 23 requests at ~0.5 Hz combined, and the EV-1 responds with these fixed payloads
+
+  2. Pilot status heartbeat (f081ae02)
+  - 1,729 msgs at ~1 Hz, 9 bytes
+  - Byte[6] = mode: 0x00=standby (1,487x), 0x01=auto (51x), 0x03=wind/track (190x)
+  - Bytes[7:8] always 0c a5 (except 1 startup msg)
+
+  3. Mode-dependent telemetry families
+
+  ┌──────────────────────┬────────────────────────────────────┬─────────────┬────────────────────────┐
+  │        Family        │            Modes active            │    Rate     │     Likely purpose     │
+  ├──────────────────────┼────────────────────────────────────┼─────────────┼────────────────────────┤
+  │ f0819c01/41/81/c1    │ STANDBY=c1, WIND=01/41/81          │ ~0.5-1 Hz   │ State-dependent status │
+  ├──────────────────────┼───────────────────────────────────┼─────────────┼────────────────────────┤
+  │ f081840 6/46/86/c6   │ STANDBY=c6, AUTO=86, WIND=06/46/86 │ ~0.5-0.6 Hz │ State-dependent status │
+  ├──────────────────────┼────────────────────────────────────┼─────────────┼────────────────────────┤
+  │ f0817f11/51/81/91/a1 │ WIND=a1/51/91, AUTO=11             │ ~0.4-2.2 Hz │ Steering telemetry     │
+  ├──────────────────────┼───────────────────────────────────┼─────────────┼────────────────────────┤
+  │ f081a456             │ Rare (57 msgs)                     │ ~0.02 Hz    │ Calibration?           │
+  └──────────────────────┴────────────────────────────────────┴─────────────┴────────────────────────┘
+
+  4. f088XX00 — massive sensor fusion / internal telemetry (the bulk: ~981K frames)
+  - 251 sub-types (0x00-0xFA), each ~839 messages
+  - Each at 0.3 Hz, cycling through all 251 channels sequentially
+  - The 27-byte variant (most common) has:
+    - Header: 3b 9f f0 88 [channel] 00
+    - Byte 6: length indicator (0x17 = 23 payload bytes)
+    - Bytes 7-26: int16 LE sensor values — fields include a counter (byte 7), two ~constant values (~165, ~-32),
+  heading-correlated values, and rate-like values
+  - The 67-byte variant contains IEEE 754 float32 values, several constant (e.g., 107375120.0 appears at byte 38 in every
+  sub-type — possibly a calibration constant)
+  - The 28-byte variant has float32 values at bytes 7-10 and 14-17 that appear duplicated at bytes 15-22, with 00 00 20 40
+   (= float 2.5) constant at bytes 19-22
+  - The 35-byte variant also has float32 values with several constants (9a 99 91 40 = 4.55, 2f dd 24 3e = 0.161, 43 c6 51
+  41 = 13.11)
+
+  5. p70 REQUEST format decoded:
+  00 00 ef 01 ff ff ff ff ff ff 04 01 3b 07 03 04 04 6c 05 [XX] 50
+  Where [XX] = 1a (558x), 23 (552x), 16 (9x), or 0f (1x). The rare 16 and 0f variants appear during startup/probing.
+
+  What this means for our firmware:
+
+  The f088XX00 data is internal EV-1 sensor fusion telemetry — the EV-1 is continuously broadcasting 251 channels of data
+  at ~0.3 Hz each. The p70 probably doesn't need most of this (it's more likely for Raymarine's diagnostic tools or
+  inter-device coordination). The key things the p70 needs from the pilot controller are:
+
+  1. f081ae02 heartbeat — 1 Hz, with correct mode byte
+  2. 6c1a and 6c23 responses — to its REQUEST polling (constant content is fine since boat was at dock)
+  3. PGN 65379 (pilot mode), 65359 (pilot heading), 65360 (locked heading) — standard Seatalk PGNs our firmware already
+  sends
+
+  The f088XX00 bulk traffic is likely not required for p70 operation — it's sensor telemetry the EV-1 broadcasts for its
+  own purposes (compass data, gyro rates, accelerometer readings, filter states).
+
+  Would you like me to dig deeper into any specific aspect — for example, trying to decode what physical values the
+  27-byte f088 messages represent by cross-referencing with known heading/roll data? Or should we move on to the question
+  of what changes our firmware needs?
+
+
+
+
+   Can you dig deeper into 27 byte f088 messages cross referencing with known data                                         
+                                                                                                                          
+⏺ I'll write a script that extracts the 27-byte f088 int16 fields alongside concurrent known sensor values from the EV-1's
+   own standard PGNs (heading 127250, rate of turn 127251, attitude 127257) to identify what each field represents.       
+                                                                                                                          
+⏺ Read 1 file (ctrl+o to expand)                                                                                          
+                                                                                                                          
+⏺ Good, I have the log reading infrastructure. Let me write a dedicated cross-reference script.
+                                                                                                                          
+⏺ Write(scripts/analyze_f088_fields.py)                                                                             ▪   ─ 
+  ⎿  Wrote 773 lines to scripts/analyze_f088_fields.py                                                                    
+       1 #!/usr/bin/env python3                                                                                           
+       2 """                                                                                                              
+       3 Cross-reference EV-1 f088XX00 27-byte messages with known sensor data                                            
+       4 to identify what each int16 field represents.                                                                    
+       5                                                    
+       6 Known EV-1 standard PGNs for ground truth:
+       7   127250 - Vessel Heading (magnetic, radians)
+       8   127251 - Rate of Turn (radians/s)
+       9   127257 - Attitude (yaw/pitch/roll, radians)
+      10   65359  - Pilot Heading (Seatalk proprietary)
+     … +763 lines (ctrl+o to expand)
+
+⏺ Bash(uv run python scripts/analyze_f088_fields.py 2>&1)
+  ⎿  Reading CAN log files...                                                             
+     Total frames: 1,391,447                                                           
+     … +176 lines (ctrl+o to expand)                                                                                ▪   ─ 
+  ⎿  (timeout 2m)                                                                         
+                                                                                                                          
+⏺ Excellent results. Here's the analysis:                                                                               ─ 
+                                                                                                                          
+  f088 27-byte message field identification                                                                               
+                                                                                                                          
+  Correlation results (10 int16 fields, 172,932 samples):                                                                 
+                                                                                                                          
+  ┌───────┬────────────┬───────┬───────┬───────────┬──────────────────────────────────────────────────────────────────┐   
+  │ Field │   Best     │   r   │ Scale │  Offset   │                          Interpretation                          │   
+  │       │ Correlate  │       │       │           │                                                                  │   
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤   
+  │ F0    │ None       │ —     │ —     │ —         │ Sequential counter (0-255, wraps). Increments +1 per channel per │   
+  │       │            │       │       │           │  cycle. Not a sensor value.                                      │
+  ├───────┼────────────┼───────┼───────┼───────────┼─────────────────────────────────────────────────────────────────┤
+  │       │            │       │       │           │ Near-constant (~165). Heading*1/16° → 10.3° matches actual       │
+  │ F1    │ Heading    │ -0.37 │ —     │ mean=165  │ heading ~10.5°. Likely a slowly-filtered heading estimate in     │
+  │       │            │       │       │           │ 1/16 deg units.                                                  │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │       │            │       │       │           │ Heading-correlated + Roll-correlated (r=+0.46). Scale ~-2.8      │
+  │ F2     Heading    │ -0.77 │ -2.81 │ -2.2      │ doesn't match standard units. May be a heading rate integral or  │
+  │       │            │       │       │           │ combined heading/roll estimate.                                  │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │ F3    │ —          │ —     │ —     │ mean=373  │ Near-constant (~373). 373/16 = 23.3° — doesn't match any known   │
+  │       │            │       │       │           │ value. Could be a magnetometer calibration offset.               │
+  ├───────┼───────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │ F4    │ Pitch      │ +0.31 │ 9.7   │ 47.1      │ Pitch-correlated. mean=65.7, scale ~10 × pitch. Possibly pitch   │
+  │       │            │       │       │           │ bias + pitch in 1/10 deg units.                                  │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │       │            │       │       │           │ Strongly roll-correlated. Scale=-29.4 means ~30 LSB per degree   │
+  │ F5    │ Roll       │ -0.90 │ -29.4 │ 0.6       │ of roll. This is the roll sensor channel — likely raw            │
+  │       │            │       │       │           │ accelerometer-derived roll in a proprietary unit.                │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │       │            │       │       │           │ Weakly roll-correlated with large constant offset (-1999). Could │
+  │ F6    │ Roll       │ -0.40 │ -6.1  │ -1999     │  be a magnetometer axis reading (affected by roll through        │
+  │       │            │       │       │           │ magnetic field projection).                                      │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │       │            │       │       │           │ Noisy, uncorrelated (std=23.5, range -308 to +206). Likely raw   │
+  │ F7    │ —          │ —     │ —     │ —         │ accelerometer or gyro axis — high-frequency noise with no        │
+  │       │            │       │       │           │ slow-varying correlation.                                        │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │ F8    │ —          │ —     │ —     │ mean=-124 │ Biased, noisy (std=21). Another raw sensor axis — possibly       │
+  │       │            │       │       │           │ accelerometer Y or Z.                                            │
+  ├───────┼────────────┼───────┼───────┼───────────┼──────────────────────────────────────────────────────────────────┤
+  │ F9    │ ROT        │ +0.68 │ 112.1 │ 9.4       │ Rate of turn correlated. Scale ~112 LSB per deg/s — this is the  │
+  │       │            │       │       │           │ gyroscope yaw rate channel.                                      │
+  └───────┴────────────┴───────┴───────┴───────────┴──────────────────────────────────────────────────────────────────┘
+
+  Key findings:
+
+  1. F5 = Roll (r=-0.90, highest correlation of any field). Scale factor ~30 LSB/deg.
+  2. F9 = Yaw rate / Rate of Turn (r=+0.68). Scale ~112 LSB per deg/s.
+  3. F2 = Heading-related (r=-0.77), but the sign and scale suggest it may be a magnetometer reading rather than a direct
+  heading output.
+  4. F0 = Packet counter (0-255 wrapping, sequential across channels).
+  5. F1, F3, F6 = Near-constant — likely magnetometer readings, calibration offsets, or slowly-varying environmental
+  values. The boat was tied to the pontoon, so these wouldn't change much.
+
+  28-byte messages (float32 variant):
+
+  - float[7:11] = a smoothly increasing value (-4 to +10, wrapping) — this looks like a time-varying phase angle or filter
+   state, not a direct sensor reading
+  - float[11:15] = smoothly decreasing (4.13 → 3.52) — could be a filter covariance or gain
+  - float[15:19] = duplicates float[7:11] exactly — confirms it's a state vector, not a measurement
+  - bytes[19:22] = constant 00002040 = float32 2.5 — a filter parameter
+
+  35-byte messages (appear only during AUTO/WIND modes):
+
+  - float[7:11] = slowly decreasing (0.20 → 0.34) — a filter coefficient decaying over time
+  - float[11:15] = oscillating around 0 — heading error or correction signal
+  - float[15:19] = oscillating — another error/correction
+  - float[19:23] = constant 4.55 — parameter
+  - float[23:27] = constant 0.161 — parameter
+  - float[27:31] = constant 13.11 — parameter (possibly a compass deviation table entry or filter time constant)
+
+  36-byte messages:
+
+  - float[7:11] = constant -60.06 during wind mode entry — possibly a reference angle (wind datum?)
+  - float[15:19] = decaying from 1.14 to 0.57 — convergence of a filter, likely the adaptive heading controller settling
+
+  Bottom line for our firmware:
+
+  The f088XX00 traffic is the EV-1's internal sensor fusion telemetry — 251 channels of raw sensor data (magnetometer
+  axes, accelerometer axes, gyro, roll, heading filters) plus Kalman filter states and parameters. The p70 does not need
+  this data to function — it reads the standard Seatalk PGNs (65359, 65360, 65379) and the pilot status heartbeat
+  (f081ae02) and the two polled responses (6c1a, 6c23). The f088 traffic is likely for Raymarine's diagnostic software or
+  inter-device calibration.
+
+
+

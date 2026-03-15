@@ -249,6 +249,10 @@ SEATALK_SUBMODE_WIND = 0x01
 P70_SOURCE = 70  # Simulated p70 source address
 _fast_packet_seq = 0  # 3-bit sequence counter (0-7)
 
+# Tracked target state (p70 sends absolute values, not deltas)
+_target_heading = None  # float or None (not yet initialized)
+_target_wind = None     # float or None (not yet initialized)
+
 
 def _next_fp_seq() -> int:
     """Increment and return fast-packet sequence counter (0-7)."""
@@ -309,6 +313,60 @@ def send_p70_heartbeat(sock: socket.socket):
     send_can_frame(sock, can_id, data)
 
 
+def send_p70_heading_set(sock: socket.socket, heading_deg: float):
+    """Send PGN 126208 CMD→PGN 65360 with absolute heading value."""
+    heading_rad = math.radians(heading_deg % 360.0)
+    heading_raw = int(heading_rad * 10000)
+    lo, hi = heading_raw & 0xFF, (heading_raw >> 8) & 0xFF
+    data = bytes([0x01, 0x50, 0xFF, 0x00, 0xF8, 0x03, 0x01, 0x3B,
+                  0x07, 0x03, 0x04, 0x06, lo, hi])
+    send_fast_packet(sock, 126208, data)
+
+
+def send_p70_wind_datum(sock: socket.socket, wind_deg: float):
+    """Send PGN 126208 CMD→PGN 65345 with absolute wind angle."""
+    wind_360 = wind_deg % 360.0
+    wind_rad = math.radians(wind_360)
+    wind_raw = int(wind_rad * 10000)
+    lo, hi = wind_raw & 0xFF, (wind_raw >> 8) & 0xFF
+    data = bytes([0x01, 0x41, 0xFF, 0x00, 0xF8, 0x03, 0x01, 0x3B,
+                  0x07, 0x03, 0x04, 0x06, lo, hi])
+    send_fast_packet(sock, 126208, data)
+
+
+# ============================================================================
+# Firmware broadcast parsing (track current targets for +/- adjustments)
+# ============================================================================
+
+def parse_seatalk_locked_heading(data: bytes) -> float | None:
+    """Parse PGN 65360 (locked heading) from firmware broadcast. Returns degrees or None."""
+    if len(data) < 8:
+        return None
+    # Bytes 0-1: Raymarine header, byte 2: SID, bytes 3-4: true (N/A),
+    # bytes 5-6: magnetic heading raw, byte 7: reserved
+    if data[0] != RAYMARINE_MFR_LO or data[1] != RAYMARINE_MFR_HI:
+        return None
+    raw = struct.unpack_from("<H", data, 5)[0]
+    if raw == 0xFFFF:
+        return None
+    return math.degrees(raw / 10000.0)
+
+
+def parse_seatalk_wind_datum(data: bytes) -> float | None:
+    """Parse PGN 65345 (wind datum) from firmware broadcast. Returns signed degrees or None."""
+    if len(data) < 4:
+        return None
+    if data[0] != RAYMARINE_MFR_LO or data[1] != RAYMARINE_MFR_HI:
+        return None
+    raw = struct.unpack_from("<H", data, 2)[0]
+    if raw == 0xFFFF:
+        return None
+    deg = math.degrees(raw / 10000.0)
+    if deg > 180.0:
+        deg -= 360.0
+    return deg
+
+
 # ============================================================================
 # Keyboard input (raw terminal, non-blocking)
 # ============================================================================
@@ -364,34 +422,80 @@ class RawTerminal:
         return chr(b)
 
 
-def handle_keypress(key: str, sock: socket.socket) -> str | None:
-    """Process a keypress and send the appropriate p70 CAN message. Returns action description or None."""
+def handle_keypress(key: str, sock: socket.socket, pilot_mode: str) -> str | None:
+    """Process a keypress and send the appropriate p70 CAN message.
+
+    Uses PGN 126208 absolute commands (matching real p70 behavior) for heading
+    and wind adjustments. Keystroke path kept only for tack (Raymarine remote).
+
+    Args:
+        key: Key string from RawTerminal
+        sock: Socket to firmware
+        pilot_mode: Current pilot mode string ("standby", "compass", "wind")
+
+    Returns action description or None.
+    """
+    global _target_heading, _target_wind
+
     if key in ("d", "RIGHT"):
-        send_p70_keystroke(sock, KEY_PLUS_1)
+        if pilot_mode == "wind" and _target_wind is not None:
+            _target_wind += 1.0
+            send_p70_wind_datum(sock, _target_wind)
+        elif _target_heading is not None:
+            _target_heading = (_target_heading + 1.0) % 360.0
+            send_p70_heading_set(sock, _target_heading)
         return "+1"
     elif key in ("a", "LEFT"):
-        send_p70_keystroke(sock, KEY_MINUS_1)
+        if pilot_mode == "wind" and _target_wind is not None:
+            _target_wind -= 1.0
+            send_p70_wind_datum(sock, _target_wind)
+        elif _target_heading is not None:
+            _target_heading = (_target_heading - 1.0) % 360.0
+            send_p70_heading_set(sock, _target_heading)
         return "-1"
     elif key in ("D", "SHIFT_RIGHT"):
-        send_p70_keystroke(sock, KEY_PLUS_10)
+        if pilot_mode == "wind" and _target_wind is not None:
+            _target_wind += 10.0
+            send_p70_wind_datum(sock, _target_wind)
+        elif _target_heading is not None:
+            _target_heading = (_target_heading + 10.0) % 360.0
+            send_p70_heading_set(sock, _target_heading)
         return "+10"
     elif key in ("A", "SHIFT_LEFT"):
-        send_p70_keystroke(sock, KEY_MINUS_10)
+        if pilot_mode == "wind" and _target_wind is not None:
+            _target_wind -= 10.0
+            send_p70_wind_datum(sock, _target_wind)
+        elif _target_heading is not None:
+            _target_heading = (_target_heading - 10.0) % 360.0
+            send_p70_heading_set(sock, _target_heading)
         return "-10"
     elif key in ("s", " "):
         send_p70_mode(sock, SEATALK_MODE_STANDBY, SEATALK_SUBMODE_STANDBY)
+        _target_heading = None
+        _target_wind = None
         return "STANDBY"
     elif key == "c":
         send_p70_mode(sock, SEATALK_MODE_AUTO, SEATALK_SUBMODE_STANDBY)
+        # Target heading will be initialized from firmware broadcast
         return "COMPASS"
     elif key == "w":
         send_p70_mode(sock, SEATALK_MODE_STANDBY, SEATALK_SUBMODE_WIND)
+        # Target wind will be initialized from firmware broadcast
         return "WIND"
     elif key == "t":
-        send_p70_keystroke(sock, KEY_TACK_STBD)
+        # Tack: negate wind target and send as absolute
+        if _target_wind is not None:
+            _target_wind = -_target_wind
+            send_p70_wind_datum(sock, _target_wind)
+        else:
+            send_p70_keystroke(sock, KEY_TACK_STBD)
         return "TACK STBD"
     elif key == "T":
-        send_p70_keystroke(sock, KEY_TACK_PORT)
+        if _target_wind is not None:
+            _target_wind = -_target_wind
+            send_p70_wind_datum(sock, _target_wind)
+        else:
+            send_p70_keystroke(sock, KEY_TACK_PORT)
         return "TACK PORT"
     return None
 
@@ -464,6 +568,7 @@ def main():
     prev_pitch = 0.0  # for computing pitch rate from wave model
     last_heartbeat = 0.0
     last_action = ""  # last p70 action for display
+    pilot_mode = "standby"  # tracked from firmware PGN 65379 broadcasts
 
     with RawTerminal() as term:
         try:
@@ -475,7 +580,7 @@ def main():
                 if key == "q" or key == "\x03":  # q or Ctrl-C
                     break
                 if key is not None:
-                    action = handle_keypress(key, sock)
+                    action = handle_keypress(key, sock, pilot_mode)
                     if action:
                         last_action = action
 
@@ -530,7 +635,7 @@ def main():
                     gyro_z=state.heading_rate,
                 )
 
-                # Read responses from firmware (rudder PGN)
+                # Read responses from firmware (rudder PGN + Seatalk broadcasts)
                 try:
                     messages = recv_messages(sock)
                     for msg_type, payload in messages:
@@ -545,6 +650,24 @@ def main():
                                 if rudder:
                                     actual_deg, commanded_deg = rudder
                                     rudder_from_firmware = commanded_deg
+                            elif pgn == 65379:  # Pilot mode
+                                if len(frame_data) >= 6:
+                                    mode_byte = frame_data[3]
+                                    submode_byte = frame_data[5]
+                                    if mode_byte == SEATALK_MODE_AUTO:
+                                        pilot_mode = "compass"
+                                    elif mode_byte == SEATALK_MODE_STANDBY and submode_byte == SEATALK_SUBMODE_WIND:
+                                        pilot_mode = "wind"
+                                    else:
+                                        pilot_mode = "standby"
+                            elif pgn == 65360:  # Locked heading
+                                hdg = parse_seatalk_locked_heading(frame_data)
+                                if hdg is not None and _target_heading is None:
+                                    _target_heading = hdg
+                            elif pgn == 65345:  # Wind datum
+                                wnd = parse_seatalk_wind_datum(frame_data)
+                                if wnd is not None and _target_wind is None:
+                                    _target_wind = wnd
                 except ConnectionError:
                     print("\r\nConnection lost")
                     break

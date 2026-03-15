@@ -1,0 +1,101 @@
+⏺ Now I have the full picture. Let me compile this into a comprehensive reference.
+                                                                              ────
+  Here's what I found:                                                            
+                                                                                  
+  Raymarine p70 PGN Message Map                                                   
+                                                                                  
+  PGNs the p70 TRANSMITS                                                          
+                                                                                  
+  ┌────────┬─────────────┬─────────────────────────────┬─────────┬───────────┐    
+  │  PGN   │    Name     │           Purpose           │ In our  │  In our   │    
+  │        │             │                             │  logs?  │ firmware? │    
+  ├────────┼─────────────┼─────────────────────────────┼─────────┼───────────┤    
+  │        │ Seatalk1    │ Keystroke commands          │  Yes    │           │    
+  │ 126720 │ Proprietary │ (+1/-1/+10/-10, tack)       │ (129k   │    No     │    
+  │        │             │                             │ frames) │           │    
+  ├────────┼─────────────┼─────────────────────────────┼─────────┼───────────┤    
+  │        │ NMEA        │ Mode changes                │  Yes    │           │    
+  │ 126208 │ Command     │ (auto/standby/wind/track) + │  (878   │    No     │    
+  │        │ Group       │  set heading                │ frames) │           │    
+  ├────────┼─────────────┼─────────────────────────────┼─────────┼───────────┤    
+  │ 65371  │ Keypad      │ Physical button             │   No    │    No     │    
+  │        │ Message     │ press/release events        │         │           │    
+  ├────────┼─────────────┼─────────────────────────────┼─────────┼───────────┤    
+  │ 65374  │ Keypad      │ Keep-alive (ACU requires    │   No    │    No     │    
+  │        │ Heartbeat   │ this!)                      │         │           │    
+  ├────────┼─────────────┼────────────────────────────┼─────────┼───────────┤     
+  │ 65361  │ Silence     │ Acknowledge alarms          │   No    │    No     │    
+  │        │ Alarm       │                             │         │           │    
+  └────────┴─────────────┴─────────────────────────────┴─────────┴───────────┘    
+                                                                                  
+  PGNs the p70 RECEIVES (displays)                                                
+                                                                                  
+  ┌────────┬─────────────────┬──────────────┬─────────────────┬─────────────┐     
+  │  PGN   │      Name       │    Source    │  In our logs?   │   In our    │
+  │        │                 │              │                 │  firmware?  │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │        │                 │ EV-1 (src    │    Yes (134     │             │
+  │ 65379  │ Pilot Mode      │ 205)         │  frames, all    │     No      │
+  │        │                 │              │    standby)     │             │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 65359  │ Pilot Heading   │ EV-1 (src    │   Yes (1402     │     No      │
+  │        │                 │ 205)         │ frames, ~10Hz)  │             │
+  ├────────┼─────────────────┼─────────────┼─────────────────┼─────────────┤
+  │ 65360  │ Pilot Locked    │ EV-1         │ No (pilot was   │     No      │
+  │        │ Heading         │              │   in standby)   │             │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 65345  │ Pilot Wind      │ EV-1         │  No (never in   │     No      │
+  │        │ Datum           │              │   wind mode)    │             │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 65288  │ Alarm           │ Various      │ Yes (4 frames)  │     No      │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 127237 │ Heading/Track   │ ACU (src     │   Yes (2174     │   TX only   │
+  │        │ Control         │ 182)         │     frames)     │             │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 127250 │ Vessel Heading  │ EV-1         │       Yes       │   RX yes    │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 127245 │ Rudder          │ ACU/feedback │       Yes       │   TX only   │
+  ├────────┼─────────────────┼──────────────┼─────────────────┼─────────────┤
+  │ 130306 │ Wind Data       │ Instrument   │       Yes       │   RX yes    │
+  └────────┴─────────────────┴──────────────┴─────────────────┴─────────────┘
+
+  Key Findings
+
+  1. The logs only captured standby mode — the pilot was never engaged, so no
+  locked heading (65360), wind datum (65345), or button presses (65371) were
+  recorded.
+  2. No p70 keypad was on the bus during capture — PGN 65374 (heartbeat) and 65371
+   (keypad messages) are absent. The logs only show EV-1 and ACU traffic.
+  3. To control via p70, our firmware needs to:
+    - Transmit PGN 65379 (pilot mode status) so the p70 shows the current mode
+    - Transmit PGN 65359 (pilot heading) so the p70 shows current heading
+    - Transmit PGN 65360 (locked heading) so the p70 shows target heading
+    - Transmit PGN 65345 (wind datum) when in wind mode
+    - Receive PGN 126720 keystroke commands (+1/-1/+10/-10/tack)
+    - Receive PGN 126208 mode change commands (auto/standby/wind/track)
+    - Receive PGN 65374 keypad heartbeat (detect p70 presence)
+    - Transmit PGN 65288 (alarms) when faults occur
+  4. Keystroke codes (in PGN 126720, 22-byte fast-packet):
+    - 0x07F8 = +1°, 0x05FA = -1°
+    - 0x08F7 = +10°, 0x06F9 = -10°
+    - 0x22DD = Tack starboard, 0x21DE = Tack port
+  5. Mode change (via PGN 126208 writing to PGN 65379):
+    - Mode 0x00 SubMode 0x00 = Standby
+    - Mode 0x40 SubMode 0x00 = Auto (compass)
+    - Mode 0x00 SubMode 0x01 = Wind/Vane
+    - Mode 0x80 SubMode 0x01 = Track
+  6. Critical: Keypad heartbeat (PGN 65374) — the ACU expects a periodic heartbeat
+   from the control head. Our firmware should either emulate this or the p70 will
+  provide it since it's physically on the bus.
+
+  Gaps to Fill
+
+  To integrate with the p70, the firmware n2k.cpp needs new handlers for:
+  - RX: PGN 126720 (keystrokes), PGN 126208 (mode commands), PGN 65374 (heartbeat
+  detection)
+  - TX: PGN 65379 (mode status), PGN 65359 (heading), PGN 65360 (locked heading),
+  PGN 65345 (wind datum)
+
+  The biggest unknown is the exact byte layout of PGN 126720 keystroke messages —
+  the open-source projects (ESP32-Evo-Remote-Pilot-NMEA2000, RaymarineAutoPilot)
+  have these fully decoded. Want me to implement the p70 integration?

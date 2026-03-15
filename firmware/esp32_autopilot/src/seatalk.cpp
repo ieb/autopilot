@@ -46,6 +46,7 @@ static uint32_t last_pilot_mode_ms = 0;
 static uint32_t last_pilot_heading_ms = 0;
 static uint32_t last_pilot_locked_ms = 0;
 static uint32_t last_pilot_wind_ms = 0;
+static uint32_t last_pilot_status_ms = 0;
 static uint8_t heading_sid = 0;
 
 // Pending command from p70 keystrokes
@@ -118,8 +119,72 @@ static bool parse_keystroke(const unsigned char* data, int len, AppState& state)
 }
 
 // ============================================================================
-// RX: Parse PGN 126208 — NMEA Command Group (Mode Change)
+// TX helpers for ACK and 126720 responses
 // ============================================================================
+
+static void send_ack(unsigned long target_pgn) {
+    tN2kMsg msg;
+    msg.Init(3, 126208, 28);
+    msg.AddByte(0x02);  // FC = Acknowledge
+    msg.AddByte(target_pgn & 0xFF);
+    msg.AddByte((target_pgn >> 8) & 0xFF);
+    msg.AddByte((target_pgn >> 16) & 0xFF);
+    msg.AddByte(0x00);  // PGN error: OK
+    msg.AddByte(0x00);  // Transmission interval error: OK
+    msg.AddByte(0x00);  // Number of parameters: 0
+    n2k_send_msg(msg);
+}
+
+static void send_126720_6c1a() {
+    // Constant response: 3b 9f 6c 1a 50 86 01 86 01 86 01 ff 7f
+    tN2kMsg msg;
+    msg.Init(7, 126720, 28);
+    const uint8_t resp[] = {0x3B,0x9F,0x6C,0x1A,0x50,0x86,0x01,0x86,0x01,0x86,0x01,0xFF,0x7F};
+    for (int i = 0; i < 13; i++) msg.AddByte(resp[i]);
+    n2k_send_msg(msg);
+}
+
+static void send_126720_6c23() {
+    // Constant response: 3b 9f 6c 23 50 64 64 64 00
+    tN2kMsg msg;
+    msg.Init(7, 126720, 28);
+    const uint8_t resp[] = {0x3B,0x9F,0x6C,0x23,0x50,0x64,0x64,0x64,0x00};
+    for (int i = 0; i < 9; i++) msg.AddByte(resp[i]);
+    n2k_send_msg(msg);
+}
+
+// ============================================================================
+// RX: Parse PGN 126208 — NMEA Command/Request/Acknowledge
+// ============================================================================
+
+static bool parse_request(const unsigned char* data, int len) {
+    // FC=0x00 (Request): p70 polls for PGN 126720 status
+    // Bytes 1-3: target PGN (little-endian)
+    if (len < 4) return false;
+
+    unsigned long target_pgn = (unsigned long)data[1]
+                             | ((unsigned long)data[2] << 8)
+                             | ((unsigned long)data[3] << 16);
+
+    if (target_pgn == 126720) {
+        // Scan parameter data for response type indicator
+        for (int i = 4; i < len; i++) {
+            if (data[i] == 0x1A) {
+                send_126720_6c1a();
+                return true;
+            }
+            if (data[i] == 0x23) {
+                send_126720_6c23();
+                return true;
+            }
+        }
+        // Default: send both responses
+        send_126720_6c1a();
+        send_126720_6c23();
+        return true;
+    }
+    return false;
+}
 
 static bool parse_mode_command(const unsigned char* data, int len, AppState& state) {
     // Mode change command (17 bytes):
@@ -127,11 +192,27 @@ static bool parse_mode_command(const unsigned char* data, int len, AppState& sta
     //
     // Heading set command (14 bytes):
     // 01 50 ff 00 f8 03 01 3b 07 03 04 06 [LO] [HI]
+    //
+    // Wind datum set command (14 bytes):
+    // 01 41 ff 00 f8 03 01 3b 07 03 04 06 [LO] [HI]
 
+    if (len < 4) return false;
+
+    uint8_t fc = data[0];
+
+    // FC=0x00: Request (p70 polling)
+    if (fc == 0x00) {
+        return parse_request(data, len);
+    }
+
+    // FC=0x02: Acknowledge — just consume
+    if (fc == 0x02) {
+        return true;
+    }
+
+    // FC=0x01: Command
+    if (fc != 0x01) return false;
     if (len < 14) return false;
-
-    // Function code must be 0x01 (Command)
-    if (data[0] != 0x01) return false;
 
     // Check for mode change: writing to PGN 65379 (bytes 1-2 = 0x63, 0xFF)
     if (data[1] == 0x63 && data[2] == 0xFF && len >= 14) {
@@ -158,6 +239,7 @@ static bool parse_mode_command(const unsigned char* data, int len, AppState& sta
             cmd_new_target = state.heading;
             cmd_mode_change = true;
         }
+        send_ack(65379);
         return true;
     }
 
@@ -176,6 +258,23 @@ static bool parse_mode_command(const unsigned char* data, int len, AppState& sta
             cmd_new_target = heading_deg;
             cmd_mode_change = true;
         }
+        send_ack(65360);
+        return true;
+    }
+
+    // Check for wind datum set: writing to PGN 65345 (bytes 1-2 = 0x41, 0xFF)
+    if (data[1] == 0x41 && data[2] == 0xFF && len >= 14) {
+        uint16_t wind_raw = (uint16_t)data[12] | ((uint16_t)data[13] << 8);
+        float wind_rad = wind_raw / 10000.0f;
+        float wind_deg = wind_rad * (180.0f / M_PI);
+        // Convert from 0-360 to signed (positive = starboard)
+        if (wind_deg > 180.0f) wind_deg -= 360.0f;
+        if (state.pilot_mode == MODE_WIND_AWA || state.pilot_mode == MODE_WIND_TWA) {
+            cmd_new_mode = state.pilot_mode;
+            cmd_new_target = wind_deg;
+            cmd_mode_change = true;
+        }
+        send_ack(65345);
         return true;
     }
 
@@ -351,6 +450,26 @@ static void send_pilot_locked_heading(const AppState& state) {
     n2k_send_msg(msg);
 }
 
+static void send_pilot_status_heartbeat(const AppState& state) {
+    // PGN 126720 f081ae02: pilot status heartbeat
+    // byte[6] = mode (0x00=standby, 0x01=auto/compass, 0x03=wind)
+    tN2kMsg msg;
+    msg.Init(7, 126720, 28);
+    uint8_t mode_byte = 0x00;
+    switch (state.pilot_mode) {
+        case MODE_COMPASS: mode_byte = 0x01; break;
+        case MODE_WIND_AWA: case MODE_WIND_TWA:
+        case MODE_VMG_UP: case MODE_VMG_DOWN: mode_byte = 0x03; break;
+        default: break;
+    }
+    const uint8_t hdr[] = { 0x3B, 0x9F, 0xF0, 0x81, 0xAE, 0x02 };
+    for (int i = 0; i < 6; i++) msg.AddByte(hdr[i]);
+    msg.AddByte(mode_byte);
+    msg.AddByte(0x0C);
+    msg.AddByte(0xA5);
+    n2k_send_msg(msg);
+}
+
 static void send_pilot_wind_datum(const AppState& state) {
     // Only send in wind modes
     if (state.pilot_mode != MODE_WIND_AWA && state.pilot_mode != MODE_WIND_TWA &&
@@ -410,6 +529,12 @@ void seatalk_send(const AppState& state) {
     if (now - last_pilot_wind_ms >= 500) {
         last_pilot_wind_ms = now;
         send_pilot_wind_datum(state);
+    }
+
+    // PGN 126720 Pilot Status Heartbeat — 1 Hz
+    if (now - last_pilot_status_ms >= 1000) {
+        last_pilot_status_ms = now;
+        send_pilot_status_heartbeat(state);
     }
 }
 
