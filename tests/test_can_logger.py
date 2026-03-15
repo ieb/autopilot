@@ -386,22 +386,26 @@ class TestBinaryLogWriter:
 class TestGPSTimeSync:
     """Test GPS time extraction from PGNs."""
 
-    def test_needs_sync_when_year_old(self):
+    def test_should_check_when_no_gps_yet(self):
         sync = GPSTimeSync(enabled=True)
-        # On a modern system, year >= 2025, so needs_sync returns False
-        # We just verify the logic doesn't crash
-        result = sync.needs_sync()
-        assert isinstance(result, bool)
+        # Should check until GPS time is received (even with RTC)
+        assert sync.should_check() is True
 
-    def test_needs_sync_disabled(self):
+    def test_should_check_disabled(self):
         sync = GPSTimeSync(enabled=False)
-        assert sync.needs_sync() is False
+        assert sync.should_check() is False
+
+    def test_should_check_stops_after_gps_received_with_rtc(self):
+        sync = GPSTimeSync(enabled=True)
+        sync._has_rtc = True
+        sync._gps_received = True
+        assert sync.should_check() is False
 
     @patch.object(GPSTimeSync, '_set_system_time')
-    def test_sync_from_pgn_126992(self, mock_set_time):
-        """PGN 126992 (System Time): days at offset 2, TOD at offset 4."""
+    def test_sync_from_pgn_126992_no_rtc(self, mock_set_time):
+        """PGN 126992: syncs system time when no RTC detected."""
         sync = GPSTimeSync(enabled=True)
-        sync._synced = False
+        sync._has_rtc = False
 
         # 2024-01-15 = day 19738 since 1970-01-01
         # 12:00:00 = 43200 seconds = 432000000 units of 0.0001s
@@ -416,16 +420,38 @@ class TestGPSTimeSync:
 
         assert result is True
         assert sync._synced is True
+        assert sync._gps_received is True
         mock_set_time.assert_called_once()
         dt_arg = mock_set_time.call_args[0][0]
         assert dt_arg.year == 2024
         assert dt_arg.month == 1
 
     @patch.object(GPSTimeSync, '_set_system_time')
+    def test_gps_received_but_not_synced_with_rtc(self, mock_set_time):
+        """With RTC present, GPS time is recorded but system clock not changed."""
+        sync = GPSTimeSync(enabled=True)
+        sync._has_rtc = True
+
+        days = 19738
+        tod = 432000000
+
+        data = bytearray(8)
+        struct.pack_into('<H', data, 2, days)
+        struct.pack_into('<I', data, 4, tod)
+
+        result = sync.try_sync_from_pgn(PGN_SYSTEM_TIME, bytes(data))
+
+        assert result is False
+        assert sync._synced is False
+        assert sync._gps_received is True
+        assert sync._rtc_gps_delta_s is not None
+        mock_set_time.assert_not_called()
+
+    @patch.object(GPSTimeSync, '_set_system_time')
     def test_sync_from_pgn_129033(self, mock_set_time):
         """PGN 129033 (Time & Date): days at offset 0, TOD at offset 2."""
         sync = GPSTimeSync(enabled=True)
-        sync._synced = False
+        sync._has_rtc = False
 
         days = 19738
         tod = 432000000
@@ -443,7 +469,6 @@ class TestGPSTimeSync:
     def test_invalid_data_no_crash(self, mock_set_time):
         """Invalid/sentinel values should be rejected."""
         sync = GPSTimeSync(enabled=True)
-        sync._synced = False
 
         # 0xFFFF days = sentinel
         data = bytearray(8)
@@ -452,6 +477,7 @@ class TestGPSTimeSync:
 
         sync.try_sync_from_pgn(PGN_SYSTEM_TIME, bytes(data))
         assert sync._synced is False
+        assert sync._gps_received is False
         mock_set_time.assert_not_called()
 
     @patch.object(GPSTimeSync, '_set_system_time')
@@ -472,7 +498,6 @@ class TestGPSTimeSync:
 
     def test_short_data_rejected(self):
         sync = GPSTimeSync(enabled=True)
-        sync._synced = False
         result = sync.try_sync_from_pgn(PGN_SYSTEM_TIME, b'\x00\x01')
         assert result is False
 
@@ -481,6 +506,9 @@ class TestGPSTimeSync:
         s = sync.status
         assert s["enabled"] is True
         assert s["synced"] is False
+        assert s["has_rtc"] is True  # running on modern system
+        assert s["gps_received"] is False
+        assert s["rtc_gps_delta_s"] is None
 
 
 # --- Config ---

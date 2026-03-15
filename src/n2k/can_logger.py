@@ -454,12 +454,19 @@ class GPSTimeSync:
         self._enabled = enabled
         self._synced = False
         self._sync_time: Optional[float] = None
+        self._has_rtc = datetime.now().year >= 2025
+        self._gps_received = False
+        self._gps_time: Optional[datetime] = None
+        self._rtc_gps_delta_s: Optional[float] = None
 
-    def needs_sync(self) -> bool:
-        """True if time sync is needed (year < 2025 suggests no RTC)."""
-        if not self._enabled or self._synced:
+    def should_check(self) -> bool:
+        """True if we should still look at GPS time PGNs."""
+        if not self._enabled:
             return False
-        return datetime.now().year < 2025
+        if self._synced:
+            return False
+        # Always check until we've seen at least one GPS time
+        return not self._gps_received or not self._has_rtc
 
     def try_sync_from_pgn(self, pgn: int, data: bytes) -> bool:
         """Try to extract UTC from PGN 126992 or 129033 and set system time.
@@ -468,7 +475,7 @@ class GPSTimeSync:
             bytes 4-7 = time of day (uint32 LE, units = 0.0001s)
         PGN 129033 (Time & Date): bytes 0-1 = days, bytes 2-5 = time of day
         """
-        if not self._enabled or self._synced:
+        if not self._enabled:
             return False
 
         try:
@@ -494,10 +501,25 @@ class GPSTimeSync:
             if dt.year < 2020 or dt.year > 2100:
                 return False
 
+            # Record GPS time and compute delta against system clock
+            if not self._gps_received:
+                self._gps_received = True
+                self._gps_time = dt
+                now_utc = datetime.now(tz=timezone.utc)
+                self._rtc_gps_delta_s = (now_utc - dt).total_seconds()
+                logger.info(
+                    "GPS time received: %s (RTC delta: %+.1fs, RTC detected: %s)",
+                    dt.isoformat(), self._rtc_gps_delta_s, self._has_rtc,
+                )
+
+            # Only set system time if no RTC (year < 2025)
+            if self._has_rtc or self._synced:
+                return False
+
             self._set_system_time(dt)
             self._synced = True
             self._sync_time = time.time()
-            logger.info("GPS time sync: %s", dt.isoformat())
+            logger.info("GPS time sync applied: %s", dt.isoformat())
             return True
 
         except (struct.error, ValueError, OSError) as e:
@@ -524,6 +546,9 @@ class GPSTimeSync:
             "enabled": self._enabled,
             "synced": self._synced,
             "sync_time": self._sync_time,
+            "has_rtc": self._has_rtc,
+            "gps_received": self._gps_received,
+            "rtc_gps_delta_s": self._rtc_gps_delta_s,
         }
 
 
@@ -635,7 +660,7 @@ class CANLogger:
         self._msg_count += 1
 
         # GPS time sync — always check regardless of filters
-        if self._gps_sync.needs_sync():
+        if self._gps_sync.should_check():
             self._gps_sync.try_sync_from_pgn(pgn, data)
 
         # Apply filter

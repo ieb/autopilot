@@ -44,6 +44,7 @@
   .remove-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 16px; padding: 2px 6px; }
   .sync-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
   .sync-yes { background: var(--green); }
+  .sync-rtc { background: #4a9eff; }
   .sync-no { background: var(--yellow); animation: pulse 2s infinite; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
   .live-container { max-height: 500px; overflow-y: auto; }
@@ -93,6 +94,7 @@
   <div class="card">
     <h3>GPS Time Sync</h3>
     <p><span id="gpsSyncDot" class="sync-indicator sync-no"></span><span id="gpsSyncText">Not synced</span></p>
+    <p id="gpsSyncDetail" style="font-size:12px;color:#888;margin-top:4px;display:none"></p>
   </div>
 
   <div class="card">
@@ -213,8 +215,31 @@ async function refreshDashboard() {
     bar.style.width = pct + '%';
     bar.className = 'disk-bar-fill' + (pct > 90 ? ' danger' : pct > 70 ? ' warn' : '');
     const gs = d.gps_sync || {};
-    $('#gpsSyncDot').className = 'sync-indicator ' + (gs.synced ? 'sync-yes' : 'sync-no');
-    $('#gpsSyncText').textContent = gs.synced ? 'Synced' : (gs.enabled ? 'Waiting for GPS' : 'Disabled');
+    const detail = $('#gpsSyncDetail');
+    if (gs.synced) {
+      $('#gpsSyncDot').className = 'sync-indicator sync-yes';
+      $('#gpsSyncText').textContent = 'Synced from GPS';
+      detail.style.display = 'none';
+    } else if (gs.has_rtc && gs.gps_received) {
+      $('#gpsSyncDot').className = 'sync-indicator sync-rtc';
+      $('#gpsSyncText').textContent = 'RTC detected \u2014 GPS received, sync skipped';
+      const delta = gs.rtc_gps_delta_s;
+      if (delta != null) {
+        const abs = Math.abs(delta);
+        const sign = delta >= 0 ? '+' : '\u2212';
+        const txt = abs < 1 ? (abs * 1000).toFixed(0) + ' ms' : abs.toFixed(1) + ' s';
+        detail.textContent = 'RTC \u2013 GPS: ' + sign + txt;
+        detail.style.display = 'block';
+      }
+    } else if (!gs.enabled) {
+      $('#gpsSyncDot').className = 'sync-indicator sync-no';
+      $('#gpsSyncText').textContent = 'Disabled';
+      detail.style.display = 'none';
+    } else {
+      $('#gpsSyncDot').className = 'sync-indicator sync-no';
+      $('#gpsSyncText').textContent = 'Waiting for GPS';
+      detail.style.display = 'none';
+    }
     // PGN table
     const counts = d.pgn_counts || {};
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
