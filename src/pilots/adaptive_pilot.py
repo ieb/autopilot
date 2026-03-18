@@ -38,6 +38,18 @@ class AdaptivePilot(BasePilot):
         ki_bounds: (min, max) for integral gain (PID only).
         max_p_trace: If trace(P) exceeds this, reset to defaults.
         log_interval: Log adapted gains every N steps.
+
+    Operation:
+       steer from BasePilot is called.
+       features [0] heading error and [2] heading rate feed into the EKF provided heading error
+       is < 45 and rate < 15 deg/s.
+       update the piot with the hidden state in _x kp _x[0], kd _x[1] for a PD pilot and 
+       _x[0] kp, _x[1] ki, _x[2] kd for a PID pilot
+       then call the pilot with features.
+
+       Note, the pilot only requires heading error and heading rate features to 
+       return a commanded rudder angle.
+
     """
 
     name = "adaptive"
@@ -107,11 +119,11 @@ class AdaptivePilot(BasePilot):
     def _apply_gains(self) -> None:
         """Push current EKF gain estimates to the inner pilot."""
         if self._has_ki:
-            self.inner.configure(kp=float(self._x[0]),
-                                 ki=float(self._x[1]),
-                                 kd=float(self._x[2]))
+            self.inner.configure(kp=float(self._x[0]),  
+                                 ki=float(self._x[1]),  
+                                 kd=float(self._x[2]))  
         else:
-            self.inner.configure(kp=float(self._x[0]),
+            self.inner.configure(kp=float(self._x[0]),  
                                  kd=float(self._x[1]))
 
     def steer(self, features: np.ndarray) -> float:

@@ -429,5 +429,59 @@ heading.
   (f081ae02) and the two polled responses (6c1a, 6c23). The f088 traffic is likely for Raymarine's diagnostic software or
   inter-device calibration.
 
+----
 
+  Source: Raymarine iTC5 Converter (source address 199, model E70010, SW 1.12)                                            
+                                                                                                                          
+  The iTC5 is a Raymarine instrument transducer converter — it interfaces legacy Seatalk1 transducers (depth, speed, wind,
+   temperature) to the SeaTalkNG/NMEA2000 bus.                                                                            
+                                                            
+  PGN 130822 content:
+  - 26 bytes, always identical: 3b 9f 30 8f 68 00 repeated 6 times
+  - Starts with Raymarine manufacturer header (3B 9F)
+  - Followed by a 4-byte pattern 30 8f 68 00 repeated 6 times (6 slots)
+  - Broadcasts at ~0.7 Hz (roughly every 1.4 seconds)
+  - Every message is identical — no variation across 1,793 reassembled messages over ~41 minutes
+
+  Decoding the repeated 30 8f 68 00 pattern:
+  - The uint16 0x8F30 = 36656 → as radians×10000 = 210.0° — this is likely a Seatalk1 transducer calibration/offset value
+  - The uint16 0x0068 = 104 → possibly a status/config byte pair
+
+  This is a Raymarine proprietary transducer calibration/status broadcast from the iTC5. The 6 identical slots likely
+  correspond to the 6 transducer input channels on the iTC5 (depth, speed, wind speed, wind angle, temperature 1,
+  temperature 2). Since all 6 are the same constant value and never change, this is almost certainly calibration offsets
+  or factory defaults being broadcast, not live sensor data.
+
+  The iTC5 also sends the actual sensor data via standard PGNs — you can see it's the source for Wind Data (130306), Speed
+   (128259), Depth (128267), Temperature (130310/130312), and Distance Log (128275).
+
+  ---
+
+    PGN 130846 — Raymarine Proprietary Device Status/Config                                                                 
+                                                                                                                        ─ 
+  Who sends it:
+  - Source 3: Raymarine e7 MFD (model E62354, SW 19.03) — 178 messages, ~0.1 Hz                                           
+  - Source 199: Raymarine iTC5 Converter (model E70010, SW 1.12) — 3 messages (essentially one-off)
+
+  What it contains:
+
+  All messages are 12 bytes, starting with Raymarine header 3B 9F.
+
+  From the e7 (178 msgs, all identical):
+  3b 9f 13 03 12 cc 04 0c 67 00 ff ff
+
+  The e7 is the MFD/chartplotter. It sends XTE, Magnetic Variation, Datum, Seatalk Alarm, and Pilot Speed — all
+  navigation-related. This PGN 130846 message is a static configuration/status broadcast (constant payload, ~once every 14
+   seconds). Given the e7's role and the slow rate, this is likely a navigation configuration heartbeat — broadcasting
+  things like magnetic variation model, datum settings, or chartplotter route status to other Raymarine devices on the
+  bus.
+
+  From the iTC5 (3 msgs, only byte[4] varies: 0x33/0x34/0x35):
+  3b 9f 01 0c 3x 56 01 05 10 00 1f 05
+
+  The slight variation in byte 4 (incrementing by 1) suggests a sequence counter or timestamp tick in what is otherwise a
+  static device status message. The iTC5 only sent 3 of these across the entire capture — likely a startup/announcement
+  burst.
+
+---
 

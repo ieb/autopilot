@@ -8,9 +8,9 @@ Wants=sys-subsystem-net-devices-can0.device
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/usbdrive/autopilot
-ExecStart=/home/pi/usbdrive/autopilot/.venv/bin/python -m src.n2k.can_logger \
+User=ieb
+WorkingDirectory=/home/ieb/usbdrive/autopilot
+ExecStart=/home/ieb/usbdrive/autopilot/.venv/bin/python -m src.n2k.can_logger \
     --config /mnt/usbdrive/config/can_logger.json \
     --log-dir /mnt/usbdrive/logs/can \
     --web --web-port 8082
