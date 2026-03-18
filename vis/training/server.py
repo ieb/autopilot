@@ -38,11 +38,20 @@ def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
     """Sanitize a user-provided filename to prevent path traversal."""
     if not name or not name.strip():
         return None
-    base_path = os.path.abspath(str(base_dir))
-    full_path = os.path.normpath(os.path.join(base_path, name))
-    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
+    # Resolve the base directory and candidate path, then ensure the
+    # candidate is within the base directory.
+    base_path = Path(base_dir).resolve()
+    try:
+        target_path = (base_path / name).resolve()
+    except OSError:
+        # Invalid path (e.g., contains characters not allowed by filesystem)
         return None
-    return Path(full_path)
+    try:
+        # Raises ValueError if target_path is not inside base_path
+        target_path.relative_to(base_path)
+    except ValueError:
+        return None
+    return target_path
 
 
 @app.route('/')
