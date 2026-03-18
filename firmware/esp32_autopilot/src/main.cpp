@@ -22,6 +22,7 @@
 #include "pilot_manager.h"
 #include "seatalk.h"
 #include "web.h"
+#include "ble.h"
 
 static AppState state;
 
@@ -60,6 +61,8 @@ void setup() {
     web_init();
     Serial.printf("Web UI at http://%s/\n", WiFi.softAPIP().toString().c_str());
 
+    ble_init();
+
     digitalWrite(PIN_LED, HIGH);
     Serial.println("Ready.");
 }
@@ -70,9 +73,11 @@ void loop() {
     // NMEA2000 parse — every loop iteration
     n2k_update(state);
 
-    // Apply pending web and p70 commands
+    // Apply pending web, p70, and BLE commands
     web_apply_commands(state);
     seatalk_apply_commands(state);
+    ble_apply_commands(state);
+    ble_send_state(state);
 
     // IMU read at 20Hz
     if (now - last_imu_ms >= IMU_INTERVAL_MS) {

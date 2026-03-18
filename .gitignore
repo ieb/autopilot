@@ -12,3 +12,14 @@ mlruns/
 mlflow.db
 settings.local.json
 .mcp.json
+watch/build
+.idea
+.playwright-mcp/
+drawings/
+models/
+training*.txt
+validation*.txt
+watch/.gradle/
+watch/app/build/
+watch/gradle/
+
