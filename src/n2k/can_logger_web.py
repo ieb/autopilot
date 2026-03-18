@@ -22,17 +22,24 @@ logger = logging.getLogger(__name__)
 
 
 def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
-    """Prevent directory traversal attacks."""
+    """Prevent directory traversal attacks by enforcing containment within base_dir."""
     if not name or not name.strip():
         return None
 
-    base_path = os.path.abspath(str(base_dir))
-    full_path = os.path.normpath(os.path.join(base_path, name))
-
-    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
+    base_path = Path(base_dir).resolve()
+    try:
+        full_path = (base_path / name).resolve()
+    except (OSError, RuntimeError):
+        # Resolution failed (e.g., invalid path); treat as unsafe.
         return None
 
-    return Path(full_path)
+    try:
+        # Ensure full_path is inside base_path (or equal to it)
+        full_path.relative_to(base_path)
+    except ValueError:
+        return None
+
+    return full_path
 
 
 def create_app(can_logger: CANLogger, config_path: Optional[str] = None) -> Flask:
