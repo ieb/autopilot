@@ -24,6 +24,7 @@ sys.path.insert(0, str(project_root))
 
 from experiments.experiment1.grib_reader import GribReader
 from experiments.experiment1.route_parser import RouteParser
+from vis.safe_path import sanitize_path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,37 +38,6 @@ grib_reader: Optional[GribReader] = None
 routes_dir: Optional[Path] = None
 results_dir: Optional[Path] = None
 
-
-def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
-    """
-    Sanitize a user-provided filename to prevent path traversal attacks.
-    
-    Args:
-        base_dir: The allowed base directory
-        name: User-provided filename or directory name
-        
-    Returns:
-        Sanitized Path if valid, None if the path is unsafe
-    """
-    import os
-    
-    # Reject empty names
-    if not name or not name.strip():
-        return None
-    
-    # Get absolute base path
-    base_path = os.path.abspath(str(base_dir))
-    
-    # Normalize the full path to resolve any .. or . components
-    full_path = os.path.normpath(os.path.join(base_path, name))
-    
-    # Verify the normalized path is still under the base directory
-    # Must start with base_path + separator to prevent prefix attacks
-    # (e.g., /base/dir vs /base/dir_other)
-    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
-        return None
-    
-    return Path(full_path)
 
 
 def clear_cfgrib_cache() -> int:

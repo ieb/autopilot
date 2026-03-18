@@ -11,7 +11,7 @@ import pytest
 # Import the sanitize_path function
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from vis.gribs.server import sanitize_path
+from vis.safe_path import sanitize_path
 
 
 class TestSanitizePath:

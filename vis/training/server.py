@@ -20,6 +20,12 @@ from typing import Optional
 
 from flask import Flask, Response, jsonify, send_from_directory
 
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from vis.safe_path import sanitize_path
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,16 +39,6 @@ BIN_MAGIC = b'APFD'
 BIN_HEADER_SIZE = 16  # 4 magic + 4 version + 4 feature_dim + 4 reserved
 BIN_COLS = 23          # 22 features + 1 label
 
-
-def sanitize_path(base_dir: Path, name: str) -> Optional[Path]:
-    """Sanitize a user-provided filename to prevent path traversal."""
-    if not name or not name.strip():
-        return None
-    base_path = os.path.abspath(str(base_dir))
-    full_path = os.path.normpath(os.path.join(base_path, name))
-    if not full_path.startswith(base_path + os.sep) and full_path != base_path:
-        return None
-    return Path(full_path)
 
 
 @app.route('/')
