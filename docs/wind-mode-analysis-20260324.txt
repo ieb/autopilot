@@ -1,0 +1,74 @@
+We already have this from the analyze_p70_requests.py output. The full list of p70 PGN 126208 commands:                 
+                                                                                                                          
+  ┌───────────────────┬────────────┬────────────────────────┬───────┐                                                     
+  │     Function      │ Target PGN │          Name          │ Count │                                                     
+  ├───────────────────┼────────────┼────────────────────────┼───────┤                                                     
+  │ COMMAND (FC=0x01) │ 65345      │ Seatalk Wind Datum     │ 53    │
+  ├───────────────────┼────────────┼────────────────────────┼───────┤
+  │ COMMAND (FC=0x01) │ 65360      │ Seatalk Locked Heading │ 19    │                                                     
+  ├───────────────────┼────────────┼────────────────────────┼───────┤
+  │ COMMAND (FC=0x01) │ 65379      │ Seatalk Pilot Mode     │ 13    │                                                     
+  ├───────────────────┼────────────┼────────────────────────┼───────┤                                                     
+  │ COMMAND (FC=0x01) │ 126720     │ Raymarine Proprietary  │ 1     │
+  ├───────────────────┼────────────┼────────────────────────┼───────┤                                                     
+  │ REQUEST (FC=0x00) │ 126720     │ Raymarine Proprietary  │ 1,120 │
+  └───────────────────┴────────────┴────────────────────────┴───────┘                                                     
+                                                        
+  The wind mode distinction likely lives in the 65379 mode command submode bytes. From the output, the WIND variants were:
+   
+  ┌───────┬────────────┬───────────────┬────────────────────────────┐                                                     
+  │ Count │ Mode bytes │ Submode bytes │           Decode           │
+  ├───────┼────────────┼───────────────┼────────────────────────────┤
+  │ 3x    │ 00 01      │ 05 ff ff      │ WIND (submode unspecified) │
+  ├───────┼────────────┼───────────────┼────────────────────────────┤
+  │ 2x    │ 00 01      │ 05 04 00      │ WIND (submode 0x04)        │                                                     
+  ├───────┼────────────┼───────────────┼────────────────────────────┤                                                     
+  │ 2x    │ 00 01      │ 05 03 00      │ WIND (submode 0x03)        │                                                     
+  └───────┴────────────┴───────────────┴────────────────────────────┘                                                     
+                                                        
+  Submode 0x03 and 0x04 could be AWA vs TWA. The ff ff might mean "keep current submode."   
+
+
+
+   Excellent data. Here's what the analysis reveals:                                                                       
+                                                                                                                          
+  Findings                                                                                                                
+                                                                                                                          
+  Mode command structure                                                                                                  
+                                                                                                                          
+  All 65379 WIND mode commands share bytes[12:13] = 00 01. The submode is in bytes[15:16]:                                
+                                                                                                                          
+  ┌───────────────┬───────┬──────────────────────────────────────────┐                                                    
+  │ Submode bytes │ Count │                 Meaning                  │
+  ├───────────────┼───────┼──────────────────────────────────────────┤                                                    
+  │ ff ff         │ 3x    │ "Enter wind mode" / keep current submode │
+  ├───────────────┼───────┼──────────────────────────────────────────┤                                                    
+  │ 04 00         │ 2x    │ Switch to submode 0x04                   │                                                    
+  ├───────────────┼───────┼──────────────────────────────────────────┤                                                    
+  │ 03 00         │ 2x    │ Switch to submode 0x03                   │                                                    
+  └───────────────┴───────┴──────────────────────────────────────────┘                                                    
+                                                            
+  Key observations
+
+  1. All wind datum (65345) commands only follow ff ff submode entries — Wind Periods 1 and 2 start with ff ff, then the  
+  user adjusts the wind angle via datum commands. No datum commands appear in Period 3.
+  2. Submode 0x03 and 0x04 toggling happens in Period 3 — the user entered wind mode with ff ff, then toggled between 0x03
+   and 0x04 several times without sending any wind datum commands. This looks like the user pressing a button to switch   
+  between AWA and TWA display/mode on the p70.
+  3. No heading commands during wind mode — all 19 heading commands are during Auto (compass) mode only. This confirms    
+  wind mode uses PGN 65345 (wind datum) exclusively, not heading commands.                                                
+  4. AWA data is very noisy (boat at dock, no real wind) — so we can't distinguish AWA vs TWA from the actual wind
+  tracking behavior. But the submode toggle pattern is clear.                                                             
+                                                            
+  Likely interpretation                                                                                                   
+                                                            
+  - 0x03 = AWA (Apparent Wind Angle) — the default/more common wind mode                                                  
+  - 0x04 = TWA (True Wind Angle) — requires TWS/SOG computation
+  - 0xff = keep current — just enter wind mode without changing submode                                                   
+                                                            
+  This matches Raymarine's menu order (AWA is the primary wind mode, listed before TWA). The fact that both submodes use  
+  the same PGN 65345 for wind datum adjustments means our firmware handles both identically — the submode byte just tells
+  the EV-1/pilot which wind reference to track internally.
+
+  
+
